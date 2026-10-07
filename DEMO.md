@@ -11,9 +11,11 @@ The full 10–15 minute script (PLAN §19.5) needs M3+. What can be shown today:
    for the raw resolved rules. Shared names are badged “in 2 sources” (consolidation, M8).
 3. **Source warnings**: the 20k-ID `fraud_blocklist` and 2.5k `wholesale_partners` lists are deferred
    (fetched on demand when migrating big segments, M4).
-4. **LaunchDarkly & capabilities**: pick an instance (EU/Federal show the acknowledgement), paste a
-   token (memory only), choose a project. The capability probe runs read-only and fills the matrix;
-   the gates grid then shows whether each key exists in LD and its on/off state.
+4. **LaunchDarkly & capabilities**: paste a token (memory only). The demo targets the existing
+   `statsig-migration` project on the US instance, which is selected and probed automatically
+   (read-only) to fill the capability matrix. The gates grid then shows whether each key exists in
+   LD and its on/off state. That project has `test` and `production`, so only `production` matches
+   a StatSig tier until environment mapping lands (M3). EU/Federal show their acknowledgement.
 5. Spec-only path: *Add source → Upload config spec* with
    `packages/demo-fixtures/generated/acme-web/download_config_specs.v2.json`. Uploading the same
    file again is detected as a duplicate; `…snapshot-2.json` produces a diff.

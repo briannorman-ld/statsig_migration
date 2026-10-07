@@ -3,6 +3,7 @@ import { LD_INSTANCES, type CapabilityStatus, type LdInstanceId } from '@sslm/ld
 import type { WorkspaceRecord } from '@sslm/store';
 import { Badge, Button, Callout, Card, cx, Input, Label, Modal, Select, Spinner } from '../components/ui.tsx';
 import { chooseProject, connectLd, disconnectLd, reprobe, useLdSession } from '../lib/ld.ts';
+import { DEMO_LD_PROJECT } from '../lib/demo.ts';
 import { store } from '../lib/store.ts';
 
 const STATUS_TONE: Record<CapabilityStatus, 'green' | 'amber' | 'red' | 'slate' | 'violet'> = {
@@ -120,8 +121,8 @@ export function LdPanel({ workspaceId, workspace }: { workspaceId: string; works
           </div>
           {workspace.isDemo && (
             <Callout tone="blue">
-              Demo: pick an LD project you don’t mind the demo writing to later. Creating a fresh project tagged <code>statsig-migration-demo</code> is not enabled yet
-              (it writes to LD and needs your go-ahead).
+              Demo target: <code>{DEMO_LD_PROJECT.projectKey}</code>, an existing project. Later milestones write only resources tagged{' '}
+              <code>statsig-migrated</code> there, and “Reset demo” only ever removes those.
             </Callout>
           )}
           {ld.error && <Callout tone="red">{ld.error}</Callout>}

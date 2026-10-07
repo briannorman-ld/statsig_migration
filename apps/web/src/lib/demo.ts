@@ -9,6 +9,12 @@ import { store } from './store.ts';
 
 export const DEMO_WORKSPACE_ID = 'demo-acme-retail';
 export const DEMO_TAG = 'statsig-migration-demo';
+/**
+ * The LD project the demo targets: an existing project chosen by the user (not one the demo
+ * created). It is not tagged `statsig-migration-demo`, so PLAN §19.3 "Reset demo" must never
+ * delete anything in it beyond resources carrying our own provenance.
+ */
+export const DEMO_LD_PROJECT = { instance: 'us' as const, projectKey: 'statsig-migration' };
 
 let started: Promise<void> | undefined;
 let demoSnapshot = 1;
@@ -50,7 +56,8 @@ export async function demoKey(): Promise<string> {
 export async function ensureDemoWorkspace(): Promise<string> {
   const { demoStatsigBaseUrl } = await import('@sslm/demo-fixtures');
   const existing = await store.getWorkspace(DEMO_WORKSPACE_ID);
-  if (!existing) await store.createWorkspace({ id: DEMO_WORKSPACE_ID, name: 'Acme Retail (Demo)', isDemo: true });
+  if (!existing) await store.createWorkspace({ id: DEMO_WORKSPACE_ID, name: 'Acme Retail (Demo)', isDemo: true, ld: DEMO_LD_PROJECT });
+  else if (!existing.ld?.projectKey) await store.updateWorkspace(DEMO_WORKSPACE_ID, { ld: DEMO_LD_PROJECT });
   const have = new Set((await store.listSources(DEMO_WORKSPACE_ID)).map((s) => s.id));
   const sources: SourceDescriptor[] = (['web', 'mobile'] as const).map((alias, i) => ({
     id: `${DEMO_WORKSPACE_ID}-${alias}`,

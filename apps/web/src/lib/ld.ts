@@ -55,7 +55,12 @@ export async function connectLd(workspaceId: string, instance: LdInstanceId, tok
     secrets.set('ld', workspaceId, token);
     clients.set(workspaceId, c);
     set(workspaceId, { status: 'connected', identity, projects });
-    await store.updateWorkspace(workspaceId, { ld: { instance } });
+    // Keep the workspace's chosen project (e.g. the demo's) and probe it straight away.
+    const saved = (await store.getWorkspace(workspaceId))?.ld;
+    const keep = saved?.instance === instance && saved.projectKey && projects.some((p) => p.key === saved.projectKey) ? saved.projectKey : undefined;
+    await store.updateWorkspace(workspaceId, { ld: { instance, ...(keep ? { projectKey: keep } : {}) } });
+    if (keep) await chooseProject(workspaceId, keep);
+    else if (saved?.projectKey) set(workspaceId, { error: `Project "${saved.projectKey}" isn't visible to this token on ${instance}; choose another.` });
   } catch (e) {
     set(workspaceId, { status: 'error', error: e instanceof LdAuthError ? e.message : `Could not reach LaunchDarkly: ${(e as Error).message}` });
   }
