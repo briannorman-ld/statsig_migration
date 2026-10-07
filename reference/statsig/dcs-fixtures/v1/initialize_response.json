@@ -1,0 +1,148 @@
+{
+  "feature_gates": {
+    "1389118615": {
+      "name": "1389118615",
+      "value": true,
+      "rule_id": "2DWuOvXQZWKvoaNm27dqcs",
+      "secondary_exposures": [],
+      "id_type": "userID"
+    },
+    "1747439400": {
+      "name": "1747439400",
+      "value": false,
+      "rule_id": "",
+      "secondary_exposures": [],
+      "id_type": "userID"
+    },
+    "1801014148": {
+      "name": "1801014148",
+      "value": true,
+      "rule_id": "3jdTW54SQWbbxFFZJe7wYZ",
+      "secondary_exposures": [],
+      "id_type": "userID"
+    },
+    "2172880123": {
+      "name": "2172880123",
+      "value": true,
+      "rule_id": "2DWuOvXQZWKvoaNm27dqcs",
+      "secondary_exposures": [],
+      "id_type": "userID"
+    }
+  },
+  "dynamic_configs": {
+    "3556498": {
+      "name": "3556498",
+      "value": {},
+      "group": "prestart",
+      "rule_id": "prestart",
+      "is_device_based": false,
+      "secondary_exposures": [],
+      "id_type": "userID",
+      "is_user_in_experiment": false,
+      "is_experiment_active": false
+    },
+    "195944244": {
+      "name": "195944244",
+      "value": {},
+      "group": "prestart",
+      "rule_id": "prestart",
+      "is_device_based": false,
+      "secondary_exposures": [],
+      "id_type": "userID"
+    },
+    "511441633": {
+      "name": "511441633",
+      "value": {},
+      "group": "",
+      "rule_id": "",
+      "is_device_based": false,
+      "secondary_exposures": [],
+      "id_type": null,
+      "is_user_in_experiment": false,
+      "is_experiment_active": false
+    },
+    "2888658354": {
+      "name": "2888658354",
+      "value": {
+        "sample_parameter": false
+      },
+      "group": "5yQbPMfmKQdiRV35hS3B2l",
+      "rule_id": "5yQbPMfmKQdiRV35hS3B2l",
+      "is_device_based": false,
+      "secondary_exposures": [],
+      "group_name": "Control",
+      "id_type": "userID",
+      "is_user_in_experiment": true,
+      "is_experiment_active": true
+    },
+    "3591394191": {
+      "name": "3591394191",
+      "value": {
+        "number": 7,
+        "string": "statsig",
+        "boolean": false
+      },
+      "passed": true,
+      "group": "4lInPNRUnjUzaWNkEWLFA9",
+      "rule_id": "4lInPNRUnjUzaWNkEWLFA9",
+      "is_device_based": false,
+      "secondary_exposures": [],
+      "id_type": "userID"
+    }
+  },
+  "layer_configs": {
+    "694636833": {
+      "name": "694636833",
+      "value": {},
+      "group": "default",
+      "rule_id": "default",
+      "is_device_based": false,
+      "secondary_exposures": [],
+      "explicit_parameters": [],
+      "undelegated_secondary_exposures": []
+    },
+    "1015384917": {
+      "name": "1015384917",
+      "value": {},
+      "group": "",
+      "rule_id": "",
+      "is_device_based": false,
+      "secondary_exposures": [],
+      "explicit_parameters": [],
+      "allocated_experiment_name": "511441633",
+      "is_experiment_active": false,
+      "is_user_in_experiment": false,
+      "undelegated_secondary_exposures": []
+    },
+    "2829289959": {
+      "name": "2829289959",
+      "value": {
+        "sample_parameter": false
+      },
+      "group": "5yQbPMfmKQdiRV35hS3B2l",
+      "rule_id": "5yQbPMfmKQdiRV35hS3B2l",
+      "is_device_based": false,
+      "secondary_exposures": [],
+      "group_name": "Control",
+      "explicit_parameters": [],
+      "allocated_experiment_name": "2888658354",
+      "is_experiment_active": true,
+      "is_user_in_experiment": true,
+      "undelegated_secondary_exposures": []
+    }
+  },
+  "sdkParams": {},
+  "has_updates": true,
+  "generator": "statsig-node-sdk",
+  "sdkInfo": {
+    "sdkType": "statsig-node"
+  },
+  "evaluated_keys": {
+    "userID": "123"
+  },
+  "hash_used": "djb2",
+  "user": {
+    "userID": "123",
+    "email": "testuser@statsig.com"
+  }
+}

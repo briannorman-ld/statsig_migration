@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.vite/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Reference repos are re-clonable via reference/fetch-repos.sh
+reference/repos/
+
+# Never commit real exports or tokens
+*.sslm
+real-specs/
+!packages/demo-fixtures/**/*.sslm

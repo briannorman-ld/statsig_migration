@@ -1,0 +1,26 @@
+# StatSig → LaunchDarkly Migration Console
+
+`PLAN.md` is the spec: read the sections relevant to your task before changing anything. Research inputs (API specs, real StatSig config-spec fixtures, prior-art repos) are in `reference/`; see `reference/README.md`.
+
+## Constraints that must not change without asking the user
+- **Browser-only.** A static Vite SPA with no backend, no accounts and no server-side storage. State lives in IndexedDB plus provenance written into the user's own LD project (PLAN §3.3). The only allowed server piece is a stateless StatSig relay, and only if M0 spike #1 shows StatSig blocks browsers.
+- **One-way:** StatSig → LD only. Never write to StatSig.
+- **Mirror StatSig, but sync only when the user triggers it.** Monitoring is read-only.
+- **Migration is scoped per environment.** State is per (resource, LD environment).
+- **Every imperfect mapping becomes a Decision** (PLAN §8). Never silently drop or approximate a condition.
+- Two source types feed one canonical model: the Console API (read-only key) and an uploaded config spec (DCS v1/v2).
+- Experiments end in StatSig and launch new in LD; nothing is moved mid-flight.
+- A workspace is 1 LD project plus N StatSig sources (consolidation). Keep N-source support in the data model.
+- Tokens stay in memory by default and are never logged, persisted unencrypted, or put in workspace files. CSP `connect-src` is limited to the StatSig and LD API hosts.
+
+## Engineering conventions
+- TypeScript everywhere. Domain logic goes in framework-free `packages/*`, so it runs in Web Workers and in Vitest.
+- The mapper is **pure and deterministic**: `map(canonical, profile, resolutions, capabilities, env) → {desired, fidelity, unresolved}`. Test it with golden files.
+- Validate every external API response with lenient Zod schemas (unknown fields allowed), because neither prior tool was tested against real StatSig responses. Log schema mismatches; don't crash.
+- Use field names from `reference/statsig/console-api-openapi-20240601.json` and `reference/launchdarkly/openapi.json`, not from memory.
+- Known mapping pitfalls (PLAN §10.3):
+  - `version_gte` → `semVerLessThan` + negate.
+  - `any` is case-insensitive in StatSig, so it needs a decision.
+  - `environment_tier` is resolved statically per environment.
+  - Custom unit IDs map to their own context kind, not `user`.
+- The demo (PLAN §19) uses MSW in front of the real adapters. Its dataset in `packages/demo-fixtures` is also the main test fixture.
