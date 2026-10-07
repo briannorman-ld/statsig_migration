@@ -1,0 +1,8 @@
+# Generated demo fixtures (pnpm fixtures:generate). Collapsed in GitHub diffs and shown as
+# binary in `git diff`, so reviews focus on the seed in packages/demo-fixtures/src instead.
+# test/fixtures-fresh.test.ts fails if these drift from the seed.
+packages/demo-fixtures/data/** linguist-generated=true -diff
+packages/demo-fixtures/generated/** linguist-generated=true -diff
+
+# Lockfile: generated, still diffable.
+pnpm-lock.yaml linguist-generated=true

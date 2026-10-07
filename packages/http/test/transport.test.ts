@@ -1,0 +1,124 @@
+import { describe, expect, it } from 'vitest';
+import { AimdLimiter, HttpError, ManualClock, RateBudget, Transport, UnreachableError, type TransportEvent } from '../src/index.ts';
+
+function jsonResponse(status: number, body: unknown = {}): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+/** Instant sleeps so retry tests don't wait; records requested delays. */
+function instantClock() {
+  const delays: number[] = [];
+  let t = 0;
+  return {
+    delays,
+    clock: { now: () => t, sleep: async (ms: number) => { delays.push(ms); t += ms; } },
+  };
+}
+
+describe('AimdLimiter', () => {
+  it('halves on throttle and grows back additively', () => {
+    const l = new AimdLimiter({ initial: 4, min: 1, max: 6, successesPerIncrease: 2 });
+    l.onThrottle();
+    expect(l.limit).toBe(2);
+    l.onThrottle();
+    l.onThrottle();
+    expect(l.limit).toBe(1);
+    l.onSuccess();
+    l.onSuccess();
+    expect(l.limit).toBe(2);
+    for (let i = 0; i < 20; i++) l.onSuccess();
+    expect(l.limit).toBe(6);
+  });
+
+  it('never runs more than `limit` concurrently', async () => {
+    const l = new AimdLimiter({ initial: 2, min: 1, max: 2, successesPerIncrease: 100 });
+    let active = 0;
+    let peak = 0;
+    const task = async () => {
+      const release = await l.acquire();
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((r) => setTimeout(r, 2));
+      active--;
+      release();
+    };
+    await Promise.all(Array.from({ length: 10 }, task));
+    expect(peak).toBe(2);
+  });
+});
+
+describe('RateBudget', () => {
+  it('delays requests that would exceed a window', async () => {
+    const clock = new ManualClock(0);
+    const budget = new RateBudget([{ limit: 3, windowMs: 1000 }], clock);
+    const started: number[] = [];
+    const all = Promise.all(Array.from({ length: 5 }, () => budget.take().then(() => started.push(clock.now()))));
+    await clock.runAll();
+    await all;
+    expect(started.slice(0, 3)).toEqual([0, 0, 0]);
+    expect(started[3]).toBeGreaterThanOrEqual(1000);
+    expect(started[4]).toBeGreaterThanOrEqual(1000);
+  });
+});
+
+describe('Transport', () => {
+  it('retries 429 with jittered exponential backoff and shrinks concurrency', async () => {
+    const { clock, delays } = instantClock();
+    const statuses = [429, 429, 200];
+    const events: TransportEvent[] = [];
+    const t = new Transport({
+      clock,
+      random: () => 1,
+      limiter: { initial: 4 },
+      retry: { baseDelayMs: 100 },
+      fetch: async () => jsonResponse(statuses.shift()!, { ok: true }),
+      onEvent: (e) => events.push(e),
+    });
+    const res = await t.request({ method: 'GET', url: 'https://x.test/a' });
+    expect(res.status).toBe(200);
+    expect(res.attempts).toBe(3);
+    expect(delays).toEqual([100, 200]);
+    expect(t.limiter.limit).toBe(1);
+    expect(events.filter((e) => e.type === 'throttled')).toHaveLength(2);
+  });
+
+  it('does not retry non-retryable 4xx', async () => {
+    let calls = 0;
+    const t = new Transport({ clock: instantClock().clock, fetch: async () => (calls++, jsonResponse(404, { message: 'nope' })) });
+    await expect(t.request({ method: 'GET', url: 'https://x.test/a' })).rejects.toBeInstanceOf(HttpError);
+    expect(calls).toBe(1);
+  });
+
+  it('treats opaque failures (CORS-blocked errors) as possible throttling, then gives up', async () => {
+    const { clock, delays } = instantClock();
+    let calls = 0;
+    const t = new Transport({
+      clock,
+      retry: { maxAttempts: 4, baseDelayMs: 10 },
+      fetch: async () => {
+        calls++;
+        throw new TypeError('Failed to fetch');
+      },
+    });
+    const err = await t.request({ method: 'GET', url: 'https://x.test/a?k=v' }).catch((e) => e);
+    expect(err).toBeInstanceOf(UnreachableError);
+    expect(err.message).not.toContain('k=v');
+    expect(calls).toBe(4);
+    expect(delays).toHaveLength(3);
+    expect(t.stats.opaqueFailures).toBe(4);
+  });
+
+  it('never puts headers in events', async () => {
+    const events: TransportEvent[] = [];
+    const t = new Transport({ clock: instantClock().clock, fetch: async () => jsonResponse(200), onEvent: (e) => events.push(e) });
+    await t.request({ method: 'GET', url: 'https://x.test/a', headers: { Authorization: 'secret-token' } });
+    expect(JSON.stringify(events)).not.toContain('secret-token');
+  });
+
+  it('parses empty and non-JSON bodies leniently', async () => {
+    const t = new Transport({ clock: instantClock().clock, fetch: async () => new Response(null, { status: 204 }) });
+    expect((await t.request({ method: 'GET', url: 'https://x.test/a' })).body).toBeNull();
+    const t2 = new Transport({ clock: instantClock().clock, fetch: async () => new Response('hello', { status: 200 }) });
+    expect((await t2.request({ method: 'GET', url: 'https://x.test/a' })).body).toBe('hello');
+  });
+});

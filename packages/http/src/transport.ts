@@ -1,0 +1,231 @@
+import { realClock, type Clock } from './clock.ts';
+import { AimdLimiter, RateBudget, type AimdOptions, type RateWindow } from './limiter.ts';
+
+export interface RetryPolicy {
+  /** Total attempts including the first. */
+  maxAttempts: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  /** HTTP statuses that are retried with backoff (429 always also shrinks the AIMD window). */
+  retryStatuses: number[];
+  /**
+   * Whether a fetch that throws (no readable status) is retried. In the browser, StatSig error
+   * responses carry no CORS header (PLAN §3.1), so a 401 or 429 surfaces as a TypeError. We treat
+   * it as possibly rate-limited: shrink the window and back off.
+   */
+  retryOpaqueFailures: boolean;
+}
+
+export const DEFAULT_RETRY: RetryPolicy = {
+  maxAttempts: 5,
+  baseDelayMs: 500,
+  maxDelayMs: 20_000,
+  retryStatuses: [429, 500, 502, 503, 504],
+  retryOpaqueFailures: true,
+};
+
+export interface TransportRequest {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  url: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  signal?: AbortSignal;
+}
+
+export interface TransportResponse {
+  status: number;
+  ok: boolean;
+  body: unknown;
+  /** Elapsed wall time for the successful attempt, ms. */
+  elapsedMs: number;
+  attempts: number;
+}
+
+/**
+ * Events for UI progress and diagnostics. They deliberately carry no headers or bodies: tokens
+ * must never reach a log (CLAUDE.md). URLs are included; our URLs never contain secrets.
+ */
+export type TransportEvent =
+  | { type: 'request'; method: string; url: string; attempt: number }
+  | { type: 'response'; method: string; url: string; status: number; elapsedMs: number }
+  | { type: 'retry'; method: string; url: string; attempt: number; delayMs: number; reason: string }
+  | { type: 'throttled'; url: string; newLimit: number }
+  | { type: 'gave-up'; method: string; url: string; attempts: number; reason: string };
+
+export interface TransportOptions {
+  fetch?: typeof fetch;
+  clock?: Clock;
+  random?: () => number;
+  limiter?: AimdLimiter | Partial<AimdOptions>;
+  budgets?: RateWindow[];
+  retry?: Partial<RetryPolicy>;
+  timeoutMs?: number;
+  onEvent?: (e: TransportEvent) => void;
+}
+
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: unknown,
+    readonly url: string,
+  ) {
+    super(`HTTP ${status} for ${redactUrl(url)}`);
+    this.name = 'HttpError';
+  }
+}
+
+/** The request failed without a readable status (CORS-blocked error, DNS, offline, timeout). */
+export class UnreachableError extends Error {
+  constructor(
+    readonly url: string,
+    readonly attempts: number,
+    readonly lastCause: string,
+  ) {
+    super(`Unreachable after ${attempts} attempts: ${redactUrl(url)} (${lastCause})`);
+    this.name = 'UnreachableError';
+  }
+}
+
+export class Transport {
+  readonly limiter: AimdLimiter;
+  readonly budget: RateBudget | null;
+  private readonly fetchFn: typeof fetch;
+  private readonly clock: Clock;
+  private readonly random: () => number;
+  private readonly retry: RetryPolicy;
+  private readonly timeoutMs: number;
+  private readonly onEvent: (e: TransportEvent) => void;
+  /** Observed throughput for duration estimates (PLAN §5.1). */
+  readonly stats = { requests: 0, throttles: 0, opaqueFailures: 0, totalElapsedMs: 0 };
+
+  constructor(opts: TransportOptions = {}) {
+    // Bind so `this` is the global object; a bare `fetch` reference fails in some browsers.
+    const f = opts.fetch ?? globalThis.fetch;
+    this.fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => f(input, init)) as typeof fetch;
+    this.clock = opts.clock ?? realClock;
+    this.random = opts.random ?? Math.random;
+    this.limiter = opts.limiter instanceof AimdLimiter ? opts.limiter : new AimdLimiter(opts.limiter);
+    this.budget = opts.budgets?.length ? new RateBudget(opts.budgets, this.clock) : null;
+    this.retry = { ...DEFAULT_RETRY, ...opts.retry };
+    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.onEvent = opts.onEvent ?? (() => undefined);
+  }
+
+  async request(req: TransportRequest): Promise<TransportResponse> {
+    let lastCause = 'unknown';
+    for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt++) {
+      if (this.budget) await this.budget.take(req.signal);
+      const release = await this.limiter.acquire();
+      const started = this.clock.now();
+      let outcome: Outcome;
+      try {
+        this.onEvent({ type: 'request', method: req.method, url: req.url, attempt });
+        outcome = await this.once(req);
+      } finally {
+        release();
+      }
+      const elapsedMs = this.clock.now() - started;
+
+      if (outcome.kind === 'response') {
+        const { status, body } = outcome;
+        this.stats.requests++;
+        this.stats.totalElapsedMs += elapsedMs;
+        this.onEvent({ type: 'response', method: req.method, url: req.url, status, elapsedMs });
+        if (status >= 200 && status < 300) {
+          this.limiter.onSuccess();
+          return { status, ok: true, body, elapsedMs, attempts: attempt };
+        }
+        if (status === 429) {
+          this.stats.throttles++;
+          this.limiter.onThrottle();
+          this.onEvent({ type: 'throttled', url: req.url, newLimit: this.limiter.limit });
+        }
+        if (!this.retry.retryStatuses.includes(status) || attempt === this.retry.maxAttempts) {
+          if (attempt > 1 && this.retry.retryStatuses.includes(status)) {
+            this.onEvent({ type: 'gave-up', method: req.method, url: req.url, attempts: attempt, reason: `HTTP ${status}` });
+          }
+          throw new HttpError(status, body, req.url);
+        }
+        lastCause = `HTTP ${status}`;
+      } else {
+        if (outcome.aborted) throw outcome.error;
+        this.stats.opaqueFailures++;
+        lastCause = outcome.reason;
+        if (!this.retry.retryOpaqueFailures) throw new UnreachableError(req.url, attempt, lastCause);
+        // No status to read: assume we may have been throttled.
+        this.limiter.onThrottle();
+        this.onEvent({ type: 'throttled', url: req.url, newLimit: this.limiter.limit });
+        if (attempt === this.retry.maxAttempts) break;
+      }
+
+      const delayMs = this.backoff(attempt);
+      this.onEvent({ type: 'retry', method: req.method, url: req.url, attempt, delayMs, reason: lastCause });
+      await this.clock.sleep(delayMs, req.signal);
+    }
+    this.onEvent({ type: 'gave-up', method: req.method, url: req.url, attempts: this.retry.maxAttempts, reason: lastCause });
+    throw new UnreachableError(req.url, this.retry.maxAttempts, lastCause);
+  }
+
+  /** Average observed latency per request, for duration estimates. */
+  get avgLatencyMs(): number {
+    return this.stats.requests ? this.stats.totalElapsedMs / this.stats.requests : 0;
+  }
+
+  /** Exponential backoff with full jitter. */
+  private backoff(attempt: number): number {
+    const cap = Math.min(this.retry.maxDelayMs, this.retry.baseDelayMs * 2 ** (attempt - 1));
+    return Math.round(cap / 2 + (this.random() * cap) / 2);
+  }
+
+  private async once(req: TransportRequest): Promise<Outcome> {
+    const ctrl = new AbortController();
+    const onOuterAbort = () => ctrl.abort(req.signal?.reason);
+    req.signal?.addEventListener('abort', onOuterAbort, { once: true });
+    const timer = setTimeout(() => ctrl.abort(new DOMException('Timeout', 'TimeoutError')), this.timeoutMs);
+    try {
+      const headers: Record<string, string> = { Accept: 'application/json', ...req.headers };
+      let body: string | undefined;
+      if (req.body !== undefined) {
+        body = JSON.stringify(req.body);
+        headers['Content-Type'] ??= 'application/json';
+      }
+      const res = await this.fetchFn(req.url, { method: req.method, headers, body, signal: ctrl.signal });
+      const text = await res.text();
+      let parsed: unknown = text;
+      if (text.length > 0) {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = text;
+        }
+      } else {
+        parsed = null;
+      }
+      return { kind: 'response', status: res.status, body: parsed };
+    } catch (error) {
+      if (req.signal?.aborted) return { kind: 'failure', aborted: true, error, reason: 'aborted' };
+      const reason =
+        error instanceof DOMException && error.name === 'TimeoutError'
+          ? 'timeout'
+          : ctrl.signal.aborted
+            ? 'timeout'
+            : error instanceof TypeError
+              ? 'network error (no readable status; possibly CORS-blocked 401/429)'
+              : String((error as Error)?.message ?? error);
+      return { kind: 'failure', aborted: false, error, reason };
+    } finally {
+      clearTimeout(timer);
+      req.signal?.removeEventListener('abort', onOuterAbort);
+    }
+  }
+}
+
+type Outcome =
+  | { kind: 'response'; status: number; body: unknown }
+  | { kind: 'failure'; aborted: boolean; error: unknown; reason: string };
+
+/** Strip query strings from URLs in messages; defensive, as none of ours carry secrets. */
+export function redactUrl(url: string): string {
+  const i = url.indexOf('?');
+  return i === -1 ? url : url.slice(0, i) + '?…';
+}

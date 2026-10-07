@@ -1,0 +1,9 @@
+{
+  "name": "@sslm/mapper",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pure, deterministic canonical -> LD mapper (M3).",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {"@sslm/canonical": "workspace:*"}
+}

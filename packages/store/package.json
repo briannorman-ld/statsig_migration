@@ -1,0 +1,17 @@
+{
+  "name": "@sslm/store",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dexie/IndexedDB workspace store. Never stores tokens.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@sslm/canonical": "workspace:*",
+    "dexie": "^4.4.6"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
+  }
+}

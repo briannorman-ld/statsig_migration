@@ -1,0 +1,15 @@
+{
+  "name": "@sslm/demo-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Acme Retail demo dataset (PLAN §19): Console API response fixtures, generated config specs, MSW handlers.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./data/acme-retail.json": "./data/acme-retail.json"
+  },
+  "scripts": {
+    "generate": "node --experimental-strip-types scripts/generate.ts"
+  },
+  "dependencies": {"@sslm/canonical": "workspace:*", "msw": "^3.0.2"}
+}

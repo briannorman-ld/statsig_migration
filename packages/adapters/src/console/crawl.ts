@@ -1,0 +1,205 @@
+import {
+  AutotuneSchema,
+  CompanySchema,
+  DynamicConfigSchema,
+  EnvironmentsSchema,
+  ExperimentSchema,
+  GateSchema,
+  HoldoutSchema,
+  LayerSchema,
+  MetricSchema,
+  MetricSourceSchema,
+  OverridesSchema,
+  ParamStoreSchema,
+  SegmentSchema,
+  StatsigAuthError,
+  StatsigUnreachableError,
+  TagSchema,
+  TargetAppSchema,
+  TeamSchema,
+  UnitIdTypeSchema,
+  UserSchema,
+  type SchemaIssue,
+  type StatsigAutotune,
+  type StatsigCompany,
+  type StatsigConsoleClient,
+  type StatsigDynamicConfig,
+  type StatsigEnvironments,
+  type StatsigExperiment,
+  type StatsigGate,
+  type StatsigHoldout,
+  type StatsigIdList,
+  type StatsigLayer,
+  type StatsigMetric,
+  type StatsigMetricSource,
+  type StatsigOverrides,
+  type StatsigParamStore,
+  type StatsigProject,
+  type StatsigSegment,
+  type StatsigTag,
+  type StatsigTargetApp,
+  type StatsigTeam,
+  type StatsigUnitIdType,
+  type StatsigUser,
+} from '@sslm/statsig-client';
+import { HttpError } from '@sslm/http';
+
+/** Everything fetched from one Console API project, as returned (after lenient validation). */
+export interface RawConsoleSnapshot {
+  kind: 'console_api';
+  fetchedAt: string;
+  project: StatsigProject;
+  company: StatsigCompany | null;
+  environments: StatsigEnvironments | null;
+  gates: StatsigGate[];
+  dynamicConfigs: StatsigDynamicConfig[];
+  segments: StatsigSegment[];
+  /** Fetched ID-list contents, by segment ID. Lists above the eager limit are absent. */
+  idLists: Record<string, StatsigIdList>;
+  experiments: StatsigExperiment[];
+  layers: StatsigLayer[];
+  holdouts: StatsigHoldout[];
+  autotunes: StatsigAutotune[];
+  unitIdTypes: StatsigUnitIdType[];
+  tags: StatsigTag[];
+  targetApps: StatsigTargetApp[];
+  metrics: StatsigMetric[];
+  metricSources: StatsigMetricSource[];
+  paramStores: StatsigParamStore[];
+  users: StatsigUser[];
+  teams: StatsigTeam[];
+  overrides: StatsigOverrides | null;
+  schemaIssues: SchemaIssue[];
+  /** Endpoints that failed without failing the crawl (missing plan feature, 403 scope, …). */
+  skipped: { endpoint: string; reason: string }[];
+}
+
+export interface CrawlProgress {
+  done: number;
+  total: number;
+  endpoint: string;
+}
+
+export interface CrawlOptions {
+  signal?: AbortSignal;
+  onProgress?: (p: CrawlProgress) => void;
+  /**
+   * ID lists up to this many IDs are fetched during the crawl. Larger lists (e.g. a 20k fraud
+   * blocklist) are fetched on demand later, when a big-segment migration needs them (M4).
+   */
+  eagerIdListMax?: number;
+}
+
+export class CrawlAuthError extends Error {
+  constructor(message: string, override readonly cause: unknown) {
+    super(message);
+    this.name = 'CrawlAuthError';
+  }
+}
+
+/**
+ * Full first sync of a Console API project (PLAN §4.1). Incremental refresh via
+ * version/lastModifiedTime and /audit_logs is not implemented yet: a refresh re-crawls.
+ */
+export async function crawlConsoleProject(
+  client: StatsigConsoleClient,
+  schemaIssues: SchemaIssue[],
+  opts: CrawlOptions = {},
+): Promise<RawConsoleSnapshot> {
+  const { signal } = opts;
+  const skipped: RawConsoleSnapshot['skipped'] = [];
+  let done = 0;
+  let total = 1;
+  const tick = (endpoint: string) => opts.onProgress?.({ done: ++done, total, endpoint });
+
+  // 1. Validate the key with a single request before anything else.
+  let project: StatsigProject;
+  try {
+    project = await client.validateKey(signal);
+    tick('/project');
+  } catch (e) {
+    if (e instanceof StatsigAuthError || e instanceof StatsigUnreachableError) throw new CrawlAuthError(e.message, e);
+    throw e;
+  }
+
+  // Optional endpoints: a failure becomes a warning, not a failed crawl.
+  const optional = async <T>(endpoint: string, fallback: T, run: () => Promise<T>): Promise<T> => {
+    try {
+      const out = await run();
+      tick(endpoint);
+      return out;
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      skipped.push({ endpoint, reason: describe(e) });
+      tick(endpoint);
+      return fallback;
+    }
+  };
+
+  const jobs = {
+    company: () => optional('/company', null, () => client.get('/company', CompanySchema, {}, signal)),
+    environments: () => optional('/environments', null, () => client.get('/environments', EnvironmentsSchema, {}, signal)),
+    gates: () => optional('/gates', [], () => client.list('/gates', GateSchema, { includeArchived: 'true' }, signal)),
+    dynamicConfigs: () => optional('/dynamic_configs', [], () => client.list('/dynamic_configs', DynamicConfigSchema, {}, signal)),
+    segments: () => optional('/segments', [], () => client.list('/segments', SegmentSchema, {}, signal)),
+    experiments: () => optional('/experiments', [], () => client.list('/experiments', ExperimentSchema, {}, signal)),
+    layers: () => optional('/layers', [], () => client.list('/layers', LayerSchema, {}, signal)),
+    holdouts: () => optional('/holdouts', [], () => client.list('/holdouts', HoldoutSchema, {}, signal)),
+    autotunes: () => optional('/autotunes', [], () => client.list('/autotunes', AutotuneSchema, {}, signal)),
+    unitIdTypes: () => optional('/unit_id_types', [], () => client.list('/unit_id_types', UnitIdTypeSchema, {}, signal)),
+    tags: () => optional('/tags', [], () => client.list('/tags', TagSchema, {}, signal)),
+    targetApps: () => optional('/target_app', [], () => client.list('/target_app', TargetAppSchema, {}, signal)),
+    metrics: () => optional('/metrics/list', [], () => client.list('/metrics/list', MetricSchema, {}, signal)),
+    paramStores: () => optional('/param_stores', [], () => client.list('/param_stores', ParamStoreSchema, {}, signal)),
+    users: () => optional('/users', [], () => client.list('/users', UserSchema, {}, signal)),
+    teams: () => optional('/users/teams', [], () => client.list('/users/teams', TeamSchema, {}, signal)),
+    overrides: () => optional('/overrides', null, () => client.get('/overrides', OverridesSchema, {}, signal)),
+  } as const;
+  total += Object.keys(jobs).length;
+
+  // The transport's AIMD limiter and rate budget pace these; firing them together is fine.
+  const entries = await Promise.all(Object.entries(jobs).map(async ([k, run]) => [k, await run()] as const));
+  const r = Object.fromEntries(entries) as { [K in keyof typeof jobs]: Awaited<ReturnType<(typeof jobs)[K]>> };
+
+  // 2. Warehouse Native projects also have metric sources (PLAN §4.1 "Detecting Warehouse Native").
+  let metricSources: StatsigMetricSource[] = [];
+  if (r.company?.isWarehouseNative) {
+    total++;
+    metricSources = await optional('/metrics/metric_source/list', [], () => client.list('/metrics/metric_source/list', MetricSourceSchema, {}, signal));
+  }
+
+  // 3. Small ID lists.
+  const eagerMax = opts.eagerIdListMax ?? 1000;
+  const idLists: Record<string, StatsigIdList> = {};
+  const lists = r.segments.filter((s) => s.type === 'id_list' && (s.count ?? 0) <= eagerMax);
+  total += lists.length;
+  await Promise.all(
+    lists.map(async (s) => {
+      const list = await optional(`/segments/${s.id}/id_list`, null, () => client.getIdList(s.id, signal));
+      if (list) idLists[s.id] = list;
+    }),
+  );
+  for (const s of r.segments) {
+    if (s.type === 'id_list' && (s.count ?? 0) > eagerMax) {
+      skipped.push({ endpoint: `/segments/${s.id}/id_list`, reason: `deferred: ${s.count} IDs exceeds the eager limit of ${eagerMax}` });
+    }
+  }
+
+  return {
+    kind: 'console_api',
+    fetchedAt: new Date().toISOString(),
+    project,
+    ...r,
+    metricSources,
+    idLists,
+    schemaIssues,
+    skipped,
+  };
+}
+
+function describe(e: unknown): string {
+  if (e instanceof HttpError) return `HTTP ${e.status}`;
+  if (e instanceof StatsigAuthError) return e.message;
+  if (e instanceof StatsigUnreachableError) return e.message;
+  return e instanceof Error ? e.message : String(e);
+}
