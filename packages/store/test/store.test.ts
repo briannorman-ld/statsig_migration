@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { emptySnapshot } from '@sslm/canonical';
-import { assertNoSecrets, MigratorDb, SecretInStoreError, WorkspaceStore } from '../src/index.ts';
+import { assertNoSecrets, DuplicateWorkspaceNameError, MigratorDb, SecretInStoreError, WorkspaceStore } from '../src/index.ts';
 
 const store = () => new WorkspaceStore(new MigratorDb(`test-${crypto.randomUUID()}`));
 let n = 0;
@@ -22,6 +22,17 @@ describe('WorkspaceStore (Dexie / IndexedDB)', () => {
     expect((await s.latestSnapshot('web'))?.id).toBe(r2.id);
     expect((await s.listSnapshots('web')).map((x) => x.takenAt)).toEqual(['2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z']);
     expect(await s.latestSnapshot('mobile')).toBeUndefined();
+  });
+
+  it('refuses a second workspace with the same name, ignoring case and surrounding spaces', async () => {
+    const s = store();
+    const a = await s.createWorkspace({ name: '  Contoso migration ' });
+    expect(a.name).toBe('Contoso migration');
+    await expect(s.createWorkspace({ name: 'contoso MIGRATION' })).rejects.toBeInstanceOf(DuplicateWorkspaceNameError);
+    const b = await s.createWorkspace({ name: 'Contoso staging' });
+    await expect(s.updateWorkspace(b.id, { name: 'Contoso Migration' })).rejects.toBeInstanceOf(DuplicateWorkspaceNameError);
+    await s.updateWorkspace(b.id, { name: 'Contoso staging' }); // renaming to your own name is fine
+    expect((await s.listWorkspaces()).map((w) => w.name).sort()).toEqual(['Contoso migration', 'Contoso staging']);
   });
 
   it('cascades deletes', async () => {

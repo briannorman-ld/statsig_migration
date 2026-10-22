@@ -204,6 +204,22 @@
   input[type='radio'] {
     accent-color: var(--app-accent);
   }
+  button,
+  [role='button'],
+  select,
+  summary,
+  input[type='checkbox'],
+  input[type='radio'],
+  input[type='file'],
+  label:has(> input[type='checkbox']),
+  label:has(> input[type='radio']) {
+    cursor: pointer;
+  }
+  button:disabled,
+  select:disabled,
+  input:disabled {
+    cursor: not-allowed;
+  }
   code,
   kbd,
   pre {

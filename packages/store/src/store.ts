@@ -29,14 +29,35 @@ export function assertNoSecrets(value: unknown, path = '$', depth = 0): void {
 
 const now = () => new Date().toISOString();
 
+export class DuplicateWorkspaceNameError extends Error {
+  constructor(readonly workspaceName: string) {
+    super(`A workspace named “${workspaceName}” already exists.`);
+    this.name = 'DuplicateWorkspaceNameError';
+  }
+}
+
+/** Names compare trimmed and case-insensitively: "Contoso" and "contoso " are the same workspace to a person. */
+export const normalizeWorkspaceName = (name: string) => name.trim().toLocaleLowerCase();
+
 export class WorkspaceStore {
   constructor(readonly db: MigratorDb = new MigratorDb()) {}
 
   async createWorkspace(input: { id?: string; name: string; isDemo?: boolean; ld?: WorkspaceRecord['ld'] }): Promise<WorkspaceRecord> {
-    const ws: WorkspaceRecord = { id: input.id ?? crypto.randomUUID(), name: input.name, isDemo: input.isDemo ?? false, createdAt: now(), updatedAt: now(), ...(input.ld ? { ld: input.ld } : {}) };
+    const name = input.name.trim();
+    const ws: WorkspaceRecord = { id: input.id ?? crypto.randomUUID(), name, isDemo: input.isDemo ?? false, createdAt: now(), updatedAt: now(), ...(input.ld ? { ld: input.ld } : {}) };
     assertNoSecrets(ws);
-    await this.db.workspaces.put(ws);
+    await this.db.transaction('rw', this.db.workspaces, async () => {
+      if (await this.findWorkspaceByName(name, ws.id)) throw new DuplicateWorkspaceNameError(name);
+      await this.db.workspaces.put(ws);
+    });
     return ws;
+  }
+
+  /** The workspace with this name (trimmed, case-insensitive), ignoring `exceptId`. */
+  async findWorkspaceByName(name: string, exceptId?: string): Promise<WorkspaceRecord | undefined> {
+    const key = normalizeWorkspaceName(name);
+    const all = await this.db.workspaces.toArray();
+    return all.find((w) => w.id !== exceptId && normalizeWorkspaceName(w.name) === key);
   }
 
   listWorkspaces(): Promise<WorkspaceRecord[]> {
@@ -49,6 +70,10 @@ export class WorkspaceStore {
 
   async updateWorkspace(id: string, patch: Partial<Omit<WorkspaceRecord, 'id' | 'createdAt'>>): Promise<void> {
     assertNoSecrets(patch);
+    if (patch.name !== undefined) {
+      patch = { ...patch, name: patch.name.trim() };
+      if (await this.findWorkspaceByName(patch.name!, id)) throw new DuplicateWorkspaceNameError(patch.name!);
+    }
     await this.db.workspaces.update(id, { ...patch, updatedAt: now() });
   }
 

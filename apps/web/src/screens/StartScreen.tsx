@@ -1,10 +1,11 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { LdLockup, LdMark } from '../components/Brand.tsx';
 import { ThemeToggle } from '../components/ThemeToggle.tsx';
 import { Badge, Button, Callout, Card, Input, Label, Spinner } from '../components/ui.tsx';
 import { ensureDemoWorkspace, startDemoMock } from '../lib/demo.ts';
 import { store } from '../lib/store.ts';
+import { normalizeWorkspaceName, type WorkspaceRecord } from '@sslm/store';
 
 export function StartScreen({ onOpen }: { onOpen: (workspaceId: string) => void }) {
   const workspaces = useLiveQuery(() => store.listWorkspaces(), []);
@@ -25,9 +26,27 @@ export function StartScreen({ onOpen }: { onOpen: (workspaceId: string) => void 
     }
   };
 
+  // Deleting drops the workspace, its sources, snapshots, decisions and runs from this browser only.
+  // Nothing in StatSig or LaunchDarkly changes, but it can't be undone, so ask first.
+  const remove = async (w: WorkspaceRecord) => {
+    const what = w.isDemo ? 'the demo workspace' : `“${w.name}”`;
+    if (!window.confirm(`Delete ${what} from this browser?\n\nIts sources, snapshots, decisions and run history are removed here. StatSig and LaunchDarkly are not touched. This can't be undone.`)) return;
+    await store.deleteWorkspace(w.id);
+  };
+
+  const trimmed = name.trim();
+  const duplicate = useMemo(() => (workspaces ?? []).find((w) => normalizeWorkspaceName(w.name) === normalizeWorkspaceName(trimmed || 'Untitled workspace')), [workspaces, trimmed]);
+  const [createError, setCreateError] = useState<string>();
   const create = async () => {
-    const ws = await store.createWorkspace({ name: name.trim() || 'Untitled workspace' });
-    onOpen(ws.id);
+    if (duplicate) return;
+    setCreateError(undefined);
+    try {
+      const ws = await store.createWorkspace({ name: trimmed || 'Untitled workspace' });
+      onOpen(ws.id);
+    } catch (e) {
+      // The list is live, so a duplicate created in another tab lands here rather than in the memo.
+      setCreateError((e as Error).message);
+    }
   };
 
   return (
@@ -78,9 +97,26 @@ export function StartScreen({ onOpen }: { onOpen: (workspaceId: string) => void 
             <p className="mt-1.5 text-sm leading-relaxed text-fg-muted">One LaunchDarkly project plus one or more StatSig sources: a read-only Console API key or an uploaded config spec.</p>
             <div className="mt-5">
               <Label htmlFor="ws-name">Name</Label>
-              <Input id="ws-name" value={name} placeholder="e.g. Contoso migration" onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void create()} />
+              <Input
+                id="ws-name"
+                value={name}
+                placeholder="e.g. Contoso migration"
+                aria-invalid={!!duplicate}
+                aria-describedby={duplicate ? 'ws-name-dup' : undefined}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setCreateError(undefined);
+                }}
+                onKeyDown={(e) => e.key === 'Enter' && void create()}
+              />
+              {duplicate && (
+                <p id="ws-name-dup" className="mt-1.5 text-xs text-error">
+                  A workspace named “{duplicate.name}” already exists. Pick a different name, or open that one below.
+                </p>
+              )}
+              {createError && !duplicate && <p className="mt-1.5 text-xs text-error">{createError}</p>}
             </div>
-            <Button className="mt-4" variant="secondary" onClick={create}>
+            <Button className="mt-4" variant="secondary" onClick={create} disabled={!!duplicate}>
               Create workspace
             </Button>
           </Card>
@@ -91,24 +127,26 @@ export function StartScreen({ onOpen }: { onOpen: (workspaceId: string) => void 
             <h2 className="mb-3 text-xs font-semibold tracking-wide text-fg-muted uppercase">Workspaces in this browser</h2>
             <Card>
               <ul className="divide-y divide-line-soft">
-                {workspaces.map((w) => (
-                  <li key={w.id} className="flex items-center justify-between gap-4 px-4 py-3 transition-colors hover:bg-surface-hover">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate font-medium text-fg">{w.name}</span>
-                      {w.isDemo && <Badge tone="violet">demo</Badge>}
-                      {w.ld?.projectKey && <Badge tone="blue">LD · {w.ld.projectKey}</Badge>}
-                    </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className="text-xs text-fg-subtle">updated {new Date(w.updatedAt).toLocaleString()}</span>
-                      <Button variant="secondary" className="py-1.5" onClick={() => (w.isDemo ? tryDemo() : onOpen(w.id))}>
-                        Open
-                      </Button>
-                      <Button variant="ghost" className="py-1.5" onClick={() => store.deleteWorkspace(w.id)} title="Delete this workspace's local data">
-                        Delete
-                      </Button>
-                    </div>
-                  </li>
-                ))}
+                {workspaces.map((w) => {
+                  const open = () => (w.isDemo ? void tryDemo() : onOpen(w.id));
+                  return (
+                    <li key={w.id} className="relative flex items-center justify-between gap-4 px-4 py-3 transition-colors hover:bg-surface-hover focus-within:bg-surface-hover">
+                      {/* The whole row opens the workspace; the button is stretched over it so keyboard and screen-reader users get one target. */}
+                      <button type="button" onClick={open} aria-label={`Open ${w.name}`} className="absolute inset-0 rounded-md focus-visible:outline-offset-[-2px]" />
+                      <div className="pointer-events-none flex min-w-0 items-center gap-2">
+                        <span className="truncate font-medium text-fg">{w.name}</span>
+                        {w.isDemo && <Badge tone="violet">demo</Badge>}
+                        {w.ld?.projectKey && <Badge tone="blue">LD · {w.ld.projectKey}</Badge>}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-3">
+                        <span className="pointer-events-none text-xs text-fg-subtle">updated {new Date(w.updatedAt).toLocaleString()}</span>
+                        <Button variant="secondary" className="relative py-1.5 hover:border-error-line hover:text-error" onClick={() => void remove(w)} title="Delete this workspace's local data">
+                          Delete
+                        </Button>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             </Card>
           </section>
