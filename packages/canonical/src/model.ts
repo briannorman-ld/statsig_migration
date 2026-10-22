@@ -28,6 +28,11 @@ export interface SourceDescriptor {
   /** Spec sources: the StatSig `company_id` seen in the first upload (sanity check, §4.2). */
   companyId?: string;
   isDemo?: boolean;
+  /**
+   * Console API sources: the entity kinds to read. Undefined means everything. Gates reference
+   * segments, so a gate-only scope still usually wants `segment`.
+   */
+  resources?: EntityKind[];
   createdAt: string;
 }
 

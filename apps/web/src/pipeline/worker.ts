@@ -26,15 +26,12 @@ self.onmessage = async (ev: MessageEvent<PipelineRequest>) => {
         baseUrl: req.baseUrl,
         apiKey: req.apiKey,
         onSchemaIssue: (i) => issues.push(i),
-        transport: {
-          onEvent: (e) => {
-            if (e.type === 'retry' || e.type === 'throttled' || e.type === 'gave-up') post({ id: req.id, type: 'transport', event: e });
-          },
-        },
+        transport: { onEvent: (e) => post({ id: req.id, type: 'transport', event: e }) },
       });
       const raw = await crawlConsoleProject(client, issues, {
         signal: ctrl.signal,
         eagerIdListMax: req.eagerIdListMax,
+        kinds: req.kinds,
         onProgress: (progress) => post({ id: req.id, type: 'progress', progress }),
       });
       const snapshot = normalizeConsoleSnapshot(raw, { source: { sourceId: req.source.sourceId, sourceKind: 'console_api', alias: req.source.alias } });

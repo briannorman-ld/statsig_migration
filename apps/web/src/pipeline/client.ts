@@ -1,4 +1,4 @@
-import type { CanonicalSnapshot } from '@sslm/canonical';
+import type { CanonicalSnapshot, EntityKind } from '@sslm/canonical';
 import type { CrawlProgress } from '@sslm/adapters';
 import type { PipelineEvent, PipelineRequest, PipelineSource } from './protocol.ts';
 
@@ -42,7 +42,7 @@ export class Pipeline {
     };
   }
 
-  crawlConsole(args: { source: PipelineSource; baseUrl: string; apiKey: string }, handlers: Omit<Pending, 'resolve' | 'reject'> = {}) {
+  crawlConsole(args: { source: PipelineSource; baseUrl: string; apiKey: string; kinds?: EntityKind[] }, handlers: Omit<Pending, 'resolve' | 'reject'> = {}) {
     return this.send({ type: 'crawl-console', ...args }, handlers);
   }
 

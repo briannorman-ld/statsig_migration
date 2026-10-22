@@ -122,3 +122,20 @@ describe('Transport', () => {
     expect((await t2.request({ method: 'GET', url: 'https://x.test/a' })).body).toBe('hello');
   });
 });
+
+describe('rate budget pacing events', () => {
+  it('reports when our own budget holds a request back, before waiting', async () => {
+    const { clock, delays } = instantClock();
+    const events: TransportEvent[] = [];
+    const t = new Transport({ clock, budgets: [{ limit: 2, windowMs: 1000 }], fetch: async () => jsonResponse(200), onEvent: (e) => events.push(e) });
+    for (let i = 0; i < 3; i++) await t.request({ method: 'GET', url: 'https://x.test/console/v1/gates' });
+    const paced = events.filter((e) => e.type === 'paced');
+    expect(paced).toHaveLength(1); // only the third request had to wait
+    expect(paced[0]).toMatchObject({ type: 'paced', url: 'https://x.test/console/v1/gates' });
+    expect((paced[0] as { waitMs: number }).waitMs).toBeGreaterThan(0);
+    expect(delays.length).toBeGreaterThan(0); // and it did wait
+    // Order: paced is announced before the request goes out.
+    const idx = events.findIndex((e) => e.type === 'paced');
+    expect(events[idx + 1]?.type).toBe('request');
+  });
+});

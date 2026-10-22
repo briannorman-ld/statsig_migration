@@ -36,6 +36,22 @@ describe('WorkspaceStore (Dexie / IndexedDB)', () => {
     expect(await s.getCapabilities(ws.id)).toBeUndefined();
   });
 
+  it('removes one source with its snapshots and ID lists, leaving the others', async () => {
+    const s = store();
+    const ws = await s.createWorkspace({ name: 'x' });
+    await s.addSource(ws.id, source('web'));
+    await s.addSource(ws.id, source('mobile'));
+    await s.saveSnapshot(ws.id, emptySnapshot({ sourceId: 'web', sourceKind: 'console_api', alias: 'web' }, 't'));
+    await s.saveSnapshot(ws.id, emptySnapshot({ sourceId: 'mobile', sourceKind: 'console_api', alias: 'mobile' }, 't'));
+    await s.saveIdList({ uid: 'web:seg', workspaceId: ws.id, sourceId: 'web', fetchedAt: 't', ids: ['u1'] });
+    await s.saveIdList({ uid: 'mobile:seg', workspaceId: ws.id, sourceId: 'mobile', fetchedAt: 't', ids: ['u2'] });
+    await s.removeSource('web');
+    expect((await s.listSources(ws.id)).map((x) => x.id)).toEqual(['mobile']);
+    expect(await s.latestSnapshot('web')).toBeUndefined();
+    expect((await s.latestSnapshot('mobile'))?.sourceId).toBe('mobile');
+    expect((await s.listIdLists(ws.id)).map((x) => x.uid)).toEqual(['mobile:seg']);
+  });
+
   it('refuses to persist anything that looks like a token', async () => {
     const s = store();
     const ws = await s.createWorkspace({ name: 'x' });

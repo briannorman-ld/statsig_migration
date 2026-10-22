@@ -42,6 +42,7 @@ import {
   type StatsigUnitIdType,
   type StatsigUser,
 } from '@sslm/statsig-client';
+import type { EntityKind } from '@sslm/canonical';
 import { HttpError } from '@sslm/http';
 
 /** Everything fetched from one Console API project, as returned (after lenient validation). */
@@ -80,8 +81,23 @@ export interface CrawlProgress {
   endpoint: string;
 }
 
+/** Which crawl jobs each entity kind needs. Project-level endpoints (environments, tags, …) always run. */
+const JOBS_BY_KIND = {
+  gate: ['gates'],
+  config: ['dynamicConfigs'],
+  segment: ['segments'],
+  experiment: ['experiments'],
+  layer: ['layers'],
+  holdout: ['holdouts'],
+  autotune: ['autotunes'],
+  metric: ['metrics'],
+  param_store: ['paramStores'],
+} as const satisfies Record<EntityKind, readonly string[]>;
+
 export interface CrawlOptions {
   signal?: AbortSignal;
+  /** Entity kinds to read; undefined reads everything. Kinds left out are not requested at all. */
+  kinds?: EntityKind[];
   onProgress?: (p: CrawlProgress) => void;
   /**
    * ID lists up to this many IDs are fetched during the crawl. Larger lists (e.g. a 20k fraud
@@ -155,15 +171,19 @@ export async function crawlConsoleProject(
     teams: () => optional('/users/teams', [], () => client.list('/users/teams', TeamSchema, {}, signal)),
     overrides: () => optional('/overrides', null, () => client.get('/overrides', OverridesSchema, {}, signal)),
   } as const;
-  total += Object.keys(jobs).length;
+  // Kinds the user left out are not fetched: their jobs resolve to the empty fallback without a request.
+  const wanted = opts.kinds ? new Set<string>(opts.kinds.flatMap((k) => JOBS_BY_KIND[k])) : null;
+  const entityJobs = new Set<string>(Object.values(JOBS_BY_KIND).flat());
+  const runs = Object.keys(jobs).filter((k) => !wanted || !entityJobs.has(k) || wanted.has(k));
+  total += runs.length;
 
   // The transport's AIMD limiter and rate budget pace these; firing them together is fine.
-  const entries = await Promise.all(Object.entries(jobs).map(async ([k, run]) => [k, await run()] as const));
-  const r = Object.fromEntries(entries) as { [K in keyof typeof jobs]: Awaited<ReturnType<(typeof jobs)[K]>> };
+  const entries = await Promise.all(runs.map(async (k) => [k, await jobs[k as keyof typeof jobs]()] as const));
+  const r = { ...EMPTY_JOBS, ...Object.fromEntries(entries) } as { [K in keyof typeof jobs]: Awaited<ReturnType<(typeof jobs)[K]>> };
 
   // 2. Warehouse Native projects also have metric sources (PLAN §4.1 "Detecting Warehouse Native").
   let metricSources: StatsigMetricSource[] = [];
-  if (r.company?.isWarehouseNative) {
+  if (r.company?.isWarehouseNative && (!wanted || wanted.has('metrics'))) {
     total++;
     metricSources = await optional('/metrics/metric_source/list', [], () => client.list('/metrics/metric_source/list', MetricSourceSchema, {}, signal));
   }
@@ -196,6 +216,26 @@ export async function crawlConsoleProject(
     skipped,
   };
 }
+
+const EMPTY_JOBS = {
+  company: null,
+  environments: null,
+  gates: [],
+  dynamicConfigs: [],
+  segments: [],
+  experiments: [],
+  layers: [],
+  holdouts: [],
+  autotunes: [],
+  unitIdTypes: [],
+  tags: [],
+  targetApps: [],
+  metrics: [],
+  paramStores: [],
+  users: [],
+  teams: [],
+  overrides: null,
+};
 
 function describe(e: unknown): string {
   if (e instanceof HttpError) return `HTTP ${e.status}`;

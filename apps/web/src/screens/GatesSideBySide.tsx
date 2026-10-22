@@ -5,6 +5,7 @@ import type { GateMapResult } from '@sslm/mapper';
 import { migrationStatus, type MigrationStatus } from '@sslm/planner';
 import type { SourceRecord } from '@sslm/store';
 import { DecisionCard, FIDELITY_TONE } from '../components/DecisionCard.tsx';
+import { PagerBar, usePager } from '../components/Pager.tsx';
 import { LdTargeting, StatsigRules } from '../components/Targeting.tsx';
 import { Badge, Button, Callout, Card, cx, Input, Select } from '../components/ui.tsx';
 import { ldFlagState, mapGateFor } from '../lib/migration.ts';
@@ -87,25 +88,30 @@ export function GatesSideBySide({
     [matched, snapshots, env, m, ldFlags],
   );
 
-  const visible = rows.filter((r) => {
-    if (!showArchived && r.gate.archived) return false;
-    if (q && !r.gate.id.toLowerCase().includes(q.toLowerCase())) return false;
-    const here = r.strip.find((s) => s.ldEnv === r.ldEnv)?.status;
-    switch (filter) {
-      case 'open':
-        return r.result.unresolved.length > 0;
-      case 'blocking':
-        return r.result.unresolved.some((d) => d.severity === 'blocking');
-      case 'not_migrated':
-        return !here || here === 'not_in_ld' || here === 'not_migrated';
-      case 'in_sync':
-        return here === 'in_sync';
-      case 'changed':
-        return here === 'statsig_changed' || here === 'decisions_changed';
-      default:
-        return true;
-    }
-  });
+  const visible = useMemo(
+    () =>
+      rows.filter((r) => {
+        if (!showArchived && r.gate.archived) return false;
+        if (q && !r.gate.id.toLowerCase().includes(q.toLowerCase())) return false;
+        const here = r.strip.find((s) => s.ldEnv === r.ldEnv)?.status;
+        switch (filter) {
+          case 'open':
+            return r.result.unresolved.length > 0;
+          case 'blocking':
+            return r.result.unresolved.some((d) => d.severity === 'blocking');
+          case 'not_migrated':
+            return !here || here === 'not_in_ld' || here === 'not_migrated';
+          case 'in_sync':
+            return here === 'in_sync';
+          case 'changed':
+            return here === 'statsig_changed' || here === 'decisions_changed';
+          default:
+            return true;
+        }
+      }),
+    [rows, showArchived, q, filter],
+  );
+  const pager = usePager(visible);
   const selectable = visible.filter((r) => !r.gate.archived);
   const allSelected = selectable.length > 0 && selectable.every((r) => selected.has(r.gate.uid));
   const mappedHere = [...new Set(sources.map((s) => ldEnvOf(s.id, env)).filter((x): x is string => !!x))];
@@ -164,6 +170,7 @@ export function GatesSideBySide({
           </Callout>
         </div>
       )}
+      <PagerBar pager={pager} label="gates" className="mb-2" />
       <Card className="overflow-hidden">
         <table className="w-full table-fixed text-sm">
           <thead className="bg-surface-2 text-left text-xs font-semibold tracking-wide text-fg-muted uppercase">
@@ -178,7 +185,7 @@ export function GatesSideBySide({
             </tr>
           </thead>
           <tbody className="divide-y divide-line-soft">
-            {visible.map((row) => {
+            {pager.slice.map((row) => {
               const { sourceId, gate, shared, result: r } = row;
               const key = `${sourceId}/${gate.id}`;
               const res = resolveRulesForEnvironment(gate.rules, env);
@@ -247,6 +254,7 @@ export function GatesSideBySide({
           </tbody>
         </table>
       </Card>
+      <PagerBar pager={pager} label="gates" className="mt-2" />
 
       {selected.size > 0 && (
         <div className="fixed right-0 bottom-0 left-72 z-40 border-t border-line bg-surface/95 px-5 py-3 shadow-raised backdrop-blur">

@@ -183,7 +183,7 @@ Both adapters produce the same **canonical model**: `Gate`, `Config`, `Experimen
 - **Pagination:** `page` and `limit=100`; loop until `pagination.nextPage` is null.
   - Be defensive about odd shapes, e.g. `/gates/{id}/rules` returns `data.rules`.
   - `/logs` is cursor-based.
-- **Rate limits:** budget about 900 requests per 15 minutes and 12 per 10 seconds per project. Back off with jitter on 429. The ID-list endpoint has its own limit.
+- **Rate limits:** StatSig documents about 100 requests per 10 seconds and 900 per 15 minutes per project. We budget **40 per 10 seconds** (raised from 12 on 2026-10-22: a real sync was paced far below the documented limit with no 429s) and the full **900 per 15 minutes**, which is the binding limit for any crawl over 900 requests (about one request per second sustained). Back off with jitter on 429. The ID-list endpoint has its own limit, and each ID list costs one request per 100 IDs. The sync log shows budget pauses as "pacing", distinct from a stall.
   - Refreshes while the app is open get their own rate budget, so they don't use up the customer's StatSig quota.
   - The app runs in the browser, and StatSig's error responses can't be read there (§3.1). A request that fails without a readable status is therefore treated as possibly rate-limited, retried with exponential backoff, and after N attempts shown as "StatSig unreachable, the key may be invalid".
   - The key is validated first with a single `GET /console/v1/project`.

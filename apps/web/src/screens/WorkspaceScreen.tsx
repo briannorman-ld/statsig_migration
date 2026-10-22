@@ -4,13 +4,17 @@ import { countsByKind, ENTITY_KINDS, type CanonicalSnapshot, type EntityKind } f
 import type { SourceRecord } from '@sslm/store';
 import { LdMark } from '../components/Brand.tsx';
 import { ThemeToggle } from '../components/ThemeToggle.tsx';
+import { appendLog, describeProgress, describeTransportEvent, SyncActivity, type SyncLogEntry } from '../components/SyncActivity.tsx';
 import { Badge, Button, Callout, cx, Dot, Select, Spinner } from '../components/ui.tsx';
+import { describeScope, KIND_LABEL } from '../lib/kinds.ts';
 import { useLdSession } from '../lib/ld.ts';
+import { secrets } from '../lib/secrets.ts';
 import { collectDecisions, fetchDeferredIdLists, isInterrupted } from '../lib/migration.ts';
 import { store } from '../lib/store.ts';
 import { syncConsoleSource } from '../lib/sync.ts';
 import { useMigration } from '../lib/useMigration.ts';
 import { AddSource } from './AddSource.tsx';
+import { ConnectionsView } from './ConnectionsView.tsx';
 import { DecisionsView } from './DecisionsView.tsx';
 import { EntityList } from './EntityList.tsx';
 import { GatesSideBySide } from './GatesSideBySide.tsx';
@@ -22,6 +26,7 @@ import { WarningsView } from './WarningsView.tsx';
 
 export type View =
   | { kind: 'resource'; resource: EntityKind }
+  | { kind: 'connections' }
   | { kind: 'ld' }
   | { kind: 'warnings' }
   | { kind: 'add-source' }
@@ -29,24 +34,13 @@ export type View =
   | { kind: 'mapping' }
   | { kind: 'runs' };
 
-const KIND_LABEL: Record<EntityKind, string> = {
-  gate: 'Gates',
-  config: 'Dynamic configs',
-  segment: 'Segments',
-  experiment: 'Experiments',
-  layer: 'Layers',
-  holdout: 'Holdouts',
-  autotune: 'Autotunes',
-  metric: 'Metrics',
-  param_store: 'Param stores',
-};
-
 interface SyncState {
   running: boolean;
   done?: number;
   total?: number;
   endpoint?: string;
-  retries: string[];
+  /** Live request log; kept after a failure so the last requests explain the error. */
+  log: SyncLogEntry[];
   error?: string;
 }
 
@@ -74,17 +68,45 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
   const runs = useLiveQuery(() => store.listRuns(workspaceId), [workspaceId]);
 
   const runSync = async (s: SourceRecord) => {
-    setSync((x) => ({ ...x, [s.id]: { running: true, retries: [] } }));
+    const patch = (f: (cur: SyncState) => SyncState) => setSync((x) => ({ ...x, [s.id]: f(x[s.id] ?? { running: true, log: [] }) }));
+    const push = (e: SyncLogEntry) => patch((cur) => ({ ...cur, log: appendLog(cur.log, e) }));
+    setSync((x) => ({ ...x, [s.id]: { running: true, log: [] } }));
     try {
       await syncConsoleSource(workspaceId, s, {
-        onProgress: (p) => setSync((x) => ({ ...x, [s.id]: { ...(x[s.id] ?? { retries: [] }), running: true, done: p.done, total: p.total, endpoint: p.endpoint } })),
-        onRetry: (m) => setSync((x) => ({ ...x, [s.id]: { ...(x[s.id] ?? { running: true }), retries: [...(x[s.id]?.retries ?? []), m].slice(-4) } as SyncState })),
+        onProgress: (p) => {
+          patch((cur) => ({ ...cur, running: true, done: p.done, total: p.total, endpoint: p.endpoint }));
+          push(describeProgress(p));
+        },
+        onTransport: (e) => push(describeTransportEvent(e)),
       });
-      setSync((x) => ({ ...x, [s.id]: { running: false, retries: x[s.id]?.retries ?? [] } }));
+      setSync((x) => ({ ...x, [s.id]: { running: false, log: [] } }));
     } catch (e) {
-      setSync((x) => ({ ...x, [s.id]: { running: false, retries: x[s.id]?.retries ?? [], error: (e as Error).message } }));
+      patch((cur) => ({ ...cur, running: false, error: (e as Error).message }));
     }
   };
+
+  // Removing a source drops its snapshots and fetched ID lists from this browser and forgets its
+  // key. Nothing in StatSig or LaunchDarkly changes; the source can be added again later.
+  const removeSource = async (s: SourceRecord) => {
+    const synced = snapshots?.[s.id];
+    if (!window.confirm(`Remove "${s.label}" from this workspace?${synced ? ' Its synced snapshot is deleted from this browser.' : ''} StatSig itself is not touched.`)) return;
+    secrets.forget('statsig', s.id);
+    await store.removeSource(s.id);
+    setSync((x) => {
+      const { [s.id]: _, ...rest } = x;
+      return rest;
+    });
+    setHidden((h) => (h.has(s.id) ? toggle(h, s.id) : h));
+  };
+
+  // A workspace with no sources yet (just created) opens on Connections: one place to connect
+  // StatSig and one to connect LaunchDarkly. Decided once, when the source list first loads.
+  const landed = useRef(false);
+  useEffect(() => {
+    if (landed.current || !sources) return;
+    landed.current = true;
+    if (sources.length === 0) setView({ kind: 'connections' });
+  }, [sources]);
 
   // First open of a demo workspace: sync every Console API source that has no snapshot yet.
   useEffect(() => {
@@ -153,16 +175,18 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
           {workspace.isDemo && <Badge tone="violet">demo</Badge>}
         </div>
         <div className="ml-auto flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-fg-muted">
-            Environment
-            <Select value={env} onChange={(e) => setEnv(e.target.value)} disabled={!envs.length} aria-label="Environment" className="py-1">
-              {envs.map((e) => (
-                <option key={e} value={e}>
-                  {e}
-                </option>
-              ))}
-            </Select>
-          </label>
+          {envs.length > 0 && (
+            <label className="flex items-center gap-2 text-sm text-fg-muted">
+              Environment
+              <Select value={env} onChange={(e) => setEnv(e.target.value)} aria-label="Environment" className="py-1">
+                {envs.map((e) => (
+                  <option key={e} value={e}>
+                    {e}
+                  </option>
+                ))}
+              </Select>
+            </label>
+          )}
           <button
             type="button"
             onClick={() => setView({ kind: 'ld' })}
@@ -189,11 +213,30 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
                     <input type="checkbox" checked={!hidden.has(s.id)} aria-label={`Include ${s.label}`} onChange={() => setHidden((h) => toggle(h, s.id))} />
                     <span className="font-medium">{s.label}</span>
                     <Badge tone={s.kind === 'console_api' ? 'green' : 'amber'}>{s.kind === 'console_api' ? 'Console API' : 'Spec'}</Badge>
-                    {s.kind === 'console_api' && (
-                      <button className="ml-auto text-fg-muted hover:text-fg disabled:opacity-40" title="Refresh from StatSig" disabled={st?.running} onClick={() => runSync(s)}>
-                        ↻
+                    <span className="ml-auto flex items-center gap-1">
+                      {s.kind === 'console_api' && (
+                        <button
+                          type="button"
+                          className="rounded px-1 text-fg-muted hover:bg-surface-hover hover:text-fg disabled:opacity-40"
+                          title="Refresh from StatSig"
+                          aria-label={`Refresh ${s.label} from StatSig`}
+                          disabled={st?.running}
+                          onClick={() => runSync(s)}
+                        >
+                          ↻
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="rounded px-1 text-fg-muted hover:bg-surface-hover hover:text-error disabled:opacity-40"
+                        title="Remove this source"
+                        aria-label={`Remove ${s.label}`}
+                        disabled={st?.running}
+                        onClick={() => void removeSource(s)}
+                      >
+                        ×
                       </button>
-                    )}
+                    </span>
                   </div>
                   <div className="mt-1 text-xs text-fg-muted">
                     {st?.running ? (
@@ -205,9 +248,10 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
                     ) : (
                       'not synced'
                     )}
+                    {s.resources && <div className="mt-0.5 truncate" title={`Reads only: ${describeScope(s.resources)}`}>reads {describeScope(s.resources)}</div>}
                   </div>
-                  {st?.running && st.retries.length > 0 && <div className="mt-1 text-xs text-warning">{st.retries[st.retries.length - 1]}</div>}
                   {st?.error && <div className="mt-1 text-xs text-error">{st.error}</div>}
+                  {st && (st.running || (st.error && st.log.length > 0)) && <SyncActivity log={st.log} running={st.running} className="mt-2" />}
                 </li>
               );
             })}
@@ -247,6 +291,10 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
           </NavItem>
 
           <SectionTitle>Workspace</SectionTitle>
+          <NavItem active={view.kind === 'connections'} onClick={() => setView({ kind: 'connections' })}>
+            <span>Connections</span>
+            {(sources ?? []).length === 0 || ld.status !== 'connected' ? <Badge tone="amber">setup</Badge> : null}
+          </NavItem>
           <NavItem active={view.kind === 'ld'} onClick={() => setView({ kind: 'ld' })}>
             <span>LaunchDarkly & capabilities</span>
           </NavItem>
@@ -269,7 +317,18 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
             </div>
           )}
           {visible.length === 0 && (view.kind === 'resource' || view.kind === 'decisions' || view.kind === 'mapping') && (
-            <Callout tone="blue">{(sources ?? []).length === 0 ? 'Add a StatSig source to get started.' : 'Waiting for the first sync…'}</Callout>
+            <Callout tone="blue">
+              {(sources ?? []).length === 0 ? (
+                <>
+                  <button className="font-medium underline" onClick={() => setView({ kind: 'connections' })}>
+                    Connect a StatSig source
+                  </button>{' '}
+                  to get started.
+                </>
+              ) : (
+                'Waiting for the first sync…'
+              )}
+            </Callout>
           )}
           {view.kind === 'resource' && visible.length > 0 &&
             (view.resource === 'gate' ? (
@@ -280,9 +339,21 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
           {view.kind === 'decisions' && m && visible.length > 0 && <DecisionsView snapshots={visibleSnaps} m={m} workspaceName={workspace.name} />}
           {view.kind === 'mapping' && m && visible.length > 0 && <MappingView sources={visible} snapshots={snapshots ?? {}} m={m} onConnect={() => setView({ kind: 'ld' })} />}
           {view.kind === 'runs' && m && <RunsView workspaceId={workspaceId} m={m} />}
+          {view.kind === 'connections' && (
+            <ConnectionsView
+              workspace={workspace}
+              sources={sources ?? []}
+              snapshots={snapshots ?? {}}
+              ld={ld}
+              onAddSource={() => setView({ kind: 'add-source' })}
+              onRemoveSource={removeSource}
+              onOpenLd={() => setView({ kind: 'ld' })}
+              onOpenGates={() => setView({ kind: 'resource', resource: 'gate' })}
+            />
+          )}
           {view.kind === 'ld' && <LdPanel workspaceId={workspaceId} workspace={workspace} />}
           {view.kind === 'warnings' && <WarningsView sources={visible} snapshots={snapshots ?? {}} />}
-          {view.kind === 'add-source' && <AddSource workspaceId={workspaceId} onDone={() => setView({ kind: 'resource', resource: 'gate' })} />}
+          {view.kind === 'add-source' && <AddSource workspaceId={workspaceId} onDone={() => setView(ld.status === 'connected' ? { kind: 'resource', resource: 'gate' } : { kind: 'connections' })} />}
         </main>
       </div>
       {migrate && m && (

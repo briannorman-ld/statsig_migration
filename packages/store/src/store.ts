@@ -80,12 +80,16 @@ export class WorkspaceStore {
     return this.db.sources.where('workspaceId').equals(workspaceId).sortBy('createdAt');
   }
 
+  /** Removes a source and everything fetched from it (snapshots, raw uploads, ID lists). */
   async removeSource(sourceId: string): Promise<void> {
-    await this.db.transaction('rw', [this.db.sources, this.db.snapshots, this.db.specUploads], async () => {
+    const src = await this.db.sources.get(sourceId);
+    await this.db.transaction('rw', [this.db.sources, this.db.snapshots, this.db.specUploads, this.db.idLists], async () => {
       await this.db.snapshots.where('sourceId').equals(sourceId).delete();
       await this.db.specUploads.where('sourceId').equals(sourceId).delete();
+      await this.db.idLists.where('sourceId').equals(sourceId).delete();
       await this.db.sources.delete(sourceId);
     });
+    if (src) await this.touch(src.workspaceId);
   }
 
   /** Snapshots are immutable: each save is a new record. */

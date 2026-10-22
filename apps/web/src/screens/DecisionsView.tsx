@@ -1,53 +1,68 @@
 import { useMemo, useState } from 'react';
 import type { CanonicalSnapshot } from '@sslm/canonical';
-import type { DecisionType } from '@sslm/mapper';
+import type { DecisionType, Severity } from '@sslm/mapper';
 import { recommendedResolutions } from '@sslm/planner';
 import { DecisionCard, SEVERITY_TONE, TYPE_LABEL } from '../components/DecisionCard.tsx';
-import { Badge, Button, Callout, Card, cx } from '../components/ui.tsx';
+import { PagerBar, usePager } from '../components/Pager.tsx';
+import { Badge, Button, Callout, Card, cx, Input, Select } from '../components/ui.tsx';
+import { filterDecisions, NO_FILTERS, SEVERITY_RANK, summarizeDecisions, type DecisionFilters, type TypeSummary } from '../lib/decisionSummary.ts';
+import { KIND_LABEL } from '../lib/kinds.ts';
 import { collectDecisions, decisionLogCsv, decisionLogMarkdown, download, type DecisionInstance } from '../lib/migration.ts';
 import type { MigrationContext } from '../lib/useMigration.ts';
 
 /**
- * Decisions inbox (PLAN §8.2). Decisions are grouped by type, then by fingerprint (the same
- * question asked in many places), so one answer can resolve e.g. "case-insensitive match — 31
- * conditions in 17 gates".
+ * Decisions inbox (PLAN §8.2), built for projects that raise thousands of decisions:
+ * 1. A summary table, one row per decision *type*, where a workspace policy answers every open
+ *    decision of that type at once (and every future one from a new snapshot).
+ * 2. Filters (type, severity, resource kind, source, search) for what the policies don't cover.
+ * 3. The remaining decisions, grouped by fingerprint (the same question asked in many places),
+ *    paged so the screen stays usable.
  */
 export function DecisionsView({ snapshots, m, workspaceName }: { snapshots: CanonicalSnapshot[]; m: MigrationContext; workspaceName: string }) {
   const [tab, setTab] = useState<'open' | 'decided'>('open');
+  const [filters, setFilters] = useState<DecisionFilters>(NO_FILTERS);
   const [expanded, setExpanded] = useState<string>();
   const all = useMemo(() => collectDecisions(snapshots, m.profile, m.connected, m), [snapshots, m]);
-  const open = all.filter((d) => !d.resolvedWith);
-  const decided = all.filter((d) => d.resolvedWith);
-  const list = tab === 'open' ? open : decided;
+  const open = useMemo(() => all.filter((d) => !d.resolvedWith), [all]);
+  const decided = useMemo(() => all.filter((d) => d.resolvedWith), [all]);
+  const summary = useMemo(() => summarizeDecisions(all, m.profile.policies), [all, m.profile.policies]);
   const choiceCount = open.filter((d) => d.decision.severity === 'choice' && d.decision.recommended).length;
 
+  const list = tab === 'open' ? open : decided;
+  const filtered = useMemo(() => filterDecisions(list, filters), [list, filters]);
+  const kinds = useMemo(() => [...new Set(all.map((d) => d.decision.subject.kind))].sort(), [all]);
+  const sources = useMemo(() => snapshots.map((s) => ({ id: s.source.sourceId, alias: s.source.alias })), [snapshots]);
+  const activeFilters = Object.entries(filters).filter(([k, v]) => v !== NO_FILTERS[k as keyof DecisionFilters]).length;
+
+  /** Fingerprint groups, in severity order then by size: the biggest wins come first. */
   const groups = useMemo(() => {
-    const byType = new Map<DecisionType, Map<string, DecisionInstance[]>>();
-    for (const d of list) {
-      const t = byType.get(d.decision.type) ?? new Map<string, DecisionInstance[]>();
-      const key = tab === 'decided' ? `${d.decision.fingerprint}|${d.resolvedWith?.optionKey}` : d.decision.fingerprint;
-      t.set(key, [...(t.get(key) ?? []), d]);
-      byType.set(d.decision.type, t);
+    const byKey = new Map<string, { type: DecisionType; key: string; xs: DecisionInstance[] }>();
+    for (const d of filtered) {
+      const key = tab === 'decided' ? `${d.decision.type}|${d.decision.fingerprint}|${d.resolvedWith?.optionKey}` : `${d.decision.type}|${d.decision.fingerprint}`;
+      const g = byKey.get(key) ?? { type: d.decision.type, key, xs: [] };
+      g.xs.push(d);
+      byKey.set(key, g);
     }
-    const rank = { blocking: 0, choice: 1, acknowledge: 2 } as const;
-    return [...byType.entries()].sort(([, a], [, b]) => rank[[...a.values()][0]![0]!.decision.severity] - rank[[...b.values()][0]![0]!.decision.severity]);
-  }, [list, tab]);
+    return [...byKey.values()].sort((a, b) => SEVERITY_RANK[a.xs[0]!.decision.severity] - SEVERITY_RANK[b.xs[0]!.decision.severity] || b.xs.length - a.xs.length);
+  }, [filtered, tab]);
+  const pager = usePager(groups, 25);
+  const set = <K extends keyof DecisionFilters>(k: K, v: DecisionFilters[K]) => setFilters((f) => ({ ...f, [k]: v }));
 
   return (
-    <div className="max-w-5xl space-y-4">
+    <div className="max-w-6xl space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="font-display text-xl font-semibold tracking-tight">Decisions</h2>
         <div className="flex rounded-md border border-line text-sm">
           {(['open', 'decided'] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)} className={cx('px-3 py-1.5 first:rounded-l-md last:rounded-r-md', tab === t ? 'bg-accent text-on-accent' : 'hover:bg-surface-hover')}>
-              {t === 'open' ? `Open (${open.length})` : `Decided (${decided.length})`}
+              {t === 'open' ? `Open (${open.length.toLocaleString()})` : `Decided (${decided.length.toLocaleString()})`}
             </button>
           ))}
         </div>
         <div className="ml-auto flex gap-2">
           {tab === 'open' && (
             <Button variant="secondary" disabled={!choiceCount} onClick={() => void m.saveResolutions(recommendedResolutions(open.map((d) => d.decision), new Date().toISOString()))}>
-              Use recommended for {choiceCount} choice{choiceCount === 1 ? '' : 's'}
+              Use recommended for {choiceCount.toLocaleString()} choice{choiceCount === 1 ? '' : 's'}
             </Button>
           )}
           <Button variant="secondary" onClick={() => download('decision-log.md', decisionLogMarkdown(workspaceName, all, m.resolutions, m.profile), 'text/markdown')}>
@@ -59,82 +74,238 @@ export function DecisionsView({ snapshots, m, workspaceName }: { snapshots: Cano
         </div>
       </div>
       <p className="text-sm text-fg-muted">
-        Every place where StatSig can't be translated exactly becomes a decision. Answers apply in every environment and are saved in this workspace.
+        Every place where StatSig can’t be translated exactly becomes a decision. Most are the same question asked many times, so answer by <b>type</b> first: a policy
+        answers every open decision of that type that offers the option, and every future one from a new sync. Then filter down to what’s left.
         {!m.connected && ' Connect LaunchDarkly and map environments to see only the environments you will migrate.'}
-        {' '}Blocking and acknowledge decisions always need your answer.
       </p>
-      {Object.keys(m.profile.policies).length > 0 && (
-        <Card className="p-3 text-sm">
-          <div className="mb-1 text-xs font-semibold text-fg-muted">Workspace policies</div>
-          <ul className="space-y-1">
-            {Object.entries(m.profile.policies).map(([t, o]) => (
-              <li key={t} className="flex items-center gap-2">
-                <span>{TYPE_LABEL[t] ?? t}</span> → <b>{o}</b>
-                <button className="ml-2 text-xs text-fg-muted hover:text-error" onClick={() => void m.setPolicy(t as DecisionType, null)}>
-                  remove
-                </button>
-              </li>
+
+      <SummaryTable
+        rows={summary}
+        selected={filters.type}
+        onSelect={(t) => {
+          setFilters({ ...NO_FILTERS, type: t });
+          setTab('open');
+        }}
+        onPolicy={(t, key) => void m.setPolicy(t, key)}
+        onRecommended={(t) => void m.saveResolutions(recommendedResolutions(open.filter((d) => d.decision.type === t).map((d) => d.decision), new Date().toISOString()))}
+      />
+
+      <Card className="flex flex-wrap items-center gap-2 p-2.5 text-sm">
+        <Select value={filters.type} onChange={(e) => set('type', e.target.value as DecisionType | 'all')} aria-label="Filter by type" className="py-1">
+          <option value="all">All types</option>
+          {summary.map((r) => (
+            <option key={r.type} value={r.type}>
+              {TYPE_LABEL[r.type] ?? r.type} ({tab === 'open' ? r.open : r.decided})
+            </option>
+          ))}
+        </Select>
+        <Select value={filters.severity} onChange={(e) => set('severity', e.target.value as Severity | 'all')} aria-label="Filter by severity" className="py-1">
+          <option value="all">Any severity</option>
+          <option value="blocking">Blocking</option>
+          <option value="choice">Choice</option>
+          <option value="acknowledge">Acknowledge</option>
+        </Select>
+        {kinds.length > 1 && (
+          <Select value={filters.kind} onChange={(e) => set('kind', e.target.value)} aria-label="Filter by resource kind" className="py-1">
+            <option value="all">All resources</option>
+            {kinds.map((k) => (
+              <option key={k} value={k}>
+                {k === 'unit_type' ? 'Unit types' : (KIND_LABEL[k as keyof typeof KIND_LABEL] ?? k)}
+              </option>
             ))}
-          </ul>
-        </Card>
-      )}
+          </Select>
+        )}
+        {sources.length > 1 && (
+          <Select value={filters.sourceId} onChange={(e) => set('sourceId', e.target.value)} aria-label="Filter by source" className="py-1">
+            <option value="all">All sources</option>
+            {sources.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.alias}
+              </option>
+            ))}
+          </Select>
+        )}
+        <Input value={filters.query} onChange={(e) => set('query', e.target.value)} placeholder="Search item, rule or title…" aria-label="Search decisions" className="w-64 py-1" />
+        <span className="ml-auto text-xs text-fg-muted tabular-nums">
+          {filtered.length.toLocaleString()} decision{filtered.length === 1 ? '' : 's'} in {groups.length.toLocaleString()} group{groups.length === 1 ? '' : 's'}
+        </span>
+        {activeFilters > 0 && (
+          <Button variant="ghost" className="py-1 text-xs" onClick={() => setFilters(NO_FILTERS)}>
+            Clear filters
+          </Button>
+        )}
+      </Card>
+
       {list.length === 0 && <Callout tone="green">{tab === 'open' ? 'No open decisions.' : 'Nothing decided yet.'}</Callout>}
-      {groups.map(([type, byFp]) => {
-        const instances = [...byFp.values()].flat();
-        const entities = new Set(instances.map((i) => i.decision.subject.uid)).size;
-        const sev = instances[0]!.decision.severity;
-        return (
-          <section key={type} className="space-y-2">
-            <h3 className="flex items-center gap-2 text-sm font-semibold">
-              {TYPE_LABEL[type] ?? type}
-              <Badge tone={SEVERITY_TONE[sev]}>{sev}</Badge>
-              <span className="font-normal text-fg-muted">
-                {instances.length} decision{instances.length === 1 ? '' : 's'} in {entities} item{entities === 1 ? '' : 's'}
-              </span>
-            </h3>
-            {[...byFp.entries()].map(([fp, xs]) => {
-              const sample = xs[0]!;
-              const groupKey = `${type}|${fp}`;
-              return (
-                <div key={groupKey} className="space-y-1">
-                  <DecisionCard
-                    decision={sample.decision}
-                    count={xs.length}
-                    {...(sample.resolvedWith ? { current: sample.resolvedWith } : {})}
-                    {...(sample.stale ? { stale: sample.stale } : {})}
-                    onChoose={(o) => void m.resolve(xs.map((x) => x.decision), o)}
-                    onPolicy={(o) => void m.setPolicy(type, o)}
-                  />
-                  <button className="text-xs text-fg-muted hover:text-fg" onClick={() => setExpanded(expanded === groupKey ? undefined : groupKey)}>
-                    {expanded === groupKey ? 'Hide' : 'Show'} the {xs.length} affected place{xs.length === 1 ? '' : 's'}
-                  </button>
-                  {expanded === groupKey && (
-                    <ul className="ml-3 space-y-1 border-l border-line pl-3 text-xs">
-                      {xs.map((x) => (
-                        <li key={x.decision.id} className="flex flex-wrap items-center gap-2">
-                          <code className="font-medium">{x.decision.subject.id}</code>
-                          <span className="text-fg-muted">{x.decision.subject.location}</span>
-                          <span className="text-fg-subtle">({x.envs.join(', ')})</span>
-                          {x.decision.options.map((o) => (
-                            <button key={o.key} onClick={() => void m.resolve([x.decision], o.key)} className={cx('rounded border px-1.5 py-0.5', x.resolvedWith?.optionKey === o.key ? 'border-accent bg-accent text-on-accent' : 'border-line hover:bg-surface-hover')}>
-                              {o.label}
-                            </button>
-                          ))}
-                          {x.resolvedWith?.via === 'resource' && (
-                            <button className="text-fg-subtle hover:text-error" onClick={() => void m.clear([x.decision.id])}>
-                              reset
-                            </button>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
+      {list.length > 0 && filtered.length === 0 && <Callout tone="blue">Nothing matches these filters.</Callout>}
+
+      <PagerBar pager={pager} label="groups" />
+      <div className="space-y-4">
+        {pager.slice.map((g, i) => {
+          const sample = g.xs[0]!;
+          const prev = pager.slice[i - 1];
+          const newType = !prev || prev.type !== g.type;
+          const typeRow = summary.find((r) => r.type === g.type);
+          return (
+            <section key={g.key} className="space-y-1">
+              {newType && (
+                <h3 className="flex items-center gap-2 pt-1 text-sm font-semibold">
+                  {TYPE_LABEL[g.type] ?? g.type}
+                  <Badge tone={SEVERITY_TONE[sample.decision.severity]}>{sample.decision.severity}</Badge>
+                  {typeRow && tab === 'open' && (
+                    <span className="font-normal text-fg-muted">
+                      {typeRow.open.toLocaleString()} open in {typeRow.openItems.toLocaleString()} item{typeRow.openItems === 1 ? '' : 's'}
+                    </span>
                   )}
-                </div>
-              );
-            })}
-          </section>
-        );
-      })}
+                </h3>
+              )}
+              <DecisionCard
+                decision={sample.decision}
+                count={g.xs.length}
+                {...(sample.resolvedWith ? { current: sample.resolvedWith } : {})}
+                {...(sample.stale ? { stale: sample.stale } : {})}
+                onChoose={(o) => void m.resolve(g.xs.map((x) => x.decision), o)}
+                onPolicy={(o) => void m.setPolicy(g.type, o)}
+              />
+              <button className="text-xs text-fg-muted hover:text-fg" onClick={() => setExpanded(expanded === g.key ? undefined : g.key)}>
+                {expanded === g.key ? 'Hide' : 'Show'} the {g.xs.length.toLocaleString()} affected place{g.xs.length === 1 ? '' : 's'}
+              </button>
+              {expanded === g.key && <AffectedPlaces xs={g.xs} m={m} />}
+            </section>
+          );
+        })}
+      </div>
+      <PagerBar pager={pager} label="groups" />
     </div>
+  );
+}
+
+/** One row per decision type, with the bulk answer. The biggest, most severe types come first. */
+function SummaryTable({
+  rows,
+  selected,
+  onSelect,
+  onPolicy,
+  onRecommended,
+}: {
+  rows: TypeSummary[];
+  selected: DecisionType | 'all';
+  onSelect: (type: DecisionType) => void;
+  onPolicy: (type: DecisionType, optionKey: string | null) => void;
+  onRecommended: (type: DecisionType) => void;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <Card className="overflow-hidden">
+      <table className="w-full text-sm">
+        <thead className="bg-surface-2 text-left text-xs font-semibold tracking-wide text-fg-muted uppercase">
+          <tr>
+            <th className="px-3 py-2">Decision type</th>
+            <th className="px-3 py-2 text-right">Open</th>
+            <th className="px-3 py-2">In</th>
+            <th className="px-3 py-2 text-right">Decided</th>
+            <th className="w-[36%] px-3 py-2">Answer all open</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-line-soft">
+          {rows.map((r) => (
+            <tr key={r.type} className={cx(selected === r.type && 'bg-selected/40')}>
+              <td className="px-3 py-2">
+                <button type="button" className="flex flex-wrap items-center gap-2 text-left hover:underline" onClick={() => onSelect(r.type)} title="Show only this type">
+                  <span className="font-medium">{TYPE_LABEL[r.type] ?? r.type}</span>
+                  <Badge tone={SEVERITY_TONE[r.severity]}>{r.severity}</Badge>
+                </button>
+              </td>
+              <td className="px-3 py-2 text-right tabular-nums">{r.open.toLocaleString()}</td>
+              <td className="px-3 py-2 text-xs text-fg-muted">
+                {Object.entries(r.kinds)
+                  .sort(([, a], [, b]) => b - a)
+                  .map(([k, n]) => `${n.toLocaleString()} ${k === 'unit_type' ? 'unit type' : (KIND_LABEL[k as keyof typeof KIND_LABEL] ?? k).toLowerCase()}`)
+                  .join(', ') || '—'}
+              </td>
+              <td className="px-3 py-2 text-right text-fg-muted tabular-nums">{r.decided.toLocaleString()}</td>
+              <td className="px-3 py-2">
+                {r.policy ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone="green">policy</Badge>
+                    <span>{r.policyLabel ?? r.policy}</span>
+                    {r.open > 0 && <span className="text-xs text-fg-muted">({r.open.toLocaleString()} open don’t offer this option)</span>}
+                    <button className="text-xs text-fg-muted hover:text-error" onClick={() => onPolicy(r.type, null)}>
+                      remove
+                    </button>
+                  </div>
+                ) : r.open === 0 ? (
+                  <span className="text-xs text-fg-muted">all decided</span>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Select
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value) onPolicy(r.type, e.target.value);
+                      }}
+                      aria-label={`Answer all ${TYPE_LABEL[r.type] ?? r.type}`}
+                      className="max-w-xs py-1 text-xs"
+                    >
+                      <option value="">Set a policy…</option>
+                      {r.options.map((o) => (
+                        <option key={o.key} value={o.key}>
+                          {o.label}
+                          {o.covers < r.open ? ` (covers ${o.covers.toLocaleString()} of ${r.open.toLocaleString()})` : ''}
+                        </option>
+                      ))}
+                    </Select>
+                    {r.recommendedOpen > 0 && (
+                      <Button variant="ghost" className="py-1 text-xs" onClick={() => onRecommended(r.type)} title="Resolve these with their recommended option, one by one (no policy)">
+                        Use recommended ({r.recommendedOpen.toLocaleString()})
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
+  );
+}
+
+const PLACES_STEP = 50;
+
+/** The individual places behind one grouped card, revealed in steps so a 2,000-place group stays cheap. */
+function AffectedPlaces({ xs, m }: { xs: DecisionInstance[]; m: MigrationContext }) {
+  const [limit, setLimit] = useState(PLACES_STEP);
+  const shown = xs.slice(0, limit);
+  return (
+    <ul className="ml-3 space-y-1 border-l border-line pl-3 text-xs">
+      {shown.map((x) => (
+        <li key={x.decision.id} className="flex flex-wrap items-center gap-2">
+          <code className="font-medium">{x.decision.subject.id}</code>
+          <span className="text-fg-muted">{x.decision.subject.location}</span>
+          <span className="text-fg-subtle">({x.envs.join(', ')})</span>
+          {x.decision.options.map((o) => (
+            <button
+              key={o.key}
+              onClick={() => void m.resolve([x.decision], o.key)}
+              className={cx('rounded border px-1.5 py-0.5', x.resolvedWith?.optionKey === o.key ? 'border-accent bg-accent text-on-accent' : 'border-line hover:bg-surface-hover')}
+            >
+              {o.label}
+            </button>
+          ))}
+          {x.resolvedWith?.via === 'resource' && (
+            <button className="text-fg-subtle hover:text-error" onClick={() => void m.clear([x.decision.id])}>
+              reset
+            </button>
+          )}
+        </li>
+      ))}
+      {xs.length > limit && (
+        <li>
+          <button className="text-fg-muted hover:text-fg" onClick={() => setLimit((n) => n + PLACES_STEP)}>
+            Show {Math.min(PLACES_STEP, xs.length - limit)} more of {(xs.length - limit).toLocaleString()} remaining
+          </button>
+        </li>
+      )}
+    </ul>
   );
 }

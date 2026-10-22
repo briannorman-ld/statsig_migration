@@ -9,8 +9,13 @@ export const STATSIG_CONSOLE_BASE_URL = 'https://statsigapi.net/console/v1';
  * PLAN §4.1 rate budget: about 900 requests / 15 min and 12 / 10 s per project.
  * (The OpenAPI description says ~100 / 10 s; we stay well under it.)
  */
+/**
+ * Self-imposed request budget per project (PLAN §4.1). StatSig documents roughly 100 requests per
+ * 10 seconds and 900 per 15 minutes; we take 40% of the burst and the full 15-minute ceiling, which
+ * leaves room for other Console API clients on the same project. 429s still halve concurrency.
+ */
 export const STATSIG_DEFAULT_BUDGETS = [
-  { limit: 12, windowMs: 10_000 },
+  { limit: 40, windowMs: 10_000 },
   { limit: 900, windowMs: 15 * 60_000 },
 ];
 

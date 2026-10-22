@@ -50,6 +50,8 @@ export type TransportEvent =
   | { type: 'response'; method: string; url: string; status: number; elapsedMs: number }
   | { type: 'retry'; method: string; url: string; attempt: number; delayMs: number; reason: string }
   | { type: 'throttled'; url: string; newLimit: number }
+  /** The request is held back by our own rate budget (not by the server) for about `waitMs`. */
+  | { type: 'paced'; url: string; waitMs: number }
   | { type: 'gave-up'; method: string; url: string; attempts: number; reason: string };
 
 export interface TransportOptions {
@@ -114,7 +116,11 @@ export class Transport {
   async request(req: TransportRequest): Promise<TransportResponse> {
     let lastCause = 'unknown';
     for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt++) {
-      if (this.budget) await this.budget.take(req.signal);
+      if (this.budget) {
+        const waitMs = this.budget.peekWait();
+        if (waitMs > 0) this.onEvent({ type: 'paced', url: req.url, waitMs });
+        await this.budget.take(req.signal);
+      }
       const release = await this.limiter.acquire();
       const started = this.clock.now();
       let outcome: Outcome;

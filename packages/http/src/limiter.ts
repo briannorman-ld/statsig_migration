@@ -93,6 +93,13 @@ export class RateBudget {
     return this.stamps.length;
   }
 
+  /** How long the next request would wait right now, in ms (0 when a slot is free). */
+  peekWait(): number {
+    const now = this.clock.now();
+    this.prune(now);
+    return this.waitNeeded(now);
+  }
+
   take(signal?: AbortSignal): Promise<void> {
     // Serialize so concurrent callers don't all observe the same free slot.
     const next = this.queue.then(() => this.takeOne(signal));
