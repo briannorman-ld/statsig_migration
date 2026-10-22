@@ -68,7 +68,8 @@ export interface CapabilityMatrix {
   instance: string;
   projectKey: string;
   projectName: string;
-  token: TokenInfo;
+  /** Named `tokenInfo`: the store refuses any key called `token` (assertNoSecrets). */
+  tokenInfo: TokenInfo;
   projectAccess: { allowed: string[]; denied: string[] };
   environments: EnvironmentCapabilities[];
   capabilities: Capability[];
@@ -255,7 +256,7 @@ export async function probeCapabilities(client: LdClient, projectKey: string, op
     instance: client.instance.id,
     projectKey: project.key,
     projectName: project.name,
-    token,
+    tokenInfo: token,
     projectAccess,
     environments,
     capabilities,

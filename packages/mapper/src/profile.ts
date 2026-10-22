@@ -1,0 +1,119 @@
+import type { CanonicalSnapshot } from '@sslm/canonical';
+import type { MappingProfile, SourceProfile } from './types.ts';
+
+/** LD attribute names for StatSig's built-in user fields (PLAN §10.3, "mapped attribute names"). */
+export const DEFAULT_ATTRIBUTES: Record<string, string> = {
+  email: 'email',
+  ip_address: 'ip',
+  country: 'country',
+  locale: 'locale',
+  app_version: 'appVersion',
+  browser_name: 'browserName',
+  browser_version: 'browserVersion',
+  os_name: 'osName',
+  os_version: 'osVersion',
+  device_model: 'deviceModel',
+  user_agent: 'userAgent',
+};
+
+/** LD built-in context attributes that a StatSig custom field must not shadow. */
+const RESERVED_ATTRIBUTES = new Set(['key', 'kind', '_meta', 'anonymous']);
+
+export function attributeFor(profile: MappingProfile, conditionType: string, field?: string | null): { attribute: string; renamed: boolean } {
+  if (conditionType === 'custom_field') {
+    const f = field ?? '';
+    const mapped = profile.attributes[`custom_field:${f}`];
+    if (mapped) return { attribute: mapped, renamed: mapped !== f };
+    if (RESERVED_ATTRIBUTES.has(f)) return { attribute: `custom_${f}`, renamed: true };
+    return { attribute: f, renamed: false };
+  }
+  const a = profile.attributes[conditionType] ?? DEFAULT_ATTRIBUTES[conditionType] ?? conditionType;
+  return { attribute: a, renamed: false };
+}
+
+/**
+ * Default context kind for a StatSig unit type. `userID` is LD's `user`; custom unit IDs get their
+ * own kind (CLAUDE.md: never collapse them into `user`).
+ */
+export function defaultKindFor(unitType: string): string {
+  const u = unitType.trim();
+  if (/^userid$/i.test(u)) return 'user';
+  if (/^stableid$/i.test(u)) return 'device';
+  const stripped = u.replace(/[_-]?id$/i, '') || u;
+  const k = stripped
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return k === 'kind' || k === 'multi' || k === '' ? `${k || 'unit'}-id` : k;
+}
+
+export function kindFor(profile: MappingProfile, sourceId: string, unitType: string): string {
+  const sp = profile.sources[sourceId];
+  const exact = sp?.unitTypeKinds[unitType];
+  if (exact) return exact;
+  // StatSig compares unit types case-insensitively (customIDs lookup).
+  const ci = sp && Object.entries(sp.unitTypeKinds).find(([k]) => k.toLowerCase() === unitType.toLowerCase());
+  return ci?.[1] ?? defaultKindFor(unitType);
+}
+
+/**
+ * A fresh profile for a set of snapshots: environments map to the LD environment with the same
+ * key or name (case-insensitive), otherwise unmapped. Unit types are left to their defaults, so
+ * `unit_type_kind` decisions are raised until the user confirms them.
+ */
+export function defaultProfile(snapshots: CanonicalSnapshot[], ldEnvs: { key: string; name: string }[]): MappingProfile {
+  const sources: Record<string, SourceProfile> = {};
+  for (const s of snapshots) sources[s.source.sourceId] = { envMapping: autoEnvMapping(s, ldEnvs), unitTypeKinds: {} };
+  return { version: 1, sources, attributes: {}, policies: {} };
+}
+
+export function autoEnvMapping(snapshot: CanonicalSnapshot, ldEnvs: { key: string; name: string }[]): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  const used = new Set<string>();
+  for (const e of snapshot.environments) {
+    const m = ldEnvs.find((l) => !used.has(l.key) && (l.key.toLowerCase() === e.name.toLowerCase() || l.name.toLowerCase() === e.name.toLowerCase()));
+    out[e.name] = m?.key ?? null;
+    if (m) used.add(m.key);
+  }
+  return out;
+}
+
+/**
+ * Merge a stored profile with what a new snapshot or LD project adds, never overwriting choices.
+ * `hints` (StatSig env → LD env) fill environments that have no exact match, e.g. the demo's
+ * `staging → test`.
+ */
+export function reconcileProfile(profile: MappingProfile, snapshots: CanonicalSnapshot[], ldEnvs: { key: string; name: string }[], hints: Record<string, string> = {}): MappingProfile {
+  const sources = { ...profile.sources };
+  for (const s of snapshots) {
+    const existing = sources[s.source.sourceId];
+    const auto = autoEnvMapping(s, ldEnvs);
+    for (const [from, to] of Object.entries(hints)) {
+      if (auto[from] === null && ldEnvs.some((e) => e.key === to) && !Object.values(auto).includes(to)) auto[from] = to;
+    }
+    const valid = new Set(ldEnvs.map((e) => e.key));
+    const envMapping: Record<string, string | null> = {};
+    for (const e of s.environments) {
+      const prev = existing?.envMapping[e.name];
+      envMapping[e.name] = prev === undefined || (prev !== null && !valid.has(prev)) ? (auto[e.name] ?? null) : prev;
+    }
+    sources[s.source.sourceId] = { envMapping, unitTypeKinds: existing?.unitTypeKinds ?? {} };
+  }
+  return { ...profile, sources };
+}
+
+/** LD keys allow letters, digits, `.`, `_` and `-`. */
+export function sanitizeKey(id: string): string {
+  return id.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._-]+/, '') || 'statsig_item';
+}
+
+/** LD tags: letters, digits, `.`, `_`, `-`; at most 64 characters. */
+export function sanitizeTag(tag: string): string {
+  return tag
+    .normalize('NFKD')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase()
+    .slice(0, 64);
+}

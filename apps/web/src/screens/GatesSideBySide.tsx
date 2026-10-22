@@ -1,80 +1,212 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { matchAcrossSources, overridesForEnvironment, resolveRulesForEnvironment, type CanonicalSnapshot, type Gate } from '@sslm/canonical';
-import type { LdFlagSummary } from '@sslm/ld-client';
+import { LD_INSTANCES } from '@sslm/ld-client';
+import type { GateMapResult } from '@sslm/mapper';
+import { migrationStatus, type MigrationStatus } from '@sslm/planner';
 import type { SourceRecord } from '@sslm/store';
-import { Badge, Callout, Card, cx, Input } from '../components/ui.tsx';
-import { loadLdFlags, useLdSession } from '../lib/ld.ts';
+import { DecisionCard, FIDELITY_TONE } from '../components/DecisionCard.tsx';
+import { LdTargeting, StatsigRules } from '../components/Targeting.tsx';
+import { Badge, Button, Callout, Card, cx, Input, Select } from '../components/ui.tsx';
+import { ldFlagState, mapGateFor } from '../lib/migration.ts';
+import type { MigrationContext } from '../lib/useMigration.ts';
+
+export const STATUS: Record<MigrationStatus, { label: string; tone: 'slate' | 'green' | 'amber' | 'red' | 'violet'; dot: string }> = {
+  not_in_ld: { label: 'not migrated', tone: 'slate', dot: 'bg-slate-300' },
+  not_migrated: { label: 'not migrated here', tone: 'slate', dot: 'bg-slate-300' },
+  in_sync: { label: 'in sync', tone: 'green', dot: 'bg-emerald-500' },
+  statsig_changed: { label: 'StatSig changed', tone: 'amber', dot: 'bg-amber-500' },
+  decisions_changed: { label: 'decisions changed', tone: 'amber', dot: 'bg-amber-400' },
+  foreign: { label: 'existing LD key', tone: 'red', dot: 'bg-red-400' },
+  other_source: { label: 'migrated from another source', tone: 'violet', dot: 'bg-violet-400' },
+};
+
+type StatusFilter = 'all' | 'open' | 'blocking' | 'not_migrated' | 'in_sync' | 'changed';
+
+interface Row {
+  sourceId: string;
+  gate: Gate;
+  shared: number;
+  ldEnv: string | null;
+  result: GateMapResult;
+  /** Per LD environment, for the status strip. */
+  strip: { ldEnv: string; status: MigrationStatus }[];
+}
 
 /**
- * Raw, read-only side-by-side list of gates (M1 shell; the full explorer with status strips,
- * fidelity and the detail drawer is M2). Left: StatSig, filtered and resolved for the selected
- * environment. Right: the LD flag with the same key, if LD is connected.
+ * Side-by-side gates (PLAN §9): StatSig on the left, LD on the right, with the per-environment
+ * status strip read from LD provenance, fidelity and open decisions, and the Migrate action.
  */
-export function GatesSideBySide({ workspaceId, sources, snapshots, env }: { workspaceId: string; sources: SourceRecord[]; snapshots: Record<string, CanonicalSnapshot | undefined>; env: string }) {
+export function GatesSideBySide({
+  sources,
+  snapshots,
+  env,
+  m,
+  onMigrate,
+  onOpenMapping,
+}: {
+  sources: SourceRecord[];
+  snapshots: Record<string, CanonicalSnapshot | undefined>;
+  env: string;
+  m: MigrationContext;
+  onMigrate: (gateUids: string[], ldEnvs: string[]) => void;
+  onOpenMapping: () => void;
+}) {
   const [q, setQ] = useState('');
   const [showArchived, setShowArchived] = useState(false);
+  const [filter, setFilter] = useState<StatusFilter>('all');
   const [open, setOpen] = useState<string>();
-  const ld = useLdSession(workspaceId);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [targetEnvs, setTargetEnvs] = useState<string[] | null>(null);
+  const { ld } = m;
   const snaps = sources.map((s) => snapshots[s.id]!).filter(Boolean);
   const matched = useMemo(() => matchAcrossSources(snaps, 'gate'), [snaps]);
   const aliasOf = (sourceId: string) => sources.find((s) => s.id === sourceId)?.alias ?? sourceId;
-
-  // LD env mapping is M3; for now match by key.
-  const ldEnv = ld.matrix?.environments.find((e) => e.key === env || e.name.toLowerCase() === env.toLowerCase());
-  useEffect(() => {
-    if (ld.status === 'connected' && ld.projectKey && ldEnv && ld.flags?.envKey !== ldEnv.key) void loadLdFlags(workspaceId, ldEnv.key);
-  }, [ld.status, ld.projectKey, ldEnv?.key, workspaceId, ld.flags?.envKey]);
   const ldFlags = useMemo(() => new Map((ld.flags?.items ?? []).map((f) => [f.key, f])), [ld.flags]);
+  const ldEnvOf = (sourceId: string, statsigEnv: string) => (m.connected ? (m.profile.sources[sourceId]?.envMapping[statsigEnv] ?? null) : null);
 
-  const rows = matched
-    .flatMap((m) => Object.entries(m.bySource).map(([sourceId, e]) => ({ sourceId, gate: e as Gate, shared: Object.keys(m.bySource).length })))
-    .filter((r) => (showArchived || !r.gate.archived) && (!q || r.gate.id.toLowerCase().includes(q.toLowerCase())));
+  const rows: Row[] = useMemo(
+    () =>
+      matched.flatMap((mr) =>
+        Object.entries(mr.bySource).map(([sourceId, e]) => {
+          const gate = e as Gate;
+          const snap = snapshots[sourceId]!;
+          const ldEnv = ldEnvOf(sourceId, env);
+          const result = mapGateFor(snap, gate, { statsig: env, ld: ldEnv ?? env }, m);
+          const strip = m.connected
+            ? m.ldEnvs.map((le) => {
+                const se = Object.entries(m.profile.sources[sourceId]?.envMapping ?? {}).find(([, v]) => v === le.key)?.[0];
+                if (!se) return { ldEnv: le.key, status: 'not_in_ld' as MigrationStatus };
+                const r = se === env ? result : mapGateFor(snap, gate, { statsig: se, ld: le.key }, m);
+                const f = ldFlags.get(r.flagKey);
+                return { ldEnv: le.key, status: migrationStatus(f && ldFlagState(f), le.key, r, { id: gate.id, source: snap.source.alias }).status };
+              })
+            : [];
+          return { sourceId, gate, shared: Object.keys(mr.bySource).length, ldEnv, result, strip };
+        }),
+      ),
+    [matched, snapshots, env, m, ldFlags],
+  );
+
+  const visible = rows.filter((r) => {
+    if (!showArchived && r.gate.archived) return false;
+    if (q && !r.gate.id.toLowerCase().includes(q.toLowerCase())) return false;
+    const here = r.strip.find((s) => s.ldEnv === r.ldEnv)?.status;
+    switch (filter) {
+      case 'open':
+        return r.result.unresolved.length > 0;
+      case 'blocking':
+        return r.result.unresolved.some((d) => d.severity === 'blocking');
+      case 'not_migrated':
+        return !here || here === 'not_in_ld' || here === 'not_migrated';
+      case 'in_sync':
+        return here === 'in_sync';
+      case 'changed':
+        return here === 'statsig_changed' || here === 'decisions_changed';
+      default:
+        return true;
+    }
+  });
+  const selectable = visible.filter((r) => !r.gate.archived);
+  const allSelected = selectable.length > 0 && selectable.every((r) => selected.has(r.gate.uid));
+  const mappedHere = [...new Set(sources.map((s) => ldEnvOf(s.id, env)).filter((x): x is string => !!x))];
+  const envChoice = targetEnvs ?? mappedHere;
+  const unmappedSources = m.connected ? sources.filter((s) => !ldEnvOf(s.id, env)) : [];
+
+  const toggle = (uid: string) =>
+    setSelected((x) => {
+      const n = new Set(x);
+      if (n.has(uid)) n.delete(uid);
+      else n.add(uid);
+      return n;
+    });
 
   return (
-    <div>
-      <div className="mb-3 flex items-center gap-3">
+    <div className="pb-20">
+      <div className="mb-3 flex flex-wrap items-center gap-3">
         <h2 className="text-lg font-semibold">Gates</h2>
-        <Badge>{rows.length}</Badge>
+        <Badge>{visible.length}</Badge>
         <span className="text-sm text-slate-500">
-          in <b>{env}</b>
+          StatSig <b>{env}</b>
+          {mappedHere.length > 0 && (
+            <>
+              {' '}
+              → LD <b>{mappedHere.join(', ')}</b>
+            </>
+          )}
         </span>
         <div className="ml-auto flex items-center gap-3">
+          <Select value={filter} onChange={(e) => setFilter(e.target.value as StatusFilter)} aria-label="Filter by status">
+            <option value="all">All</option>
+            <option value="open">Open decisions</option>
+            <option value="blocking">Blocking decisions</option>
+            <option value="not_migrated">Not migrated here</option>
+            <option value="in_sync">In sync</option>
+            <option value="changed">Changed since sync</option>
+          </Select>
           <label className="flex items-center gap-1.5 text-sm text-slate-600">
             <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} /> archived
           </label>
-          <Input placeholder="Filter by name" value={q} onChange={(e) => setQ(e.target.value)} className="w-56" aria-label="Filter gates" />
+          <Input placeholder="Filter by name" value={q} onChange={(e) => setQ(e.target.value)} className="w-48" aria-label="Filter gates" />
         </div>
       </div>
-      {ld.status !== 'connected' && <div className="mb-3"><Callout tone="blue">Connect LaunchDarkly to fill in the right-hand column.</Callout></div>}
-      {ld.status === 'connected' && ld.projectKey && !ldEnv && ld.matrix && (
-        <div className="mb-3"><Callout>LD project “{ld.projectKey}” has no environment matching “{env}”. Environment mapping arrives in M3.</Callout></div>
+      {ld.status !== 'connected' && (
+        <div className="mb-3">
+          <Callout tone="blue">Connect LaunchDarkly to see what's already in LD and to migrate. Decisions can be made without it.</Callout>
+        </div>
+      )}
+      {unmappedSources.length > 0 && (
+        <div className="mb-3">
+          <Callout>
+            StatSig <b>{env}</b> isn't mapped to an LD environment for {unmappedSources.map((s) => s.label).join(', ')}, so it can't be migrated.{' '}
+            <button className="font-medium underline" onClick={onOpenMapping}>
+              Map environments
+            </button>
+          </Callout>
+        </div>
       )}
       <Card className="overflow-hidden">
         <table className="w-full table-fixed text-sm">
           <thead className="bg-slate-50 text-left text-xs font-semibold tracking-wide text-slate-500 uppercase">
             <tr>
-              <th className="w-[46%] px-3 py-2">StatSig</th>
-              <th className="w-[12%] px-3 py-2">In {env}</th>
-              <th className="px-3 py-2">LaunchDarkly{ldEnv ? ` · ${ldEnv.key}` : ''}</th>
+              <th className="w-9 px-3 py-2">
+                <input type="checkbox" aria-label="Select all" checked={allSelected} onChange={() => setSelected(allSelected ? new Set() : new Set(selectable.map((r) => r.gate.uid)))} />
+              </th>
+              <th className="w-[38%] px-3 py-2">StatSig</th>
+              <th className="w-[10%] px-3 py-2">In {env}</th>
+              <th className="w-[18%] px-3 py-2">Mapping</th>
+              <th className="px-3 py-2">LaunchDarkly</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {rows.map(({ sourceId, gate, shared }) => {
+            {visible.map((row) => {
+              const { sourceId, gate, shared, result: r } = row;
               const key = `${sourceId}/${gate.id}`;
               const res = resolveRulesForEnvironment(gate.rules, env);
               const overrides = overridesForEnvironment(gate.overrides, env);
-              const flag = ldFlags.get(gate.id);
+              const flag = ldFlags.get(r.flagKey);
+              const blocking = r.unresolved.filter((d) => d.severity === 'blocking').length;
               return (
                 <Fragment key={key}>
                   <tr className={cx('cursor-pointer align-top hover:bg-slate-50', open === key && 'bg-slate-50')} onClick={() => setOpen(open === key ? undefined : key)}>
+                    <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" aria-label={`Select ${gate.id}`} disabled={gate.archived} checked={selected.has(gate.uid)} onChange={() => toggle(gate.uid)} />
+                    </td>
                     <td className="px-3 py-2">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="font-mono text-[13px] font-medium">{gate.id}</span>
                         {sources.length > 1 && <Badge tone="slate">{aliasOf(sourceId)}</Badge>}
-                        {shared > 1 && <Badge tone="violet" title="Same name in more than one source (consolidation, M8)">in {shared} sources</Badge>}
+                        {shared > 1 && (
+                          <Badge tone="violet" title="Same name in more than one source (consolidation, M8)">
+                            in {shared} sources
+                          </Badge>
+                        )}
                         {!gate.enabled && <Badge tone="red">disabled</Badge>}
                         {gate.archived && <Badge tone="slate">archived</Badge>}
-                        {gate.lifecycle?.type === 'STALE' && <Badge tone="amber" title={gate.lifecycle.typeReason}>stale</Badge>}
+                        {gate.lifecycle?.type === 'STALE' && (
+                          <Badge tone="amber" title={`${gate.lifecycle.typeReason}: consider hard-coding instead of migrating`}>
+                            stale
+                          </Badge>
+                        )}
                         {gate.idType !== 'userID' && <Badge tone="blue">{gate.idType}</Badge>}
                       </div>
                       {gate.description && <div className="mt-0.5 truncate text-xs text-slate-500">{gate.description}</div>}
@@ -84,21 +216,28 @@ export function GatesSideBySide({ workspaceId, sources, snapshots, env }: { work
                       </div>
                     </td>
                     <td className="px-3 py-2 text-xs text-slate-600">
-                      <div>{res.rules.length} rule{res.rules.length === 1 ? '' : 's'}</div>
+                      <div>
+                        {res.rules.length} rule{res.rules.length === 1 ? '' : 's'}
+                      </div>
                       {res.dropped.length > 0 && <div className="text-slate-400">{res.dropped.length} not here</div>}
                       {overrides.length > 0 && <div>{overrides.reduce((n, o) => n + o.ids.length, 0)} overrides</div>}
                     </td>
                     <td className="px-3 py-2">
-                      <LdCell flag={flag} envKey={ldEnv?.key} connected={ld.status === 'connected' && !!ld.flags} />
+                      <div className="flex flex-wrap gap-1">
+                        {/* Fidelity is only meaningful once nothing is blocking. */}
+                        {blocking === 0 && <Badge tone={FIDELITY_TONE[r.fidelity.overall]}>{r.skipped ? 'not migrated' : r.fidelity.overall}</Badge>}
+                        {blocking > 0 && <Badge tone="red">{blocking} blocking</Badge>}
+                        {r.unresolved.length - blocking > 0 && <Badge tone="amber">{r.unresolved.length - blocking} to decide</Badge>}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2">
+                      <LdCell row={row} connected={ld.status === 'connected' && !!ld.flags} flagExists={!!flag} on={row.ldEnv ? (flag?.environments?.[row.ldEnv]?.on ?? undefined) : undefined} />
                     </td>
                   </tr>
                   {open === key && (
                     <tr className="bg-slate-50">
-                      <td colSpan={3} className="px-3 pb-3">
-                        <div className="grid grid-cols-2 gap-3">
-                          <Raw title={`StatSig · rules applying in ${env}`} value={{ enabled: gate.enabled, idType: gate.idType, rules: res.rules.map(({ conditions, ...r }) => ({ ...r, conditions: conditions.map(({ raw: _raw, ...c }) => c) })), overrides, dropped: res.dropped, unresolvedTierConditions: res.unresolved.length }} />
-                          <Raw title={flag ? `LaunchDarkly · ${flag.key}` : 'LaunchDarkly'} value={flag ?? (ld.flags ? 'No flag with this key.' : 'Not connected.')} />
-                        </div>
+                      <td colSpan={5} className="px-3 pb-4">
+                        <Detail row={row} m={m} env={env} res={res} overrides={overrides} flagUrl={flag && ld.projectKey && row.ldEnv ? `${LD_INSTANCES[ld.instance ?? 'us'].origin}/${ld.projectKey}/${row.ldEnv}/features/${flag.key}` : undefined} />
                       </td>
                     </tr>
                   )}
@@ -108,29 +247,111 @@ export function GatesSideBySide({ workspaceId, sources, snapshots, env }: { work
           </tbody>
         </table>
       </Card>
+
+      {selected.size > 0 && (
+        <div className="fixed right-0 bottom-0 left-72 z-40 border-t border-slate-200 bg-white/95 px-5 py-3 shadow-lg backdrop-blur">
+          <div className="flex flex-wrap items-center gap-4">
+            <span className="text-sm font-medium">
+              {selected.size} gate{selected.size === 1 ? '' : 's'} selected
+            </span>
+            <button className="text-sm text-slate-500 hover:text-slate-800" onClick={() => setSelected(new Set())}>
+              Clear
+            </button>
+            <div className="flex items-center gap-3 text-sm">
+              <span className="text-slate-500">Migrate to LD:</span>
+              {m.ldEnvs.map((e) => (
+                <label key={e.key} className="flex items-center gap-1.5">
+                  <input type="checkbox" checked={envChoice.includes(e.key)} onChange={() => setTargetEnvs(envChoice.includes(e.key) ? envChoice.filter((x) => x !== e.key) : [...envChoice, e.key])} />
+                  {e.key}
+                  {e.critical && <Badge tone="red">critical</Badge>}
+                </label>
+              ))}
+              {!m.connected && <span className="text-slate-400">connect LaunchDarkly first</span>}
+            </div>
+            <Button className="ml-auto" disabled={!m.connected || envChoice.length === 0} onClick={() => onMigrate([...selected], envChoice)}>
+              Plan migration…
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function LdCell({ flag, envKey, connected }: { flag?: LdFlagSummary; envKey?: string; connected: boolean }) {
+function LdCell({ row, connected, flagExists, on }: { row: Row; connected: boolean; flagExists: boolean; on?: boolean }) {
   if (!connected) return <span className="text-xs text-slate-400">—</span>;
-  if (!flag) return <span className="text-xs text-slate-500">not in LD</span>;
-  const on = envKey ? flag.environments?.[envKey]?.on : undefined;
-  const ours = flag.tags?.includes('statsig-migrated');
+  const here = row.strip.find((s) => s.ldEnv === row.ldEnv);
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <span className="font-mono text-[13px]">{flag.key}</span>
-      {on !== undefined && <Badge tone={on ? 'green' : 'slate'}>{on ? 'on' : 'off'}</Badge>}
-      {ours ? <Badge tone="blue">statsig-migrated</Badge> : <Badge tone="amber" title="Not created by this app: migrating needs a key_collision decision (M3)">existing key</Badge>}
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {flagExists ? <span className="font-mono text-[13px]">{row.result.flagKey}</span> : <span className="text-xs text-slate-500">not in LD</span>}
+        {on !== undefined && <Badge tone={on ? 'green' : 'slate'}>{on ? 'on' : 'off'}</Badge>}
+        {here && here.status !== 'not_in_ld' && <Badge tone={STATUS[here.status].tone}>{STATUS[here.status].label}</Badge>}
+      </div>
+      <div className="flex gap-2.5 text-[11px] text-slate-500">
+        {row.strip.map((s) => (
+          <span key={s.ldEnv} className="flex items-center gap-1" title={`${s.ldEnv}: ${STATUS[s.status].label}`}>
+            <span className={cx('h-2 w-2 rounded-full', STATUS[s.status].dot)} />
+            {s.ldEnv}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
 
-function Raw({ title, value }: { title: string; value: unknown }) {
+function Detail({ row, m, env, res, overrides, flagUrl }: { row: Row; m: MigrationContext; env: string; res: ReturnType<typeof resolveRulesForEnvironment>; overrides: Gate['overrides']; flagUrl?: string }) {
+  const r = row.result;
+  const stale = new Map(r.stale.map((s) => [s.decision.id, s.previous]));
   return (
-    <div className="min-w-0">
-      <div className="mb-1 text-xs font-semibold text-slate-500">{title}</div>
-      <pre className="max-h-96 overflow-auto rounded-md border border-slate-200 bg-white p-2 font-mono text-xs leading-relaxed">{JSON.stringify(value, null, 2)}</pre>
+    <div className="space-y-3 pt-1">
+      <div className="grid grid-cols-2 gap-3">
+        <Card className="p-3">
+          <div className="mb-2 text-xs font-semibold text-slate-500">StatSig · rules applying in {env}</div>
+          <StatsigRules rules={res.rules} overrides={overrides} enabled={row.gate.enabled} />
+        </Card>
+        <Card className="p-3">
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-500">
+            <span>
+              LaunchDarkly · {r.skipped ? 'not migrated' : row.ldEnv ? `proposed for ${row.ldEnv}` : m.connected ? 'proposed (environment not mapped)' : 'proposed'}
+              {r.unresolved.length > 0 && !r.skipped && ' (preview with recommended answers)'}
+            </span>
+            {flagUrl && (
+              <a href={flagUrl} target="_blank" rel="noreferrer" className="ml-auto font-normal text-blue-700 hover:underline">
+                Open in LD ↗
+              </a>
+            )}
+          </div>
+          {r.skipped ? <p className="text-xs text-slate-500">{r.skipped}</p> : <LdTargeting env={r.env} variations={r.shell.variations} />}
+        </Card>
+      </div>
+      {r.fidelity.notes.length > 0 && (
+        <Card className="p-3">
+          <div className="mb-1.5 text-xs font-semibold text-slate-500">Fidelity</div>
+          <ul className="space-y-1 text-xs">
+            {r.fidelity.notes.map((n, i) => (
+              <li key={i} className="flex gap-2">
+                <Badge tone={FIDELITY_TONE[n.fidelity]}>{n.fidelity}</Badge>
+                <span>
+                  {n.message}
+                  {n.location && <span className="text-slate-400"> · {n.location}</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+      {(r.unresolved.length > 0 || r.applied.length > 0) && (
+        <div className="space-y-2">
+          <div className="text-xs font-semibold text-slate-500">Decisions</div>
+          {r.unresolved.map((d) => (
+            <DecisionCard key={d.id} decision={d} stale={stale.get(d.id)} compact onChoose={(o) => void m.resolve([d], o)} />
+          ))}
+          {r.applied.map((a) => (
+            <DecisionCard key={a.decision.id} decision={a.decision} current={{ optionKey: a.optionKey, via: a.via }} compact onChoose={(o) => void m.resolve([a.decision], o)} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

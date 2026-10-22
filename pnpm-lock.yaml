@@ -47,12 +47,21 @@ importers:
       '@sslm/demo-fixtures':
         specifier: workspace:*
         version: link:../../packages/demo-fixtures
+      '@sslm/executor':
+        specifier: workspace:*
+        version: link:../../packages/executor
       '@sslm/http':
         specifier: workspace:*
         version: link:../../packages/http
       '@sslm/ld-client':
         specifier: workspace:*
         version: link:../../packages/ld-client
+      '@sslm/mapper':
+        specifier: workspace:*
+        version: link:../../packages/mapper
+      '@sslm/planner':
+        specifier: workspace:*
+        version: link:../../packages/planner
       '@sslm/statsig-client':
         specifier: workspace:*
         version: link:../../packages/statsig-client
@@ -124,6 +133,28 @@ importers:
         specifier: ^3.0.2
         version: 3.0.2(@types/node@22.20.5)(typescript@7.0.2)(vite@8.3.3(@types/node@22.20.5)(jiti@2.7.0))
 
+  packages/executor:
+    dependencies:
+      '@sslm/ld-client':
+        specifier: workspace:*
+        version: link:../ld-client
+      '@sslm/mapper':
+        specifier: workspace:*
+        version: link:../mapper
+      '@sslm/planner':
+        specifier: workspace:*
+        version: link:../planner
+    devDependencies:
+      '@sslm/adapters':
+        specifier: workspace:*
+        version: link:../adapters
+      '@sslm/demo-fixtures':
+        specifier: workspace:*
+        version: link:../demo-fixtures
+      '@sslm/statsig-client':
+        specifier: workspace:*
+        version: link:../statsig-client
+
   packages/http: {}
 
   packages/ld-client:
@@ -140,12 +171,35 @@ importers:
       '@sslm/canonical':
         specifier: workspace:*
         version: link:../canonical
+    devDependencies:
+      '@sslm/adapters':
+        specifier: workspace:*
+        version: link:../adapters
+      '@sslm/demo-fixtures':
+        specifier: workspace:*
+        version: link:../demo-fixtures
+      '@sslm/statsig-client':
+        specifier: workspace:*
+        version: link:../statsig-client
 
   packages/planner:
     dependencies:
       '@sslm/canonical':
         specifier: workspace:*
         version: link:../canonical
+      '@sslm/mapper':
+        specifier: workspace:*
+        version: link:../mapper
+    devDependencies:
+      '@sslm/adapters':
+        specifier: workspace:*
+        version: link:../adapters
+      '@sslm/demo-fixtures':
+        specifier: workspace:*
+        version: link:../demo-fixtures
+      '@sslm/statsig-client':
+        specifier: workspace:*
+        version: link:../statsig-client
 
   packages/statsig-client:
     dependencies:
@@ -161,6 +215,12 @@ importers:
       '@sslm/canonical':
         specifier: workspace:*
         version: link:../canonical
+      '@sslm/executor':
+        specifier: workspace:*
+        version: link:../executor
+      '@sslm/mapper':
+        specifier: workspace:*
+        version: link:../mapper
       dexie:
         specifier: ^4.4.6
         version: 4.4.6

@@ -1,5 +1,6 @@
 import { checkUpload, type CanonicalSnapshot, type SourceDescriptor } from '@sslm/canonical';
-import type { CrawlProgress } from '@sslm/adapters';
+import { crawlConsoleProject, normalizeConsoleSnapshot, type CrawlProgress } from '@sslm/adapters';
+import { StatsigConsoleClient, type SchemaIssue } from '@sslm/statsig-client';
 import { pipeline } from '../pipeline/client.ts';
 import { demoKey, startDemoMock } from './demo.ts';
 import { secrets } from './secrets.ts';
@@ -21,12 +22,25 @@ export async function syncConsoleSource(workspaceId: string, source: SourceDescr
     apiKey = secrets.get('statsig', source.id);
   }
   if (!apiKey) throw new Error('Enter the Console API key for this source (keys are kept in memory only).');
+  const onRetry = (url: string, delayMs: number, reason: string) =>
+    h.onRetry?.(`Retrying ${new URL(url, location.href).pathname.split('/console/v1')[1] ?? url} in ${Math.round(delayMs / 100) / 10}s (${reason})`);
+  if (source.isDemo) {
+    // The demo's MSW mock reliably intercepts only this page's own requests: after a reload, the
+    // service worker doesn't serve requests from the pipeline worker. So demo sources crawl on the
+    // main thread, through the same adapters; the dataset is small.
+    const issues: SchemaIssue[] = [];
+    const client = new StatsigConsoleClient({ baseUrl: source.baseUrl, apiKey, onSchemaIssue: (i) => issues.push(i), transport: { onEvent: (e) => e.type === 'retry' && onRetry(e.url, e.delayMs, e.reason) } });
+    const raw = await crawlConsoleProject(client, issues, { onProgress: h.onProgress });
+    const snapshot = normalizeConsoleSnapshot(raw, { source: { sourceId: source.id, sourceKind: 'console_api', alias: source.alias } });
+    await store.saveSnapshot(workspaceId, snapshot);
+    return snapshot;
+  }
   const job = pipeline().crawlConsole(
     { source: { sourceId: source.id, alias: source.alias }, baseUrl: source.baseUrl, apiKey },
     {
       onProgress: h.onProgress,
       onTransport: (e) => {
-        if (e.type === 'retry') h.onRetry?.(`Retrying ${new URL(e.url, location.href).pathname.split('/console/v1')[1] ?? e.url} in ${Math.round(e.delayMs / 100) / 10}s (${e.reason})`);
+        if (e.type === 'retry') onRetry(e.url, e.delayMs, e.reason);
       },
     },
   );

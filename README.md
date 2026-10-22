@@ -3,7 +3,8 @@
 A browser-only app (static Vite SPA, no backend) that reads StatSig projects and compares them
 with one LaunchDarkly project. The spec is [PLAN.md](PLAN.md); project rules are in
 [CLAUDE.md](CLAUDE.md). Status: **M0 + M1** (foundations, source adapters, canonical model, demo
-dataset, LD connect + capability probe, a minimal UI shell). M0 spike #1 is still open:
+dataset, LD connect + capability probe) **+ M3 for gates** (mapper with decisions, mapping profile,
+planner, dry run, journaled executor with LD provenance, undo). M0 spike #1 is still open:
 [docs/TODO-m0-spike-1-statsig-cors.md](docs/TODO-m0-spike-1-statsig-cors.md).
 
 ## Run
@@ -16,6 +17,7 @@ pnpm test           # all unit tests (Vitest)
 pnpm typecheck
 pnpm build          # static site in apps/web/dist (strict CSP <meta>; vercel.json sends headers)
 pnpm test:live      # read-only checks against real LD; needs LD_API_TOKEN in .env.local
+pnpm test:live:write # writes zz-live-* flags/segments to the demo LD project (statsig-migration), then undoes them
 pnpm fixtures:generate   # regenerate the committed demo dataset + sample spec files
 ```
 
@@ -30,4 +32,6 @@ pnpm fixtures:generate   # regenerate the committed demo dataset + sample spec f
 | `packages/ld-client` | LD REST client (read-only so far) + capability probe (PLAN §5.2). |
 | `packages/store` | Dexie/IndexedDB workspace store; refuses token-like fields. |
 | `packages/demo-fixtures` | "Acme Retail" dataset (PLAN §19), MSW mock of the Console API, config-spec generator, sample files. |
-| `packages/mapper`, `packages/planner` | M3 (contracts only). |
+| `packages/mapper` | Pure, deterministic StatSig → LD mapping (PLAN §8, §10): gates → boolean flags, segments → LD segments, every imperfect mapping a `DecisionPoint`. Golden files in `test/golden/`. |
+| `packages/planner` | Dependency closure (segments, context kinds, prerequisite gates), ownership guard (`key_collision`), ordering, provenance status. |
+| `packages/executor` | Runs a plan against LD: journaled steps, pre-images, dry run, resume, undo. |

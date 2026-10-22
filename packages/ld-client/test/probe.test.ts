@@ -48,6 +48,10 @@ describe('LD capability probe (PLAN §5.2)', () => {
   it('builds the capability matrix from read-only probes', async () => {
     mockLd({ teams: 405 });
     const m = await probeCapabilities(client(), 'acme');
+    // Regression: the store refuses any key named `token`, so a matrix with one could never be
+    // saved and the probe reported "failed".
+    const keys = JSON.stringify(m).match(/"([^"]+)":/g)!.map((k) => k.slice(1, -2));
+    expect(keys.filter((k) => /^(token|apiKey|accessToken|secret|password)$/i.test(k))).toEqual([]);
     const status = Object.fromEntries(m.capabilities.map((c) => [c.key, c.status]));
     expect(status).toMatchObject({
       flags: 'available',
@@ -65,8 +69,8 @@ describe('LD capability probe (PLAN §5.2)', () => {
       { key: 'staging', name: 'staging', critical: false, flagApprovalsRequired: false, segmentApprovalsRequired: false, deniedActions: [] },
       { key: 'production', name: 'production', critical: true, flagApprovalsRequired: true, segmentApprovalsRequired: true, deniedActions: [] },
     ]);
-    expect(m.token).toMatchObject({ role: 'writer', serviceToken: false, tokenLookup: 'ok' });
-    expect(m.token.warnings.join(' ')).toMatch(/personal access token/);
+    expect(m.tokenInfo).toMatchObject({ role: 'writer', serviceToken: false, tokenLookup: 'ok' });
+    expect(m.tokenInfo.warnings.join(' ')).toMatch(/personal access token/);
   });
 
   it('never exposes SDK keys, mobile keys or the token', async () => {
@@ -84,8 +88,8 @@ describe('LD capability probe (PLAN §5.2)', () => {
     mockLd({ deniedContextKinds: true, tokenLookup: 403, serviceToken: true });
     const m = await probeCapabilities(client(), 'acme');
     expect(m.capabilities.find((c) => c.key === 'context_kinds')!.status).toBe('not_permitted');
-    expect(m.token.tokenLookup).toBe('forbidden');
-    expect(m.token.warnings).toEqual([]);
+    expect(m.tokenInfo.tokenLookup).toBe('forbidden');
+    expect(m.tokenInfo.warnings).toEqual([]);
   });
 
   it('rejects a bad token with a readable error', async () => {
@@ -94,3 +98,4 @@ describe('LD capability probe (PLAN §5.2)', () => {
     await expect(bad.callerIdentity()).rejects.toThrow(/401/);
   });
 });
+

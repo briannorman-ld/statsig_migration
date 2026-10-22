@@ -1,0 +1,1653 @@
+{
+  "gates": [
+    {
+      "gate": "new_checkout_flow",
+      "flagKey": "new_checkout_flow",
+      "fidelity": "partial",
+      "notes": [
+        "partial: 20% rollout re-buckets users (StatSig and LD hash differently). [rule “Public 20%”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Acme staff” › condition 1) → regex",
+        "acknowledge partial_rollout_rebucket (rule “Public 20%”) → acknowledge"
+      ],
+      "dependencies": [
+        "segment:beta_testers"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "rollout": {
+            "contextKind": "user",
+            "variations": [
+              {
+                "variation": 0,
+                "weight": 20000
+              },
+              {
+                "variation": 1,
+                "weight": 80000
+              }
+            ]
+          }
+        },
+        "rules": [
+          {
+            "description": "Acme staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "Beta testers",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "beta_testers"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [
+          {
+            "contextKind": "user",
+            "variation": 0,
+            "values": [
+              "user-staging-tester",
+              "user-qa-1",
+              "user-qa-2"
+            ]
+          },
+          {
+            "contextKind": "user",
+            "variation": 1,
+            "values": [
+              "user-vip-complainer"
+            ]
+          }
+        ],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "checkout_express_pay",
+      "flagKey": "checkout_express_pay",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “country” (StatSig derived it from the IP address). [rule “New checkout in North America” › condition 2]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice gate_reference (references new_checkout_flow) → prerequisite",
+        "choice derived_attribute (rule “New checkout in North America” › condition 2) → map",
+        "choice case_insensitive_match (rule “New checkout in North America” › condition 2) → regex"
+      ],
+      "dependencies": [
+        "flag:new_checkout_flow"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "New checkout in North America",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "country",
+                "op": "matches",
+                "values": [
+                  "^[uU][sS]$",
+                  "^[cC][aA]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": [
+          {
+            "key": "new_checkout_flow",
+            "variation": 0
+          }
+        ]
+      }
+    },
+    {
+      "gate": "checkout_promo_banner",
+      "flagKey": "checkout_promo_banner",
+      "fidelity": "full",
+      "notes": [
+        "full: Inlined “passes employees_only” (1 alternative). [rule “Staff”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (via employees_only › rule “Acme staff” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "checkout_targeting_gate",
+      "flagKey": "checkout_targeting_gate",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “country” (StatSig derived it from the IP address). [rule “US” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “US” › condition 1) → map",
+        "choice case_insensitive_match (rule “US” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "US",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "country",
+                "op": "matches",
+                "values": [
+                  "^[uU][sS]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "kill_switch_payments",
+      "flagKey": "kill_switch_payments",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "maintenance_mode",
+      "flagKey": "maintenance_mode",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Internal IPs",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "ip",
+                "op": "in",
+                "values": [
+                  "10.0.0.1",
+                  "10.0.0.2"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "employees_only",
+      "flagKey": "employees_only",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Acme staff” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Acme staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "search_v2",
+      "flagKey": "search_v2",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Pro & Enterprise, English” › condition 1) → regex",
+        "choice case_insensitive_match (rule “Pro & Enterprise, English” › condition 2) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Pro & Enterprise, English",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "plan",
+                "op": "matches",
+                "values": [
+                  "^[pP][rR][oO]$",
+                  "^[eE][nN][tT][eE][rR][pP][rR][iI][sS][eE]$"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "locale",
+                "op": "matches",
+                "values": [
+                  "^[eE][nN]_[uU][sS]$",
+                  "^[eE][nN]_[gG][bB]$",
+                  "^[eE][nN]_[cC][aA]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "search_autocomplete",
+      "flagKey": "search_autocomplete",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "QA accounts",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "key",
+                "op": "in",
+                "values": [
+                  "QA-Alpha",
+                  "QA-Beta"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "search_typo_tolerance",
+      "flagKey": "search_typo_tolerance",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Users without “email” no longer match (str_contains_none on a missing attribute). [rule “Real users outside JP/KR” › condition 1]",
+        "partial: Users without “locale” no longer match (none on a missing attribute). [rule “Real users outside JP/KR” › condition 2]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Real users outside JP/KR” › condition 1) → regex",
+        "acknowledge negated_missing_attribute (rule “Real users outside JP/KR” › condition 1) → acknowledge",
+        "choice case_insensitive_match (rule “Real users outside JP/KR” › condition 2) → regex",
+        "acknowledge negated_missing_attribute (rule “Real users outside JP/KR” › condition 2) → acknowledge"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Real users outside JP/KR",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "\\+[tT][eE][sS][tT]",
+                  "[lL][oO][aA][dD][tT][eE][sS][tT]"
+                ],
+                "negate": true
+              },
+              {
+                "contextKind": "user",
+                "attribute": "locale",
+                "op": "matches",
+                "values": [
+                  "^[jJ][aA]_[jJ][pP]$",
+                  "^[kK][oO]_[kK][rR]$"
+                ],
+                "negate": true
+              },
+              {
+                "contextKind": "user",
+                "attribute": "key",
+                "op": "in",
+                "values": [
+                  "BOT-1",
+                  "BOT-2"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "dark_mode",
+      "flagKey": "dark_mode",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “browserName” (StatSig derived it from the user agent). [rule “Modern browsers” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “Modern browsers” › condition 1) → map",
+        "choice case_insensitive_match (rule “Modern browsers” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Modern browsers",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "browserName",
+                "op": "matches",
+                "values": [
+                  "^[cC][hH][rR][oO][mM][eE]$",
+                  "^[fF][iI][rR][eE][fF][oO][xX]$",
+                  "^[eE][dD][gG][eE]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "legacy_browser_banner",
+      "flagKey": "legacy_browser_banner",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “browserName” (StatSig derived it from the user agent). [rule “Old Safari” › condition 1]",
+        "partial: Your app must send “browserVersion” (StatSig derived it from the user agent). [rule “Old Safari” › condition 2]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “Old Safari” › condition 1) → map",
+        "choice case_insensitive_match (rule “Old Safari” › condition 1) → regex",
+        "choice derived_attribute (rule “Old Safari” › condition 2) → map"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Old Safari",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "browserName",
+                "op": "matches",
+                "values": [
+                  "^[sS][aA][fF][aA][rR][iI]$"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "browserVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "15.0"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "windows_download_cta",
+      "flagKey": "windows_download_cta",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “osName” (StatSig derived it from the user agent). [rule “Windows 10+” › condition 1]",
+        "partial: Your app must send “osVersion” (StatSig derived it from the user agent). [rule “Windows 10+” › condition 2]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “Windows 10+” › condition 1) → map",
+        "choice case_insensitive_match (rule “Windows 10+” › condition 1) → regex",
+        "choice derived_attribute (rule “Windows 10+” › condition 2) → map"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Windows 10+",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "osName",
+                "op": "matches",
+                "values": [
+                  "^[wW][iI][nN][dD][oO][wW][sS]$"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "osVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "10.0.0"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "eu_cookie_banner",
+      "flagKey": "eu_cookie_banner",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “country” (StatSig derived it from the IP address). [rule “EU” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “EU” › condition 1) → map",
+        "choice case_insensitive_match (rule “EU” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "EU",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "country",
+                "op": "matches",
+                "values": [
+                  "^[dD][eE]$",
+                  "^[fF][rR]$",
+                  "^[eE][sS]$",
+                  "^[iI][tT]$",
+                  "^[nN][lL]$",
+                  "^[iI][eE]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "bot_detection_challenge",
+      "flagKey": "bot_detection_challenge",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “userAgent” (StatSig derived it from the user agent). [rule “Bot UAs” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “Bot UAs” › condition 1) → map",
+        "choice case_insensitive_match (rule “Bot UAs” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Bot UAs",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "userAgent",
+                "op": "matches",
+                "values": [
+                  "[bB][oO][tT]",
+                  "[cC][rR][aA][wW][lL][eE][rR]",
+                  "[sS][pP][iI][dD][eE][rR]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "holiday_sale_2025",
+      "flagKey": "holiday_sale_2025",
+      "fidelity": "full",
+      "notes": [
+        "full: Time condition (after 2025-11-20T00:00:00Z) is always true now; dropped. [rule “Sale window” › condition 1]",
+        "full: Time condition (before 2026-01-05T00:00:00Z) can never be true again; rule dropped. [rule “Sale window” › condition 2]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "black_friday_2027",
+      "flagKey": "black_friday_2027",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Time condition resolved as of the sync (false); re-sync after 2027-11-26T05:00:00Z. [rule “From Black Friday” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice time_condition (rule “From Black Friday” › condition 1) → resolve_now"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "staff_debug_tools",
+      "flagKey": "staff_debug_tools",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "qa_debug_panel",
+      "flagKey": "qa_debug_panel",
+      "fidelity": "full",
+      "notes": [
+        "full: Rule “QA everyone” doesn't apply in staging (not enabled here)."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "perf_monitoring_v2",
+      "flagKey": "perf_monitoring_v2",
+      "fidelity": "full",
+      "notes": [
+        "full: Rule “Prod 10%” doesn't apply in staging (not enabled here)."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "b2b_bulk_ordering",
+      "flagKey": "b2b_bulk_ordering",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice unit_type_kind (companyID) → create:company",
+        "choice case_insensitive_match (rule “Pilot accounts” › condition 1) → regex"
+      ],
+      "dependencies": [
+        "context_kind:company"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Pilot accounts",
+            "clauses": [
+              {
+                "contextKind": "company",
+                "attribute": "key",
+                "op": "matches",
+                "values": [
+                  "^[aA][cC][cC][tT]_1001$",
+                  "^[aA][cC][cC][tT]_1002$",
+                  "^[aA][cC][cC][tT]_1003$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [
+          {
+            "contextKind": "company",
+            "variation": 0,
+            "values": [
+              "acct_2001"
+            ]
+          }
+        ],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "enterprise_sso",
+      "flagKey": "enterprise_sso",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "segment:enterprise_accounts"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Enterprise accounts",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "enterprise_accounts"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "block_fraudulent_checkout",
+      "flagKey": "block_fraudulent_checkout",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking big_segment (rule “Not on blocklist” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "vip_early_access",
+      "flagKey": "vip_early_access",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "segment:vip_customers"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "VIPs",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "vip_customers"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "wholesale_portal",
+      "flagKey": "wholesale_portal",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking id_list_unavailable (rule “Partners” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "gift_card_upsell",
+      "flagKey": "gift_card_upsell",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Low balance",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "gift_card_balance",
+                "op": "greaterThan",
+                "values": [
+                  0
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "gift_card_balance",
+                "op": "lessThanOrEqual",
+                "values": [
+                  25
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "Gold tier",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "loyalty_points",
+                "op": "greaterThanOrEqual",
+                "values": [
+                  5000
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "loyalty_points",
+                "op": "lessThan",
+                "values": [
+                  20000
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "new_customer_onboarding",
+      "flagKey": "new_customer_onboarding",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Signed up after launch",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "signup_date",
+                "op": "after",
+                "values": [
+                  1710374400000
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "Launch-day cohort",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "signup_date",
+                "op": "after",
+                "values": [
+                  1710374399999
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "signup_date",
+                "op": "before",
+                "values": [
+                  1710460800000
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "sku_preview",
+      "flagKey": "sku_preview",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Regex uses lookbehind; not portable to every SDK. [rule “Lookbehind regex” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice regex_dialect (rule “Lookbehind regex” › condition 1) → keep"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Portable regex",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "sku",
+                "op": "matches",
+                "values": [
+                  "^ACME-[0-9]{4}$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "Lookbehind regex",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "sku",
+                "op": "matches",
+                "values": [
+                  "(?<=ACME-)9[0-9]{3}"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "missing_email_prompt",
+      "flagKey": "missing_email_prompt",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking null_check (rule “No email” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "sms_notifications",
+      "flagKey": "sms_notifications",
+      "fidelity": "partial",
+      "notes": [
+        "partial: “is set” approximated with matches \".*\" (strings only). [rule “Has phone” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice null_check (rule “Has phone” › condition 1) → matches_any"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Has phone",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "phone",
+                "op": "matches",
+                "values": [
+                  ".*"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "wishlist_sharing",
+      "flagKey": "wishlist_sharing",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Fashion or home, not kids",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "interests",
+                "op": "in",
+                "values": [
+                  "fashion",
+                  "home"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "interests",
+                "op": "in",
+                "values": [
+                  "kids"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "bundle_recommendations",
+      "flagKey": "bundle_recommendations",
+      "fidelity": "full",
+      "notes": [
+        "full: not_array_contains_all expands into 3 LD rules (one per value). [rule “Not full-house” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Gamers",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "interests",
+                "op": "in",
+                "values": [
+                  "gaming"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "interests",
+                "op": "in",
+                "values": [
+                  "electronics"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "Not full-house (1/3)",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "interests",
+                "op": "in",
+                "values": [
+                  "fashion"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "Not full-house (2/3)",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "interests",
+                "op": "in",
+                "values": [
+                  "home"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "Not full-house (3/3)",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "interests",
+                "op": "in",
+                "values": [
+                  "garden"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "storefront_url_banner",
+      "flagKey": "storefront_url_banner",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking unsupported_condition (rule “Sale pages” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "storefront_app_only",
+      "flagKey": "storefront_app_only",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking unsupported_condition (rule “Storefront” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "old_cart_drawer",
+      "flagKey": "old_cart_drawer",
+      "fidelity": "full",
+      "notes": [
+        "full: Disabled in StatSig: the flag is off in test and serves false."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": false,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "legacy_wishlist",
+      "flagKey": "legacy_wishlist",
+      "skipped": "archived in StatSig",
+      "fidelity": "skipped",
+      "notes": [
+        "skipped: Not migrated: archived in StatSig."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": []
+    },
+    {
+      "gate": "stale_promo_ribbon",
+      "flagKey": "stale_promo_ribbon",
+      "fidelity": "full",
+      "notes": [
+        "full: StatSig marks this gate stale (STALE_ALL_TRUE). Consider hard-coding it instead of migrating."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "stale_reviews_widget",
+      "flagKey": "stale_reviews_widget",
+      "fidelity": "full",
+      "notes": [
+        "full: StatSig marks this gate stale (STALE_PROBABLY_DEAD_CHECK). Consider hard-coding it instead of migrating."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Staff” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    }
+  ],
+  "segments": [
+    {
+      "segment": "beta_testers",
+      "fidelity": "full",
+      "decisions": [
+        "choice case_insensitive_match (rule “Opted in” › condition 1)",
+        "choice case_insensitive_match (rule “Staff” › condition 1)"
+      ],
+      "rules": [
+        {
+          "description": "Opted in",
+          "clauses": [
+            {
+              "contextKind": "user",
+              "attribute": "beta_opt_in",
+              "op": "matches",
+              "values": [
+                "^[tT][rR][uU][eE]$"
+              ],
+              "negate": false
+            }
+          ]
+        },
+        {
+          "description": "Staff",
+          "clauses": [
+            {
+              "contextKind": "user",
+              "attribute": "email",
+              "op": "matches",
+              "values": [
+                "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "included": 0,
+      "includedContexts": []
+    },
+    {
+      "segment": "enterprise_accounts",
+      "fidelity": "full",
+      "decisions": [
+        "choice case_insensitive_match (rule “Enterprise plan” › condition 1)",
+        "choice unit_type_kind (companyID)"
+      ],
+      "rules": [
+        {
+          "description": "Enterprise plan",
+          "clauses": [
+            {
+              "contextKind": "user",
+              "attribute": "account_plan",
+              "op": "matches",
+              "values": [
+                "^[eE][nN][tT][eE][rR][pP][rR][iI][sS][eE]$"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "included": 0,
+      "includedContexts": []
+    },
+    {
+      "segment": "vip_customers",
+      "fidelity": "full",
+      "decisions": [],
+      "rules": [],
+      "included": 25,
+      "includedContexts": []
+    },
+    {
+      "segment": "wholesale_partners",
+      "skipped": "its ID list was not fetched from StatSig",
+      "fidelity": "skipped",
+      "decisions": []
+    },
+    {
+      "segment": "fraud_blocklist",
+      "skipped": "20000 IDs exceed LD's 15,000-ID list segment limit; big segments arrive in M4",
+      "fidelity": "skipped",
+      "decisions": []
+    }
+  ]
+}

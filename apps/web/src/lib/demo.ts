@@ -16,6 +16,12 @@ export const DEMO_TAG = 'statsig-migration-demo';
  */
 export const DEMO_LD_PROJECT = { instance: 'us' as const, projectKey: 'statsig-migration' };
 
+/**
+ * The demo LD project has only `test` and `production`, so StatSig `staging` is pre-mapped to
+ * `test` (editable under Mapping). `development` and `qa` stay unmapped, to show that state.
+ */
+export const DEMO_ENV_HINTS: Record<string, string> = { staging: 'test' };
+
 let started: Promise<void> | undefined;
 let demoSnapshot = 1;
 

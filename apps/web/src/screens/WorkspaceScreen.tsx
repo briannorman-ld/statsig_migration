@@ -4,15 +4,28 @@ import { countsByKind, ENTITY_KINDS, type CanonicalSnapshot, type EntityKind } f
 import type { SourceRecord } from '@sslm/store';
 import { Badge, Button, Callout, cx, Select, Spinner } from '../components/ui.tsx';
 import { useLdSession } from '../lib/ld.ts';
+import { collectDecisions, fetchDeferredIdLists, isInterrupted } from '../lib/migration.ts';
 import { store } from '../lib/store.ts';
 import { syncConsoleSource } from '../lib/sync.ts';
+import { useMigration } from '../lib/useMigration.ts';
 import { AddSource } from './AddSource.tsx';
+import { DecisionsView } from './DecisionsView.tsx';
 import { EntityList } from './EntityList.tsx';
 import { GatesSideBySide } from './GatesSideBySide.tsx';
 import { LdPanel } from './LdPanel.tsx';
+import { MappingView } from './MappingView.tsx';
+import { MigrateModal } from './MigrateModal.tsx';
+import { RunsView } from './RunsView.tsx';
 import { WarningsView } from './WarningsView.tsx';
 
-export type View = { kind: 'resource'; resource: EntityKind } | { kind: 'ld' } | { kind: 'warnings' } | { kind: 'add-source' };
+export type View =
+  | { kind: 'resource'; resource: EntityKind }
+  | { kind: 'ld' }
+  | { kind: 'warnings' }
+  | { kind: 'add-source' }
+  | { kind: 'decisions' }
+  | { kind: 'mapping' }
+  | { kind: 'runs' };
 
 const KIND_LABEL: Record<EntityKind, string> = {
   gate: 'Gates',
@@ -38,20 +51,25 @@ interface SyncState {
 export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; onExit: () => void }) {
   const workspace = useLiveQuery(() => store.getWorkspace(workspaceId), [workspaceId]);
   const sources = useLiveQuery(() => store.listSources(workspaceId), [workspaceId]);
-  const snapshots = useLiveQuery(
+  const snapshotQuery = useLiveQuery(
     async () => {
       const out: Record<string, CanonicalSnapshot | undefined> = {};
       for (const s of sources ?? []) out[s.id] = (await store.latestSnapshot(s.id))?.canonical;
-      return out;
+      return { for: sources, snapshots: out };
     },
     [sources],
   );
+  // Only trust a result computed for the current source list (useLiveQuery returns the previous
+  // result while re-querying, which made the demo re-sync on every open).
+  const snapshots = snapshotQuery && snapshotQuery.for === sources ? snapshotQuery.snapshots : undefined;
   const [view, setView] = useState<View>({ kind: 'resource', resource: 'gate' });
   const [env, setEnv] = useState<string>('');
   const [sync, setSync] = useState<Record<string, SyncState>>({});
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const ld = useLdSession(workspaceId);
   const autoSynced = useRef(new Set<string>());
+  const [migrate, setMigrate] = useState<{ gates: string[]; ldEnvs: string[] }>();
+  const runs = useLiveQuery(() => store.listRuns(workspaceId), [workspaceId]);
 
   const runSync = async (s: SourceRecord) => {
     setSync((x) => ({ ...x, [s.id]: { running: true, retries: [] } }));
@@ -97,6 +115,21 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
     return out;
   }, [visibleSnaps]);
   const warningCount = visibleSnaps.reduce((n, s) => n + s.warnings.length, 0);
+  const m = useMigration(workspaceId, visibleSnaps);
+  const openDecisions = useMemo(() => (m ? collectDecisions(visibleSnaps, m.profile, m.connected, m).filter((d) => !d.resolvedWith) : []), [m, visibleSnaps]);
+  const blockingCount = openDecisions.filter((d) => d.decision.severity === 'blocking').length;
+  const interrupted = (runs ?? []).filter((r) => isInterrupted(r, workspaceId));
+
+  // Load deferred ID lists (≤15k IDs) once per snapshot, so small list segments don't sit behind an
+  // "ID list not loaded" decision. Bigger lists stay deferred until big segments (M4).
+  const fetchedFor = useRef(new Set<string>());
+  useEffect(() => {
+    if (!m || !sources) return;
+    const pending = visibleSnaps.filter((sn) => !fetchedFor.current.has(`${sn.source.sourceId}@${sn.takenAt}`));
+    if (!pending.length) return;
+    pending.forEach((sn) => fetchedFor.current.add(`${sn.source.sourceId}@${sn.takenAt}`));
+    void fetchDeferredIdLists(workspaceId, sources, pending, m.idLists).catch(() => undefined);
+  }, [m, visibleSnaps, sources, workspaceId]);
 
   if (!workspace) return <div className="p-8 text-slate-500">Loading…</div>;
 
@@ -181,6 +214,24 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
             ))}
           </ul>
 
+          <SectionTitle>Migration</SectionTitle>
+          <NavItem active={view.kind === 'decisions'} onClick={() => setView({ kind: 'decisions' })}>
+            <span>Decisions</span>
+            {openDecisions.length > 0 && (
+              <span className="flex gap-1">
+                {blockingCount > 0 && <Badge tone="red">{blockingCount}</Badge>}
+                <Badge tone="amber">{openDecisions.length - blockingCount}</Badge>
+              </span>
+            )}
+          </NavItem>
+          <NavItem active={view.kind === 'mapping'} onClick={() => setView({ kind: 'mapping' })}>
+            <span>Mapping</span>
+          </NavItem>
+          <NavItem active={view.kind === 'runs'} onClick={() => setView({ kind: 'runs' })}>
+            <span>Runs</span>
+            {interrupted.length > 0 ? <Badge tone="amber">interrupted</Badge> : runs?.length ? <span className="text-slate-500 tabular-nums">{runs.length}</span> : null}
+          </NavItem>
+
           <SectionTitle>Workspace</SectionTitle>
           <NavItem active={view.kind === 'ld'} onClick={() => setView({ kind: 'ld' })}>
             <span>LaunchDarkly & capabilities</span>
@@ -189,24 +240,40 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
             <span>Source warnings</span>
             {warningCount > 0 && <Badge tone="amber">{warningCount}</Badge>}
           </NavItem>
-          <p className="mt-6 px-2 text-xs text-slate-400">Decisions, waves and migration arrive in M3+.</p>
+          <p className="mt-6 px-2 text-xs text-slate-400">Gates and their segments migrate in M3. Configs, big segments and approvals arrive in M4.</p>
         </nav>
 
         <main className="min-w-0 flex-1 overflow-y-auto p-5">
-          {visible.length === 0 && view.kind === 'resource' && (
+          {interrupted.length > 0 && view.kind !== 'runs' && (
+            <div className="mb-3">
+              <Callout>
+                A migration run was interrupted (the tab closed while it ran).{' '}
+                <button className="font-medium underline" onClick={() => setView({ kind: 'runs' })}>
+                  Review and resume
+                </button>
+              </Callout>
+            </div>
+          )}
+          {visible.length === 0 && (view.kind === 'resource' || view.kind === 'decisions' || view.kind === 'mapping') && (
             <Callout tone="blue">{(sources ?? []).length === 0 ? 'Add a StatSig source to get started.' : 'Waiting for the first sync…'}</Callout>
           )}
           {view.kind === 'resource' && visible.length > 0 &&
             (view.resource === 'gate' ? (
-              <GatesSideBySide workspaceId={workspaceId} sources={visible} snapshots={snapshots ?? {}} env={env} />
+              m && <GatesSideBySide sources={visible} snapshots={snapshots ?? {}} env={env} m={m} onMigrate={(gates, ldEnvs) => setMigrate({ gates, ldEnvs })} onOpenMapping={() => setView({ kind: 'mapping' })} />
             ) : (
               <EntityList kind={view.resource} label={KIND_LABEL[view.resource]} sources={visible} snapshots={snapshots ?? {}} />
             ))}
+          {view.kind === 'decisions' && m && visible.length > 0 && <DecisionsView snapshots={visibleSnaps} m={m} workspaceName={workspace.name} />}
+          {view.kind === 'mapping' && m && visible.length > 0 && <MappingView sources={visible} snapshots={snapshots ?? {}} m={m} onConnect={() => setView({ kind: 'ld' })} />}
+          {view.kind === 'runs' && m && <RunsView workspaceId={workspaceId} m={m} />}
           {view.kind === 'ld' && <LdPanel workspaceId={workspaceId} workspace={workspace} />}
           {view.kind === 'warnings' && <WarningsView sources={visible} snapshots={snapshots ?? {}} />}
           {view.kind === 'add-source' && <AddSource workspaceId={workspaceId} onDone={() => setView({ kind: 'resource', resource: 'gate' })} />}
         </main>
       </div>
+      {migrate && m && (
+        <MigrateModal workspaceId={workspaceId} gateUids={migrate.gates} ldEnvs={migrate.ldEnvs} sources={visible} snapshots={visibleSnaps} m={m} onClose={() => setMigrate(undefined)} />
+      )}
     </div>
   );
 }

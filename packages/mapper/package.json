@@ -5,5 +5,10 @@
   "type": "module",
   "description": "Pure, deterministic canonical -> LD mapper (M3).",
   "exports": { ".": "./src/index.ts" },
-  "dependencies": {"@sslm/canonical": "workspace:*"}
+  "dependencies": {"@sslm/canonical": "workspace:*"},
+  "devDependencies": {
+    "@sslm/adapters": "workspace:*",
+    "@sslm/demo-fixtures": "workspace:*",
+    "@sslm/statsig-client": "workspace:*"
+  }
 }

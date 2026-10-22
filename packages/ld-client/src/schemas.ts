@@ -98,6 +98,65 @@ export const FlagSummarySchema = z.looseObject({
 export const FlagsSchema = z.looseObject({ items: z.array(FlagSummarySchema), totalCount: optNum });
 export type LdFlagSummary = z.infer<typeof FlagSummarySchema>;
 
+const ClauseSchema = z.looseObject({ _id: optStr, contextKind: optStr, attribute: z.string(), op: z.string(), values: z.array(z.unknown()), negate: optBool });
+const RolloutSchema = z.looseObject({
+  variations: z.array(z.looseObject({ variation: z.number(), weight: z.number(), _untracked: optBool })),
+  contextKind: optStr,
+  bucketBy: optStr,
+  seed: optNum,
+});
+const VariationOrRolloutSchema = z.looseObject({ variation: optNum, rollout: RolloutSchema.nullish() });
+const TargetSchema = z.looseObject({ values: z.array(z.string()), variation: z.number(), contextKind: optStr });
+
+export const FlagConfigSchema = z.looseObject({
+  on: z.boolean(),
+  archived: optBool,
+  version: optNum,
+  lastModified: optNum,
+  offVariation: optNum,
+  fallthrough: VariationOrRolloutSchema.nullish(),
+  rules: z.array(z.looseObject({ _id: optStr, description: optStr, clauses: z.array(ClauseSchema), variation: optNum, rollout: RolloutSchema.nullish(), trackEvents: optBool })).nullish(),
+  targets: z.array(TargetSchema).nullish(),
+  contextTargets: z.array(TargetSchema).nullish(),
+  prerequisites: z.array(z.looseObject({ key: z.string(), variation: z.number() })).nullish(),
+});
+
+/** Full flag (GET /flags/{p}/{key}). Used for pre-images, so every field must survive (looseObject). */
+export const FlagSchema = z.looseObject({
+  key: z.string(),
+  name: z.string(),
+  kind: optStr,
+  description: optStr,
+  _version: optNum,
+  temporary: optBool,
+  archived: optBool,
+  tags: z.array(z.string()).nullish(),
+  variations: z.array(z.looseObject({ _id: z.string(), value: z.unknown(), name: optStr, description: optStr })),
+  customProperties: z.record(z.string(), z.looseObject({ name: optStr, value: z.array(z.string()).nullish() })).nullish(),
+  clientSideAvailability: z.looseObject({ usingEnvironmentId: optBool, usingMobileKey: optBool }).nullish(),
+  defaults: z.looseObject({ onVariation: z.number(), offVariation: z.number() }).nullish(),
+  environments: z.record(z.string(), FlagConfigSchema).nullish(),
+});
+export type LdFlag = z.infer<typeof FlagSchema>;
+export type LdFlagConfig = z.infer<typeof FlagConfigSchema>;
+
+export const SegmentSchema = z.looseObject({
+  key: z.string(),
+  name: z.string(),
+  description: optStr,
+  tags: z.array(z.string()).nullish(),
+  version: optNum,
+  deleted: optBool,
+  unbounded: optBool,
+  included: z.array(z.string()).nullish(),
+  excluded: z.array(z.string()).nullish(),
+  includedContexts: z.array(z.looseObject({ contextKind: z.string(), values: z.array(z.string()) })).nullish(),
+  excludedContexts: z.array(z.looseObject({ contextKind: z.string(), values: z.array(z.string()) })).nullish(),
+  rules: z.array(z.looseObject({ _id: optStr, description: optStr, clauses: z.array(ClauseSchema), weight: optNum, rolloutContextKind: optStr, bucketBy: optStr })).nullish(),
+});
+export const SegmentsSchema = z.looseObject({ items: z.array(SegmentSchema), totalCount: optNum });
+export type LdSegment = z.infer<typeof SegmentSchema>;
+
 /** Any `{items: [...]}` collection, for probes where we only care that the route answers. */
 export const CollectionSchema = z.looseObject({ items: z.array(z.unknown()).nullish(), totalCount: optNum });
 

@@ -3,24 +3,12 @@
  *
  *   map(canonical, profile, resolutions, capabilities, env) → { desired, fidelity, unresolved }
  *
- * Only the contract is declared so far; the implementation and golden tests arrive in M3, using
- * packages/demo-fixtures as the main fixture.
+ * `mapGate` and `mapSegment` take those inputs as one object (plus `now`, because StatSig `time`
+ * conditions compare the current time). Golden tests use packages/demo-fixtures.
  */
-import type { Config, Gate, Segment } from '@sslm/canonical';
-
-export type Mappable = Gate | Config | Segment;
-
-export interface MapArgs<Profile, Resolutions, Capabilities> {
-  entity: Mappable;
-  profile: Profile;
-  resolutions: Resolutions;
-  capabilities: Capabilities;
-  /** StatSig environment / tier being migrated. */
-  env: string;
-}
-
-export interface MapResult<Desired, Fidelity, DecisionPoint> {
-  desired: Desired;
-  fidelity: Fidelity;
-  unresolved: DecisionPoint[];
-}
+export * from './types.ts';
+export * from './profile.ts';
+export * from './decisions.ts';
+export { caseFoldedPattern, toTimestamp, LIST_SEGMENT_MAX } from './conditions.ts';
+export { mapGate, TAG_MIGRATED, sourceTag, PASS, FAIL, type GateMapResult, type MapArgs, type MapOutcome } from './gate.ts';
+export { mapSegment, type SegmentMapResult } from './segment.ts';

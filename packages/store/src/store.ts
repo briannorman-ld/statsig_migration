@@ -1,5 +1,7 @@
 import type { CanonicalSnapshot, SourceDescriptor } from '@sslm/canonical';
-import { MigratorDb, type CapabilityRecord, type SnapshotRecord, type SourceRecord, type SpecUploadRecord, type WorkspaceRecord } from './db.ts';
+import type { MappingProfile, Resolution } from '@sslm/mapper';
+import type { RunRecord } from '@sslm/executor';
+import { MigratorDb, type CapabilityRecord, type IdListRecord, type ProfileRecord, type RunJournalRecord, type SnapshotRecord, type SourceRecord, type SpecUploadRecord, type WorkspaceRecord } from './db.ts';
 
 /** Property names that must never be persisted (CLAUDE.md: tokens never persisted unencrypted). */
 const SECRET_KEYS = /^(token|apiKey|api_key|statsigApiKey|consoleKey|clientKey|ldToken|accessToken|authorization|secret|password|sdkKey|mobileKey)$/i;
@@ -52,7 +54,12 @@ export class WorkspaceStore {
 
   /** Deletes the workspace and everything under it. */
   async deleteWorkspace(id: string): Promise<void> {
-    await this.db.transaction('rw', [this.db.workspaces, this.db.sources, this.db.snapshots, this.db.specUploads, this.db.capabilities], async () => {
+    const tables = [this.db.workspaces, this.db.sources, this.db.snapshots, this.db.specUploads, this.db.capabilities, this.db.profiles, this.db.resolutions, this.db.runs, this.db.idLists];
+    await this.db.transaction('rw', tables, async () => {
+      await this.db.profiles.delete(id);
+      await this.db.resolutions.where('workspaceId').equals(id).delete();
+      await this.db.runs.where('workspaceId').equals(id).delete();
+      await this.db.idLists.where('workspaceId').equals(id).delete();
       await this.db.sources.where('workspaceId').equals(id).delete();
       await this.db.snapshots.where('workspaceId').equals(id).delete();
       await this.db.specUploads.where('workspaceId').equals(id).delete();
@@ -127,6 +134,61 @@ export class WorkspaceStore {
 
   getCapabilities(workspaceId: string): Promise<CapabilityRecord | undefined> {
     return this.db.capabilities.get(workspaceId);
+  }
+
+  // --- Mapping profile and decisions (PLAN §8) --------------------------------------------------
+
+  async getProfile(workspaceId: string): Promise<MappingProfile | undefined> {
+    return (await this.db.profiles.get(workspaceId))?.profile;
+  }
+
+  async saveProfile(workspaceId: string, profile: MappingProfile): Promise<void> {
+    const rec: ProfileRecord = { workspaceId, updatedAt: now(), profile };
+    assertNoSecrets(rec);
+    await this.db.profiles.put(rec);
+  }
+
+  async listResolutions(workspaceId: string): Promise<Resolution[]> {
+    return (await this.db.resolutions.where('workspaceId').equals(workspaceId).toArray()).map(({ workspaceId: _w, ...r }) => r);
+  }
+
+  async saveResolutions(workspaceId: string, resolutions: Resolution[]): Promise<void> {
+    const recs = resolutions.map((r) => ({ ...r, workspaceId }));
+    assertNoSecrets(recs);
+    await this.db.resolutions.bulkPut(recs);
+  }
+
+  async deleteResolutions(workspaceId: string, ids: string[]): Promise<void> {
+    await this.db.resolutions.bulkDelete(ids.map((id) => [workspaceId, id] as [string, string]));
+  }
+
+  // --- Run journal (PLAN §9 step 6, §15) --------------------------------------------------------
+
+  /**
+   * Called before and after every step. No assertNoSecrets: pre-images are LD flag/segment
+   * configurations, whose JSON values are customer data (like snapshots), not our credentials.
+   */
+  async saveRun(run: RunRecord): Promise<void> {
+    await this.db.runs.put(run as RunJournalRecord);
+  }
+
+  getRun(id: string): Promise<RunJournalRecord | undefined> {
+    return this.db.runs.get(id);
+  }
+
+  /** Newest first. */
+  listRuns(workspaceId: string): Promise<RunJournalRecord[]> {
+    return this.db.runs.where('[workspaceId+startedAt]').between([workspaceId, ''], [workspaceId, '￿']).reverse().toArray();
+  }
+
+  // --- On-demand ID lists ---------------------------------------------------------------------
+
+  async saveIdList(rec: IdListRecord): Promise<void> {
+    await this.db.idLists.put(rec);
+  }
+
+  async listIdLists(workspaceId: string): Promise<IdListRecord[]> {
+    return this.db.idLists.where('workspaceId').equals(workspaceId).toArray();
   }
 
   private async touch(workspaceId: string): Promise<void> {

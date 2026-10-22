@@ -6,14 +6,19 @@ import {
   ContextKindsSchema,
   EnvironmentSchema,
   EnvironmentsSchema,
+  FlagSchema,
   FlagsSchema,
   ProjectSchema,
+  SegmentSchema,
+  SegmentsSchema,
   ProjectsSchema,
   TokenSchema,
   type LdCallerIdentity,
   type LdEnvironment,
+  type LdFlag,
   type LdFlagSummary,
   type LdProject,
+  type LdSegment,
   type LdToken,
 } from './schemas.ts';
 
@@ -44,9 +49,36 @@ export interface ProbeResult {
   body?: unknown;
 }
 
+/** A failed LD write. `status` 405 on a flag PATCH means the environment requires approvals. */
+export class LdWriteError extends Error {
+  constructor(
+    readonly status: number | 'unreachable',
+    readonly path: string,
+    readonly body: unknown,
+  ) {
+    super(ldErrorMessage(status, path, body));
+    this.name = 'LdWriteError';
+  }
+}
+
+function ldErrorMessage(status: number | 'unreachable', path: string, body: unknown): string {
+  const msg = body && typeof body === 'object' && 'message' in body ? String((body as { message: unknown }).message) : undefined;
+  if (status === 'unreachable') return `LaunchDarkly unreachable for ${path}.`;
+  if (status === 405) return `Approval required for ${path} (405). Approval requests arrive with M4.`;
+  return `LaunchDarkly ${status} for ${path}${msg ? `: ${msg}` : ''}`;
+}
+
+export type JsonPatchOp = { op: 'replace' | 'add' | 'remove' | 'test'; path: string; value?: unknown };
+
+export interface SemanticPatch {
+  environmentKey?: string;
+  comment?: string;
+  instructions: ({ kind: string } & Record<string, unknown>)[];
+}
+
 /**
- * LaunchDarkly REST client. This session's version is READ-ONLY: it has no methods that write.
- * Writes (semantic patch, approvals, scheduled changes) arrive in M3 behind explicit user action.
+ * LaunchDarkly REST client. Reads are lenient-validated; writes (PLAN §5.1) are only called by the
+ * executor, after the user confirms a plan. Every write method returns the parsed response body.
  */
 export class LdClient {
   readonly instance: LdInstance;
@@ -59,7 +91,10 @@ export class LdClient {
     this.#token = opts.token;
     // LD's 429s are readable (CORS headers on errors), but X-Ratelimit-* / Retry-After are not
     // exposed to JS (PLAN §3.1), so the AIMD limiter adapts to 429s.
-    this.transport = opts.transport instanceof Transport ? opts.transport : new Transport({ retry: { retryOpaqueFailures: false }, ...opts.transport });
+    // Writes to one flag in quick succession hit LD's per-resource limits, so back off longer than
+    // the transport default before giving up (the run can still be resumed after that).
+    this.transport =
+      opts.transport instanceof Transport ? opts.transport : new Transport({ ...opts.transport, retry: { retryOpaqueFailures: false, maxAttempts: 8, baseDelayMs: 1000, maxDelayMs: 30_000, ...opts.transport?.retry } });
     this.onSchemaIssue = opts.onSchemaIssue ?? (() => undefined);
   }
 
@@ -111,6 +146,106 @@ export class LdClient {
       if (page.items.length < 100 || (page.totalCount != null && out.length >= page.totalCount)) break;
     }
     return out;
+  }
+
+  /** Full flag with every environment's configuration (pre-images, variation IDs). `null` if absent. */
+  async getFlag(projectKey: string, key: string, signal?: AbortSignal): Promise<LdFlag | null> {
+    try {
+      return await this.get(`/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, FlagSchema, { signal });
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  async listSegments(projectKey: string, envKey: string, signal?: AbortSignal): Promise<LdSegment[]> {
+    const out: LdSegment[] = [];
+    for (let offset = 0; offset < 100_000; offset += 50) {
+      const page = await this.get(`/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}`, SegmentsSchema, { query: { limit: '50', offset: String(offset) }, signal });
+      out.push(...page.items);
+      if (page.items.length < 50 || (page.totalCount != null && out.length >= page.totalCount)) break;
+    }
+    return out;
+  }
+
+  async getSegment(projectKey: string, envKey: string, key: string, signal?: AbortSignal): Promise<LdSegment | null> {
+    try {
+      return await this.get(`/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}`, SegmentSchema, { signal });
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  // --- Writes ---------------------------------------------------------------------------------
+
+  createFlag(projectKey: string, body: Record<string, unknown>): Promise<LdFlag> {
+    return this.write('POST', `/flags/${encodeURIComponent(projectKey)}`, body, FlagSchema);
+  }
+
+  /** One atomic semantic patch (PLAN §5.1). `dryRun` validates without saving. */
+  patchFlagSemantic(projectKey: string, key: string, patch: SemanticPatch, opts: { dryRun?: boolean } = {}): Promise<LdFlag> {
+    return this.write('PATCH', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, patch, FlagSchema, {
+      contentType: 'application/json; domain-model=launchdarkly.semanticpatch',
+      ...(opts.dryRun ? { query: { dryRun: 'true' } } : {}),
+    });
+  }
+
+  patchFlagJson(projectKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string; dryRun?: boolean } = {}): Promise<LdFlag> {
+    return this.write('PATCH', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, FlagSchema, opts.dryRun ? { query: { dryRun: 'true' } } : {});
+  }
+
+  async deleteFlag(projectKey: string, key: string): Promise<void> {
+    await this.write('DELETE', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, undefined, null);
+  }
+
+  createSegment(projectKey: string, envKey: string, body: { key: string; name: string; description?: string; tags?: string[] }): Promise<LdSegment> {
+    return this.write('POST', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}`, body, SegmentSchema);
+  }
+
+  patchSegmentJson(projectKey: string, envKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string; dryRun?: boolean } = {}): Promise<LdSegment> {
+    return this.write('PATCH', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, SegmentSchema, opts.dryRun ? { query: { dryRun: 'true' } } : {});
+  }
+
+  async deleteSegment(projectKey: string, envKey: string, key: string): Promise<void> {
+    await this.write('DELETE', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}`, undefined, null);
+  }
+
+  /** PUT is an upsert; `archived: true` is how a context kind is "removed". */
+  async putContextKind(projectKey: string, key: string, body: { name: string; description?: string; archived?: boolean }): Promise<void> {
+    await this.write('PUT', `/projects/${encodeURIComponent(projectKey)}/context-kinds/${encodeURIComponent(key)}`, body, null);
+  }
+
+  private async write<S extends z.ZodType>(
+    method: 'POST' | 'PATCH' | 'PUT' | 'DELETE',
+    path: string,
+    body: unknown,
+    schema: S | null,
+    opts: { contentType?: string; query?: Record<string, string> } = {},
+  ): Promise<z.output<S>> {
+    const qs = opts.query ? `?${new URLSearchParams(opts.query)}` : '';
+    let res;
+    try {
+      res = await this.transport.request({
+        method,
+        url: `${this.instance.origin}/api/v2${path}${qs}`,
+        headers: { Authorization: this.#token, 'LD-API-Version': LD_API_VERSION, ...(opts.contentType ? { 'Content-Type': opts.contentType } : {}) },
+        body,
+      });
+    } catch (e) {
+      if (e instanceof HttpError) {
+        if (e.status === 401) throw new LdAuthError(401, path);
+        throw new LdWriteError(e.status, path, stripSdkKeys(e.body));
+      }
+      if (e instanceof UnreachableError) throw new LdWriteError('unreachable', path, null);
+      throw e;
+    }
+    const out = stripSdkKeys(res.body);
+    if (!schema) return out as z.output<S>;
+    const parsed = schema.safeParse(out);
+    if (parsed.success) return parsed.data;
+    this.onSchemaIssue({ path, issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
+    return out as z.output<S>;
   }
 
   listContextKinds(projectKey: string, signal?: AbortSignal) {

@@ -1,0 +1,18 @@
+{
+  "name": "@sslm/executor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "In-tab migration executor: journaled LD writes, provenance, dry run, resume, undo (M3).",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@sslm/ld-client": "workspace:*",
+    "@sslm/mapper": "workspace:*",
+    "@sslm/planner": "workspace:*"
+  },
+  "devDependencies": {
+    "@sslm/adapters": "workspace:*",
+    "@sslm/demo-fixtures": "workspace:*",
+    "@sslm/statsig-client": "workspace:*"
+  }
+}

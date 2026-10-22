@@ -1,0 +1,70 @@
+import { useLiveQuery } from 'dexie-react-hooks';
+import { useEffect, useMemo, useState } from 'react';
+import type { CanonicalSnapshot } from '@sslm/canonical';
+import type { DecisionPoint, DecisionType, MappingProfile, Resolution } from '@sslm/mapper';
+import { DEMO_ENV_HINTS, DEMO_WORKSPACE_ID } from './demo.ts';
+import { useLdSession, type LdSession } from './ld.ts';
+import { ensureProfile, mapperCapabilities, type MappingInputs } from './migration.ts';
+import { store } from './store.ts';
+
+export interface MigrationContext extends MappingInputs {
+  ld: LdSession;
+  /** LD connected with a project chosen and probed: environment mapping is meaningful. */
+  connected: boolean;
+  ldEnvs: { key: string; name: string; critical: boolean }[];
+  resolutionList: Resolution[];
+  resolve: (decisions: DecisionPoint[], optionKey: string) => Promise<void>;
+  saveResolutions: (rs: Resolution[]) => Promise<void>;
+  setPolicy: (type: DecisionType, optionKey: string | null) => Promise<void>;
+  clear: (ids: string[]) => Promise<void>;
+  saveProfile: (p: MappingProfile) => Promise<void>;
+}
+
+/** Everything the mapper needs, live from IndexedDB and the LD session. `null` until loaded. */
+export function useMigration(workspaceId: string, snapshots: CanonicalSnapshot[]): MigrationContext | null {
+  const ld = useLdSession(workspaceId);
+  const ldEnvs = useMemo(() => (ld.matrix?.environments ?? []).map((e) => ({ key: e.key, name: e.name, critical: e.critical || /prod/i.test(e.key) })), [ld.matrix]);
+  const snapKey = snapshots.map((s) => `${s.source.sourceId}@${s.takenAt}`).join('|');
+  const envKey = ldEnvs.map((e) => e.key).join('|');
+  useEffect(() => {
+    if (snapshots.length) void ensureProfile(workspaceId, snapshots, ldEnvs, workspaceId === DEMO_WORKSPACE_ID ? DEMO_ENV_HINTS : undefined);
+  }, [workspaceId, snapKey, envKey]);
+
+  const profile = useLiveQuery(() => store.getProfile(workspaceId), [workspaceId]);
+  const resolutionList = useLiveQuery(() => store.listResolutions(workspaceId), [workspaceId]);
+  const idListRecs = useLiveQuery(() => store.listIdLists(workspaceId), [workspaceId]);
+  // Time conditions are evaluated against the time the workspace was opened (deterministic per session).
+  const [now] = useState(() => new Date().toISOString());
+
+  return useMemo(() => {
+    if (!profile || !resolutionList || !idListRecs) return null;
+    const resolutions = new Map(resolutionList.map((r) => [r.id, r]));
+    return {
+      ld,
+      connected: ld.status === 'connected' && !!ld.matrix,
+      ldEnvs,
+      profile,
+      resolutions,
+      resolutionList,
+      capabilities: mapperCapabilities(ld.matrix, ld.contextKinds),
+      idLists: Object.fromEntries(idListRecs.map((r) => [r.uid, r.ids])),
+      now,
+      resolve: async (decisions, optionKey) => {
+        const decidedAt = new Date().toISOString();
+        await store.saveResolutions(
+          workspaceId,
+          decisions.filter((d) => d.options.some((o) => o.key === optionKey)).map((d) => ({ id: d.id, type: d.type, optionKey, scope: 'resource', fingerprint: d.fingerprint, decidedAt })),
+        );
+      },
+      saveResolutions: (rs) => store.saveResolutions(workspaceId, rs),
+      setPolicy: async (type, optionKey) => {
+        const policies = { ...profile.policies };
+        if (optionKey) policies[type] = optionKey;
+        else delete policies[type];
+        await store.saveProfile(workspaceId, { ...profile, policies });
+      },
+      clear: (ids) => store.deleteResolutions(workspaceId, ids),
+      saveProfile: (p) => store.saveProfile(workspaceId, p),
+    };
+  }, [profile, resolutionList, idListRecs, ld, ldEnvs, now, workspaceId]);
+}

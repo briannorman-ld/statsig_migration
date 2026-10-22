@@ -1,0 +1,385 @@
+/**
+ * Feature gate → boolean LD flag (PLAN §10). Pure and deterministic: the same inputs always give
+ * the same flag, decisions and fingerprints. `now` is an input because `time` conditions depend on it.
+ */
+import { fingerprint, overridesForEnvironment, resolveRulesForEnvironment, targetingFingerprint, type CanonicalSnapshot, type Condition, type Gate } from '@sslm/canonical';
+import { ALWAYS, andDnf, MAX_EXPANSION, NEVER, resolveKind, SkipItem, translateCondition, unique, type ConditionContext, type Dnf, type Loc } from './conditions.ts';
+import { DecisionCollector, DROP_CONDITION, DROP_RULE, SKIP } from './decisions.ts';
+import { sanitizeKey, sanitizeTag } from './profile.ts';
+import { inlineGate, type InlineState } from './refs.ts';
+import type {
+  AppliedDecision,
+  ClientSideAvailability,
+  CustomProperty,
+  DecisionPoint,
+  Dependency,
+  DesiredFlagEnv,
+  DesiredFlagShell,
+  DesiredRule,
+  DesiredTarget,
+  EnvTarget,
+  Fidelity,
+  FidelityNote,
+  FidelityReport,
+  IdLists,
+  MapperCapabilities,
+  MappingProfile,
+  Resolution,
+  StaleDecision,
+  VariationOrRollout,
+} from './types.ts';
+
+export const TAG_MIGRATED = 'statsig-migrated';
+export const sourceTag = (alias: string) => sanitizeTag(`statsig-src-${alias}`);
+
+/** Variation indexes of every migrated gate: `[true, false]`. */
+export const PASS = 0;
+export const FAIL = 1;
+
+export interface MapArgs<E> {
+  canonical: { snapshot: CanonicalSnapshot; idLists?: IdLists };
+  entity: E;
+  profile: MappingProfile;
+  resolutions: ReadonlyMap<string, Resolution>;
+  capabilities: MapperCapabilities;
+  env: EnvTarget;
+  /** ISO time the mapping is evaluated at (time conditions). */
+  now: string;
+}
+
+export interface MapOutcome {
+  uid: string;
+  entityId: string;
+  sourceId: string;
+  fidelity: FidelityReport;
+  /** Decisions without an answer. The item can't migrate until this is empty. */
+  unresolved: DecisionPoint[];
+  applied: AppliedDecision[];
+  stale: StaleDecision[];
+  dependencies: Dependency[];
+  /** Fingerprint of everything in StatSig this result depends on (PLAN §3.3 `statsig.sync.<env>`). */
+  statsigFingerprint: string;
+  decisionSetHash: string;
+  /** Set when the item is not migrated (archived, or a decision chose "skip"). */
+  skipped?: string;
+}
+
+export interface GateMapResult extends MapOutcome {
+  flagKey: string;
+  shell: DesiredFlagShell;
+  /** The desired targeting; a preview (recommended options applied) while decisions are open. */
+  env: DesiredFlagEnv;
+}
+
+export function mapGate(args: MapArgs<Gate>): GateMapResult {
+  const { entity: gate, canonical, profile, capabilities, env } = args;
+  const snapshot = canonical.snapshot;
+  const sourceId = gate.source.sourceId;
+  const decisions = new DecisionCollector(args.resolutions, profile);
+  const fidelity: FidelityNote[] = [];
+  const deps = new Map<string, Dependency>();
+  const subject = { sourceId, kind: 'gate' as const, uid: gate.uid, id: gate.id };
+  const ctx: ConditionContext = {
+    profile,
+    capabilities,
+    snapshot,
+    sourceId,
+    idLists: canonical.idLists ?? {},
+    nowMs: Date.parse(args.now),
+    decisions,
+    subject,
+    fidelity,
+    deps,
+    userKind: 'user',
+    kindCache: new Map(),
+  };
+  ctx.userKind = resolveKind(ctx, 'userID');
+  const flagKey = sanitizeKey(gate.id);
+  const shell = flagShell(ctx, gate, snapshot.source.alias, flagKey);
+  const offEnv: DesiredFlagEnv = { ldEnv: env.ld, statsigEnv: env.statsig, on: false, offVariation: FAIL, fallthrough: { variation: FAIL }, rules: [], targets: [], prerequisites: [] };
+  const inline: InlineState = { env, stack: [], inlined: new Map(), cache: new Map() };
+
+  const finish = (desired: DesiredFlagEnv, skipped?: string): GateMapResult => ({
+    uid: gate.uid,
+    entityId: gate.id,
+    sourceId,
+    flagKey,
+    shell,
+    env: desired,
+    fidelity: report(fidelity, skipped),
+    unresolved: decisions.unresolved,
+    applied: decisions.applied,
+    stale: decisions.stale,
+    dependencies: [...deps.values()].sort((a, b) => `${a.kind}:${a.key}`.localeCompare(`${b.kind}:${b.key}`)),
+    statsigFingerprint: fingerprint({ self: targetingFingerprint(gate, env.statsig), inlined: [...inline.inlined.entries()].sort() }),
+    decisionSetHash: decisions.setHash(),
+    ...(skipped ? { skipped } : {}),
+  });
+
+  if (gate.archived) return finish(offEnv, 'archived in StatSig');
+
+  try {
+    const resolved = resolveRulesForEnvironment(gate.rules, env.statsig);
+    for (const d of resolved.dropped) {
+      const r = gate.rules.find((x) => x.id === d.ruleId);
+      fidelity.push({ fidelity: 'full', message: `Rule “${r?.name ?? d.ruleId}” doesn't apply in ${env.statsig} (${d.reason === 'not_enabled_in_environment' ? 'not enabled here' : 'environment tier is false here'}).` });
+    }
+    const rules = resolved.rules;
+    const overrides = overridesForEnvironment(gate.overrides, env.statsig);
+    const hasPassOverrides = overrides.some((o) => o.value.kind === 'gate' && o.value.pass && o.ids.length > 0);
+
+    // PLAN §10.4 rule 1: every rule requires the same gate → an LD prerequisite is exact.
+    const prereqCandidate = commonPassesGate(rules.map((r) => r.conditions));
+    const prerequisites = new Set<string>();
+    ctx.gateReference = (ids, negate, c, loc) => gateReference(ctx, inline, { ids, negate, c, loc, prereqCandidate, hasPassOverrides, prerequisites });
+
+    const out: DesiredRule[] = [];
+    let fallthrough: VariationOrRollout = { variation: FAIL };
+    rules: for (const r of rules) {
+      const serve = serveFor(ctx, gate, r.id, r.name, r.passPercentage, r.idType);
+      const conds = r.conditions.map((c, i) => translateCondition(ctx, c, { ruleId: r.id, ruleName: r.name, index: i }));
+      let dnf = andDnf(conds);
+      if (!dnf) dnf = expansion(ctx, r.id, r.name, conds.reduce((n, d) => n * Math.max(d.length, 1), 1));
+      if (dnf.length === 0) continue;
+      for (const [k, term] of dnf.entries()) {
+        if (term.length === 0) {
+          // A rule that matches everyone: it becomes the fallthrough and nothing after it is reachable.
+          fallthrough = serve;
+          const after = rules.length - rules.indexOf(r) - 1;
+          if (after > 0) fidelity.push({ fidelity: 'full', message: `Rule “${r.name}” matches everyone; the ${after} rule${after === 1 ? '' : 's'} after it can never match and ${after === 1 ? 'is' : 'are'} dropped.` });
+          break rules;
+        }
+        out.push({ description: dnf.length > 1 ? `${r.name} (${k + 1}/${dnf.length})` : r.name, clauses: term, ...serve });
+      }
+    }
+
+    const targets = overrideTargets(ctx, overrides);
+    for (const key of [...prerequisites].sort()) deps.set(`flag:${sanitizeKey(key)}`, { kind: 'flag', key: sanitizeKey(key), entityId: key });
+    if (!gate.enabled) fidelity.push({ fidelity: 'full', message: `Disabled in StatSig: the flag is off in ${env.ld} and serves false.` });
+    if (gate.lifecycle?.type === 'STALE') fidelity.push({ fidelity: 'full', message: `StatSig marks this gate stale (${gate.lifecycle.typeReason ?? 'STALE'}). Consider hard-coding it instead of migrating.` });
+
+    return finish({
+      ldEnv: env.ld,
+      statsigEnv: env.statsig,
+      on: gate.enabled,
+      offVariation: FAIL,
+      fallthrough,
+      rules: out,
+      targets,
+      prerequisites: [...prerequisites].sort().map((k) => ({ key: sanitizeKey(k), variation: PASS })),
+    });
+  } catch (e) {
+    if (e instanceof SkipItem) return finish(offEnv, e.reason);
+    throw e;
+  }
+}
+
+function serveFor(ctx: ConditionContext, gate: Gate, ruleId: string, ruleName: string, pass: number, idType: string): VariationOrRollout {
+  if (pass >= 100) return { variation: PASS };
+  if (pass <= 0) return { variation: FAIL };
+  const choice = ctx.decisions.choose(
+    {
+      type: 'partial_rollout_rebucket',
+      severity: 'acknowledge',
+      subject: { ...ctx.subject, ruleId, ruleName, location: `rule “${ruleName}”` },
+      path: `rule:${ruleId}:rollout`,
+      title: `${pass}% rollout: users will be re-bucketed`,
+      explanation: `StatSig buckets with sha256(salt.ruleSalt.unitID); LD buckets with hash(flagKey.salt.key). ${pass}% of users still pass, but not the same users: some who see the feature today won't, and others will.`,
+      sourceFragment: { rule: ruleName, passPercentage: pass, idType },
+      fingerprintOf: { passPercentage: pass },
+      options: [
+        { key: 'acknowledge', label: 'Acknowledge: users will be re-bucketed', explanation: 'Migrate the rollout with the same percentage.', resultingFidelity: 'partial' },
+        { key: 'skip', label: 'Set StatSig to 0% or 100% first', explanation: 'Skip this item for now. Finish or roll back the rollout in StatSig, then migrate an exact 0%/100% rule.', resultingFidelity: 'skipped' },
+      ],
+      recommended: 'acknowledge',
+    },
+    'acknowledge',
+  );
+  if (choice === 'skip') throw new SkipItem(`waiting for the ${pass}% rollout in rule “${ruleName}” to finish`);
+  ctx.fidelity.push({ fidelity: 'partial', message: `${pass}% rollout re-buckets users (StatSig and LD hash differently).`, location: `rule “${ruleName}”` });
+  const weight = Math.round(pass * 1000);
+  return { rollout: { contextKind: resolveKind(ctx, idType || gate.idType), variations: [{ variation: PASS, weight }, { variation: FAIL, weight: 100_000 - weight }] } };
+}
+
+function expansion(ctx: ConditionContext, ruleId: string, ruleName: string, size: number): Dnf {
+  const choice = ctx.decisions.choose(
+    {
+      type: 'rule_expansion',
+      severity: 'blocking',
+      subject: { ...ctx.subject, ruleId, ruleName, location: `rule “${ruleName}”` },
+      path: `rule:${ruleId}:expansion`,
+      title: `Rule “${ruleName}” expands into ${size} LD rules`,
+      explanation: `Translating this rule's ORs (inlined gates, not_array_contains_all, on) would need more than ${MAX_EXPANSION} LD rules.`,
+      sourceFragment: { rule: ruleName, size },
+      options: [DROP_RULE, SKIP],
+    },
+    'drop_rule',
+  );
+  if (choice === 'skip') throw new SkipItem(`rule “${ruleName}” is too complex to translate`);
+  return NEVER;
+}
+
+interface GateRefOpts {
+  ids: string[];
+  negate: boolean;
+  c: Condition;
+  loc: Loc;
+  prereqCandidate: string | null;
+  hasPassOverrides: boolean;
+  prerequisites: Set<string>;
+}
+
+function gateReference(ctx: ConditionContext, state: InlineState, o: GateRefOpts): Dnf {
+  const results = o.ids.map((id) => ({ id, r: inlineGate(ctx, state, id, o.negate) }));
+  const failed = results.filter((x) => !x.r.ok);
+  if (failed.length === 0) {
+    for (const { id, r } of results) if (r.ok) ctx.fidelity.push({ fidelity: 'full', message: `Inlined ${o.negate ? '“fails' : '“passes'} ${id}” (${r.dnf.length} alternative${r.dnf.length === 1 ? '' : 's'}).`, location: `rule “${o.loc.ruleName}”` });
+    return results.flatMap(({ r }) => (r.ok ? r.dnf : []));
+  }
+
+  const ref = o.ids.join(', ');
+  const why = failed.map((f) => (f.r.ok ? '' : f.r.reason)).join('; ');
+  const canPrereq = !o.negate && o.ids.length === 1 && o.prereqCandidate === o.ids[0] && ctx.capabilities.prerequisites !== 'unavailable' && ctx.capabilities.prerequisites !== 'not_permitted';
+  const options = [
+    ...(canPrereq
+      ? [
+          {
+            key: 'prerequisite',
+            label: `Use “${ref}” as a prerequisite`,
+            explanation: `Every rule requires ${ref}, so an LD prerequisite on the migrated “${ref}” flag is equivalent${o.hasPassOverrides ? ', except that LD checks prerequisites before individual targets: overrides that pass this gate stop applying to users who fail the prerequisite' : ''}. Enterprise plans${ctx.capabilities.prerequisites === 'unknown' ? '; your plan is checked on the first write' : ''}. “${ref}” is migrated to the same environment first.`,
+            resultingFidelity: o.hasPassOverrides ? ('partial' as const) : ('full' as const),
+          },
+        ]
+      : []),
+    DROP_CONDITION,
+    DROP_RULE,
+    SKIP,
+  ];
+  const choice = ctx.decisions.choose(
+    {
+      type: 'gate_reference',
+      severity: canPrereq ? 'choice' : 'blocking',
+      subject: { ...ctx.subject, location: `references ${ref}` },
+      path: `ref:${o.negate ? 'fails' : 'passes'}:${ref}`,
+      title: `${o.negate ? 'Fails' : 'Passes'} gate “${ref}” can't be inlined`,
+      explanation: `${why.charAt(0).toUpperCase()}${why.slice(1)}.`,
+      sourceFragment: o.c.raw,
+      fingerprintOf: { ids: o.ids, negate: o.negate, why, canPrereq },
+      options,
+      ...(canPrereq ? { recommended: 'prerequisite' } : {}),
+    },
+    canPrereq ? 'prerequisite' : 'drop_rule',
+  );
+  if (choice === 'prerequisite') {
+    o.prerequisites.add(o.ids[0]!);
+    if (o.hasPassOverrides) ctx.fidelity.push({ fidelity: 'partial', message: `Prerequisite “${ref}” is checked before individual targets.` });
+    return ALWAYS;
+  }
+  if (choice === 'skip') throw new SkipItem(`gate reference to “${ref}” can't be translated`);
+  ctx.fidelity.push({ fidelity: 'partial', message: choice === 'drop_condition' ? `Condition on gate “${ref}” dropped (the rule matches more users).` : `Rule requiring gate “${ref}” dropped.`, location: `rule “${o.loc.ruleName}”` });
+  return choice === 'drop_condition' ? ALWAYS : NEVER;
+}
+
+/** The gate every rule requires via a single `passes_gate`, if there is one. */
+function commonPassesGate(ruleConditions: Condition[][]): string | null {
+  if (ruleConditions.length === 0) return null;
+  let common: string | null = null;
+  for (const conds of ruleConditions) {
+    const refs = conds.filter((c) => c.type === 'passes_gate' && !Array.isArray(c.targetValue)).map((c) => String(c.targetValue));
+    if (refs.length === 0) return null;
+    if (common === null) common = refs[0]!;
+    if (!refs.includes(common)) return null;
+  }
+  return common;
+}
+
+/**
+ * Overrides → individual targets (PLAN §10.2 step 4). Environment-specific overrides come first,
+ * so they win over all-environment ones; LD allows each key in one variation only.
+ */
+function overrideTargets(ctx: ConditionContext, overrides: Gate['overrides']): DesiredTarget[] {
+  const ordered = [...overrides.filter((o) => o.environment !== null), ...overrides.filter((o) => o.environment === null)];
+  const seen = new Map<string, number>();
+  const groups = new Map<string, DesiredTarget>();
+  let conflicts = 0;
+  for (const o of ordered) {
+    if (o.value.kind !== 'gate') continue;
+    const contextKind = resolveKind(ctx, o.unitType);
+    const variation = o.value.pass ? PASS : FAIL;
+    const g = groups.get(`${contextKind}|${variation}`) ?? { contextKind, variation, values: [] };
+    for (const id of o.ids) {
+      const k = `${contextKind}|${id}`;
+      const prev = seen.get(k);
+      if (prev !== undefined) {
+        if (prev !== variation) conflicts++;
+        continue;
+      }
+      seen.set(k, variation);
+      g.values.push(id);
+    }
+    groups.set(`${contextKind}|${variation}`, g);
+  }
+  if (conflicts) ctx.fidelity.push({ fidelity: 'partial', message: `${conflicts} ID${conflicts === 1 ? ' is' : 's are'} overridden both to pass and to fail; the environment-specific (or first) override wins.` });
+  return [...groups.values()].filter((g) => g.values.length > 0).sort((a, b) => `${a.contextKind}|${a.variation}`.localeCompare(`${b.contextKind}|${b.variation}`));
+}
+
+function flagShell(ctx: ConditionContext, gate: Gate, alias: string, key: string): DesiredFlagShell {
+  if (key !== gate.id) ctx.fidelity.push({ fidelity: 'full', message: `Flag key “${key}” differs from the StatSig name “${gate.id}” (LD keys allow letters, digits, . _ -).` });
+  const tags = unique([TAG_MIGRATED, sourceTag(alias), ...gate.tags.map(sanitizeTag)].filter(Boolean));
+  const renamed = gate.tags.filter((t) => sanitizeTag(t) !== t);
+  if (renamed.length) ctx.fidelity.push({ fidelity: 'full', message: `Tag${renamed.length === 1 ? '' : 's'} ${renamed.map((t) => `“${t}”`).join(', ')} renamed to fit LD's tag format.` });
+
+  const csa = ctx.decisions.choose(
+    {
+      type: 'client_side_availability',
+      severity: 'choice',
+      subject: { ...ctx.subject, location: 'flag settings' },
+      path: 'client_side_availability',
+      title: 'Client-side availability',
+      explanation: 'StatSig client SDKs can evaluate every gate. LD flags are only sent to client-side and mobile SDKs when you allow it.',
+      sourceFragment: { targetApps: gate.targetApps },
+      fingerprintOf: {},
+      options: [
+        { key: 'both', label: 'Client-side and mobile SDKs', explanation: 'Mirrors StatSig: any SDK can evaluate the flag.', resultingFidelity: 'full' },
+        { key: 'mobile', label: 'Mobile SDKs only', explanation: 'Browser SDKs using the client-side ID won’t see the flag.', resultingFidelity: 'partial' },
+        { key: 'server', label: 'Server-side SDKs only', explanation: 'Client and mobile SDKs won’t see the flag.', resultingFidelity: 'partial' },
+      ],
+      recommended: 'both',
+    },
+    'both',
+  );
+  const clientSideAvailability: ClientSideAvailability = { usingEnvironmentId: csa === 'both', usingMobileKey: csa !== 'server' };
+
+  const props: Record<string, CustomProperty> = {
+    'statsig.id': { name: 'StatSig ID', value: [gate.id] },
+    'statsig.type': { name: 'StatSig type', value: ['gate'] },
+    'statsig.source': { name: 'StatSig source', value: [alias] },
+  };
+  if (gate.version !== undefined) props['statsig.version'] = { name: 'StatSig version', value: [String(gate.version)] };
+  if (gate.owner?.email) props['statsig.owner'] = { name: 'StatSig owner', value: [gate.owner.email] };
+  if (gate.permalink) props['statsig.permalink'] = { name: 'StatSig link', value: [gate.permalink] };
+
+  return {
+    key,
+    name: gate.name || gate.id,
+    description: gate.description ?? '',
+    variations: [
+      { value: true, name: 'Pass' },
+      { value: false, name: 'Fail' },
+    ],
+    // Environments that aren't migrated (and new ones) serve false even if someone turns them on.
+    defaults: { onVariation: FAIL, offVariation: FAIL },
+    temporary: gate.lifecycle?.type !== 'PERMANENT',
+    tags,
+    clientSideAvailability,
+    customProperties: props,
+  };
+}
+
+const RANK: Record<Fidelity, number> = { full: 0, partial: 1, manual: 2, skipped: 3 };
+
+export function report(notes: FidelityNote[], skipped?: string): FidelityReport {
+  if (skipped) return { overall: 'skipped', notes: [...notes, { fidelity: 'skipped', message: `Not migrated: ${skipped}.` }] };
+  const overall = notes.reduce<Fidelity>((w, n) => (RANK[n.fidelity] > RANK[w] ? n.fidelity : w), 'full');
+  return { overall, notes };
+}

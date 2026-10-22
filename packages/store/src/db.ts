@@ -1,10 +1,12 @@
 import Dexie, { type EntityTable } from 'dexie';
 import type { CanonicalSnapshot, SourceDescriptor } from '@sslm/canonical';
+import type { MappingProfile, Resolution } from '@sslm/mapper';
+import type { RunRecord } from '@sslm/executor';
 
 /**
  * Browser state (PLAN §3.3 item 2). Tokens are never stored here: see assertNoSecrets.
- * Later milestones add tables (decisions, runs, journal, pre-images, waves, cutover samples) via
- * new Dexie versions; nothing here needs migrating for that.
+ * Version 2 (M3) adds the mapping profile, resolutions, the run journal (with pre-images) and
+ * fetched ID lists. Later milestones add waves and cutover samples the same way.
  */
 
 export interface WorkspaceRecord {
@@ -55,12 +57,40 @@ export interface CapabilityRecord {
   matrix: unknown;
 }
 
+/** The mapping profile (PLAN §8.1): one per workspace. */
+export interface ProfileRecord {
+  workspaceId: string;
+  updatedAt: string;
+  profile: MappingProfile;
+}
+
+export interface ResolutionRecord extends Resolution {
+  workspaceId: string;
+}
+
+/** Run journal (PLAN §9 step 6): written before and after every step. Holds pre-images for undo. */
+export interface RunJournalRecord extends RunRecord {}
+
+/** ID lists fetched on demand for segments the crawl deferred (PLAN §4.1). Customer data: local only. */
+export interface IdListRecord {
+  /** Segment uid. */
+  uid: string;
+  workspaceId: string;
+  sourceId: string;
+  fetchedAt: string;
+  ids: string[];
+}
+
 export class MigratorDb extends Dexie {
   workspaces!: EntityTable<WorkspaceRecord, 'id'>;
   sources!: EntityTable<SourceRecord, 'id'>;
   snapshots!: EntityTable<SnapshotRecord, 'id'>;
   specUploads!: EntityTable<SpecUploadRecord, 'id'>;
   capabilities!: EntityTable<CapabilityRecord, 'workspaceId'>;
+  profiles!: EntityTable<ProfileRecord, 'workspaceId'>;
+  resolutions!: Dexie.Table<ResolutionRecord, [string, string]>;
+  runs!: EntityTable<RunJournalRecord, 'id'>;
+  idLists!: EntityTable<IdListRecord, 'uid'>;
 
   constructor(name = 'statsig-ld-migrator') {
     super(name);
@@ -70,6 +100,13 @@ export class MigratorDb extends Dexie {
       snapshots: 'id, workspaceId, sourceId, [sourceId+takenAt]',
       specUploads: 'id, workspaceId, sourceId, [sourceId+uploadedAt]',
       capabilities: 'workspaceId',
+    });
+    // M3: decisions, mapping profile, run journal, fetched ID lists.
+    this.version(2).stores({
+      profiles: 'workspaceId',
+      resolutions: '[workspaceId+id], workspaceId',
+      runs: 'id, workspaceId, startedAt, [workspaceId+startedAt]',
+      idLists: 'uid, workspaceId, sourceId',
     });
   }
 }

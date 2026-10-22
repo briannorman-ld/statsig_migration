@@ -137,7 +137,7 @@ export function LdPanel({ workspaceId, workspace }: { workspaceId: string; works
               {ld.matrix.projectName} · probed {new Date(ld.matrix.probedAt).toLocaleTimeString()} with read-only requests (PLAN §5.2). “Unknown” items are confirmed by
               the first write that needs them.
             </p>
-            {ld.matrix.token.warnings.map((w) => (
+            {ld.matrix.tokenInfo.warnings.map((w) => (
               <div key={w} className="mt-2">
                 <Callout>{w}</Callout>
               </div>

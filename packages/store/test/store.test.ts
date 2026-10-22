@@ -46,3 +46,23 @@ describe('WorkspaceStore (Dexie / IndexedDB)', () => {
     expect(() => assertNoSecrets({ tokenInfo: { tokenKind: 'auth' }, emptyToken: '' })).not.toThrow();
   });
 });
+
+describe('M3 tables', () => {
+  it('keeps resolutions per workspace and refuses secrets in the profile', async () => {
+    const { WorkspaceStore, MigratorDb, SecretInStoreError } = await import('../src/index.ts');
+    const s = new WorkspaceStore(new MigratorDb(`m3-${Math.random()}`));
+    await s.saveResolutions('w1', [{ id: 'd1', type: 'client_side_availability', optionKey: 'both', scope: 'resource', fingerprint: 'f', decidedAt: 't' }]);
+    await s.saveResolutions('w2', [{ id: 'd1', type: 'client_side_availability', optionKey: 'server', scope: 'resource', fingerprint: 'f', decidedAt: 't' }]);
+    expect((await s.listResolutions('w1')).map((r) => r.optionKey)).toEqual(['both']);
+    await s.deleteResolutions('w1', ['d1']);
+    expect(await s.listResolutions('w1')).toEqual([]);
+    await expect(s.saveProfile('w1', { version: 1, sources: {}, attributes: { token: 'x' } as never, policies: {} })).rejects.toBeInstanceOf(SecretInStoreError);
+  });
+
+  it('lists runs newest first', async () => {
+    const { WorkspaceStore, MigratorDb } = await import('../src/index.ts');
+    const s = new WorkspaceStore(new MigratorDb(`runs-${Math.random()}`));
+    for (const [id, at] of [['a', '2026-01-01'], ['b', '2026-02-01']]) await s.saveRun({ id: id!, workspaceId: 'w', projectKey: 'p', label: id!, dryRun: false, startedAt: at!, status: 'done', steps: [] });
+    expect((await s.listRuns('w')).map((r) => r.id)).toEqual(['b', 'a']);
+  });
+});

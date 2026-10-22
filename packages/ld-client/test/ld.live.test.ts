@@ -43,7 +43,7 @@ describe.skipIf(!enabled)('LaunchDarkly live (read-only)', () => {
     console.log(
       JSON.stringify(
         {
-          token: { ...matrix.token, tokenId: matrix.token.tokenId ? '…' + matrix.token.tokenId.slice(-4) : undefined },
+          tokenInfo: { ...matrix.tokenInfo, tokenId: matrix.tokenInfo.tokenId ? '…' + matrix.tokenInfo.tokenId.slice(-4) : undefined },
           projectsVisible: projects.length,
           probedProject: `${matrix.projectKey} (${matrix.projectName})`,
           environments: matrix.environments,

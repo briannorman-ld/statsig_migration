@@ -33,3 +33,6 @@ Research inputs for the build. Collected 2026-10-07. See `../PLAN.md` §1 for wh
 ## Facts checked live (2026-10-07), not from docs
 - **LD API CORS:** `Access-Control-Allow-Origin: *` on every route we need, including PATCH/PUT/DELETE. **No `Access-Control-Expose-Headers`**, so JS can't read `X-Ratelimit-*` or `Retry-After`.
 - **StatSig CORS:** the preflight succeeds, but 401 responses from `statsigapi.net` and `api.statsigcdn.com` carry **no** `Access-Control-Allow-Origin`. Whether 200 responses do is **unverified**: this is M0 spike #1 and needs a real key.
+- **LD semantic patch (checked 2026-10-22, M3):** custom-property instructions can't be combined with environment instructions in one flag PATCH (400 "must not be in a patch for flag configuration instructions"). Several writes to one flag within a second or two return 429; backing off for several seconds succeeds.
+- **LD deletes (2026-10-22):** deleting a flag that is another flag's prerequisite, or a segment a flag still targets, returns 409.
+- **LD flag list (2026-10-22):** `GET /flags/{p}?summary=true` includes `customProperties` and per-environment `on`/`version`, so migration status can be read from provenance in one call.

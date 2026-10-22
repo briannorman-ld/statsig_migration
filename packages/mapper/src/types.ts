@@ -1,0 +1,277 @@
+/**
+ * Mapper types (PLAN §8.1, §10). Field names for the LD side follow
+ * reference/launchdarkly/openapi.json (Clause, Rule, Rollout, Target, UserSegmentRule).
+ */
+import type { EntityKind } from '@sslm/canonical';
+
+// ---------------------------------------------------------------------------------------------
+// Desired LD state
+// ---------------------------------------------------------------------------------------------
+
+/** LD clause. `op` is lower-case per the semantic-patch reference. */
+export interface LdClause {
+  contextKind: string;
+  attribute: string;
+  op: LdOperator;
+  values: unknown[];
+  negate: boolean;
+}
+
+export type LdOperator =
+  | 'in'
+  | 'endsWith'
+  | 'startsWith'
+  | 'matches'
+  | 'contains'
+  | 'lessThan'
+  | 'lessThanOrEqual'
+  | 'greaterThan'
+  | 'greaterThanOrEqual'
+  | 'before'
+  | 'after'
+  | 'segmentMatch'
+  | 'semVerEqual'
+  | 'semVerLessThan'
+  | 'semVerGreaterThan';
+
+/** Weights are thousandths of a percent (0–100000), as in LD `WeightedVariation`. */
+export interface LdRollout {
+  contextKind: string;
+  variations: { variation: number; weight: number }[];
+}
+
+/** Exactly one of `variation` / `rollout`. Variations are indexes into the flag's variations. */
+export interface VariationOrRollout {
+  variation?: number;
+  rollout?: LdRollout;
+}
+
+export interface DesiredRule extends VariationOrRollout {
+  description: string;
+  clauses: LdClause[];
+}
+
+export interface DesiredTarget {
+  contextKind: string;
+  variation: number;
+  values: string[];
+}
+
+export interface DesiredPrerequisite {
+  key: string;
+  variation: number;
+}
+
+export interface ClientSideAvailability {
+  usingEnvironmentId: boolean;
+  usingMobileKey: boolean;
+}
+
+export interface CustomProperty {
+  name: string;
+  value: string[];
+}
+
+/** Project-level part of a flag (PLAN §10.1). Changing it affects every environment (§7). */
+export interface DesiredFlagShell {
+  key: string;
+  name: string;
+  description: string;
+  variations: { value: unknown; name: string }[];
+  defaults: { onVariation: number; offVariation: number };
+  temporary: boolean;
+  tags: string[];
+  clientSideAvailability: ClientSideAvailability;
+  /** Provenance (PLAN §3.3) minus the per-environment `statsig.sync.<env>` entries. */
+  customProperties: Record<string, CustomProperty>;
+}
+
+/** One environment's targeting (PLAN §10.2). Applied as one atomic semantic PATCH. */
+export interface DesiredFlagEnv {
+  ldEnv: string;
+  statsigEnv: string;
+  on: boolean;
+  offVariation: number;
+  fallthrough: VariationOrRollout;
+  rules: DesiredRule[];
+  targets: DesiredTarget[];
+  prerequisites: DesiredPrerequisite[];
+}
+
+export interface DesiredSegmentRule {
+  description: string;
+  clauses: LdClause[];
+  /** Thousandths of a percent; omitted = everyone matching the clauses. */
+  weight?: number;
+  rolloutContextKind?: string;
+}
+
+/** A standard (not big) LD segment in one environment. Segments are per environment in LD. */
+export interface DesiredSegment {
+  key: string;
+  ldEnv: string;
+  statsigEnv: string;
+  name: string;
+  description: string;
+  tags: string[];
+  rules: DesiredSegmentRule[];
+  /** Included `user` keys. */
+  included: string[];
+  /** Included keys for other context kinds. */
+  includedContexts: { contextKind: string; values: string[] }[];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Decisions (PLAN §8)
+// ---------------------------------------------------------------------------------------------
+
+export type DecisionType =
+  | 'case_insensitive_match'
+  | 'negated_missing_attribute'
+  | 'partial_rollout_rebucket'
+  | 'gate_reference'
+  | 'time_condition'
+  | 'derived_attribute'
+  | 'unit_type_kind'
+  | 'key_collision'
+  | 'source_collision'
+  | 'big_segment'
+  | 'hashed_id_list'
+  | 'id_list_unavailable'
+  | 'missing_reference'
+  | 'regex_dialect'
+  | 'null_check'
+  | 'client_side_availability'
+  | 'unsupported_condition'
+  | 'rule_expansion';
+
+/**
+ * - blocking: no safe default; the item can't migrate until resolved.
+ * - choice: has a recommended default ("use recommended" applies it in bulk).
+ * - acknowledge: information the user must accept.
+ */
+export type Severity = 'blocking' | 'choice' | 'acknowledge';
+
+export type Fidelity = 'full' | 'partial' | 'manual' | 'skipped';
+
+export interface DecisionOption {
+  key: string;
+  label: string;
+  explanation: string;
+  resultingFidelity: Fidelity;
+}
+
+export interface DecisionSubject {
+  sourceId: string;
+  kind: EntityKind | 'unit_type';
+  /** Entity uid, or `<sourceId>/unit_type/<name>` for project-level decisions. */
+  uid: string;
+  id: string;
+  ruleId?: string;
+  ruleName?: string;
+  /** Human-readable location, e.g. `rule "Beta testers" › condition 2`. */
+  location?: string;
+}
+
+export interface DecisionPoint {
+  /**
+   * Stable across environments and snapshots: `<type>:<uid>:<path>`. A decision about a
+   * condition is the same decision in staging and production, so it's asked once.
+   */
+  id: string;
+  type: DecisionType;
+  severity: Severity;
+  subject: DecisionSubject;
+  title: string;
+  explanation: string;
+  /** The exact StatSig JSON that triggered it (PLAN §8.1). */
+  sourceFragment: unknown;
+  options: DecisionOption[];
+  recommended?: string;
+  /** Hash of type + normalized fragment. A resolution goes stale when this changes. */
+  fingerprint: string;
+}
+
+export type ResolutionScope = 'resource' | 'policy';
+
+/** Stored per workspace (IndexedDB) and exported in the workspace file. */
+export interface Resolution {
+  /** DecisionPoint.id for `resource` scope; `policy:<type>` for policies. */
+  id: string;
+  type: DecisionType;
+  optionKey: string;
+  scope: ResolutionScope;
+  /** Fingerprint at decision time (`resource` scope only). */
+  fingerprint?: string;
+  decidedAt: string;
+  decidedBy?: string;
+  note?: string;
+}
+
+export interface AppliedDecision {
+  decision: DecisionPoint;
+  optionKey: string;
+  via: 'resource' | 'policy';
+}
+
+export interface StaleDecision {
+  decision: DecisionPoint;
+  previous: Resolution;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Profile, capabilities, inputs
+// ---------------------------------------------------------------------------------------------
+
+export interface SourceProfile {
+  /** StatSig environment name → LD environment key, or `null` = not migrated (§7). */
+  envMapping: Record<string, string | null>;
+  /** StatSig unit type → LD context kind (§10.3 `unit_type_kind`). */
+  unitTypeKinds: Record<string, string>;
+}
+
+/** The mapping profile (PLAN §8.1). Travels with the workspace file. */
+export interface MappingProfile {
+  version: 1;
+  sources: Record<string, SourceProfile>;
+  /** StatSig condition type → LD attribute name, overriding the defaults in profile.ts. */
+  attributes: Record<string, string>;
+  /** Workspace policies: decision type → option key (PLAN §8.1 "workspace policy"). */
+  policies: Partial<Record<DecisionType, string>>;
+}
+
+export type CapabilityState = 'available' | 'not_permitted' | 'unavailable' | 'unknown' | 'manual';
+
+/** The slice of the LD capability matrix (PLAN §5.2) the mapper depends on. */
+export interface MapperCapabilities {
+  prerequisites: CapabilityState;
+  contextKinds: CapabilityState;
+  /** Context kind keys that already exist in the LD project. */
+  existingContextKinds: string[];
+}
+
+export interface EnvTarget {
+  statsig: string;
+  ld: string;
+}
+
+/** Plaintext ID lists fetched on demand for segments the snapshot deferred (PLAN §4.1). */
+export type IdLists = Record<string, string[]>;
+
+export interface Dependency {
+  kind: 'segment' | 'context_kind' | 'flag';
+  key: string;
+  /** For segments and prerequisite flags: the StatSig entity id it comes from. */
+  entityId?: string;
+}
+
+export interface FidelityNote {
+  fidelity: Fidelity;
+  message: string;
+  location?: string;
+}
+
+export interface FidelityReport {
+  overall: Fidelity;
+  notes: FidelityNote[];
+}

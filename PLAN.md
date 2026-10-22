@@ -280,6 +280,8 @@ Both adapters produce the same **canonical model**: `Gate`, `Config`, `Experimen
 - **Base URL and headers:** `/api/v2`. Headers are `Authorization: <token>` and `LD-API-Version: 20240415`, or `beta` for metric groups, release pipelines, flag links, approval settings, evaluation usage and the IP allowlist.
   - Beta routes return **403 without the beta header**, so a 403 doesn't always mean "no permission". Always send the header on beta routes before treating 403 as a permission failure.
 - **Semantic patch everywhere:** `replaceRules`, `replaceTargets`, `replacePrerequisites`, `updateFallthroughVariationOrRollout`, `updateOffVariation`, `turnFlagOn` / `turnFlagOff`. One atomic PATCH per (flag, environment), so a re-sync converges.
+  - *Checked live (M3):* LD rejects custom-property instructions in a patch that has environment instructions (400), so the `statsig.sync.<env>` provenance is a second JSON patch, written only after the targeting patch succeeds.
+  - *Checked live (M3):* writes to one flag in quick succession hit a per-flag rate limit (429). The client backs off up to 8 attempts / 30 s; a run that still fails can be resumed.
 - **Rate limits:** the browser can't read the `X-Ratelimit-*` or `Retry-After` headers (§3.1), so we use **adaptive throttling**:
   - Start at modest concurrency (about 3 in flight). On a 429, halve the rate and back off exponentially with jitter, then slowly ramp back up. This is AIMD-style.
   - Retry 409 and 5xx a bounded number of times, with timeouts.
@@ -426,7 +428,7 @@ map(canonicalEntity, mappingProfile, resolutions, ldCapabilities, targetEnv)
 
 | Type | Trigger | Options (recommended **bold**) |
 |---|---|---|
-| `case_insensitive_match` | `any`/`none` (StatSig ignores case; LD `in` doesn't) | **Add lowercase and uppercase variants** · case-folded regex `matches` · keep exact values (case-sensitive) |
+| `case_insensitive_match` | `any`/`none` and `str_contains_*`/`str_starts_with_any`/`str_ends_with_any` (StatSig ignores case for all of them; LD `in`/`contains`/`startsWith`/`endsWith` don't) | **Case-folded regex `matches`** (`[pP][rR][oO]`: exact in every SDK regex engine) · add lowercase and uppercase variants · keep exact values (case-sensitive). *M3: the regex is recommended because it's the only exact option.* |
 | `partial_rollout_rebucket` (ack) | 0 < pass% < 100 | **Acknowledge: users will be re-bucketed** · first set the StatSig rule to 0% or 100%, then come back |
 | `gate_reference` | `passes_gate`/`fails_gate` that can't be inlined exactly | **Inline the referenced gate's rules** (when exact) · flag-level prerequisite (approximate; Enterprise) · convert the referenced gate into an LD segment · drop the condition · skip the item |
 | `time_condition` | `time` / `current_time` | Already in the past → **resolve statically** · LD scheduled change at that time (Enterprise) · drop the rule · skip |
@@ -439,7 +441,8 @@ map(canonicalEntity, mappingProfile, resolutions, ldCapabilities, targetEnv)
 | `big_segment` | ID list > 15k | **Unbounded segment via CSV import** (Enterprise; needs a persistent store or Relay) · skip |
 | `hashed_id_list` | Spec-sourced list | **Upload raw IDs and reconcile** · accept partial coverage at X% · skip the segment and any rules referencing it |
 | `regex_dialect` | `str_matches` uses features not portable across SDK regex engines | **Keep as is** · rewrite (edit inline) · drop |
-| `null_check` | `is_null` / `is_not_null` | **Approximate with negated `matches ".*"`** · drop · skip |
+| `null_check` | `is_null` / `is_not_null` | `is_not_null`: **approximate with `matches ".*"`** (string attributes) · drop · skip. `is_null`: **blocking**, drop the rule or skip: an LD clause on a missing attribute never matches, even negated, so "is not set" can't be expressed. |
+| `negated_missing_attribute` (ack) | `none`, `none_case_sensitive`, `str_contains_none`, `neq` on an attribute other than `user.key` | **Acknowledge**: StatSig passes users who don't send the attribute; LD doesn't match them · skip |
 | `client_side_availability` | Every gate (StatSig client SDKs see all gates) | **Infer from target apps / client keys** · on for all · off for all |
 | `maintainer_unknown` | Owner email not found in LD | **Default maintainer** · pick a member |
 | `experiment_running` | Experiment `active` in StatSig | **Wait until it ends in StatSig** · pre-stage a draft in LD (not started) |
@@ -545,10 +548,10 @@ map(canonicalEntity, mappingProfile, resolutions, ldCapabilities, targetEnv)
 
 | StatSig | LD | Fidelity / decision |
 |---|---|---|
-| `any` / `none` | `in` (negated for `none`) | `case_insensitive_match` |
+| `any` / `none` | `in` (negated for `none`) | `case_insensitive_match` (+ `negated_missing_attribute` for `none`) |
 | `*_case_sensitive` | `in` | FULL |
-| `str_contains_any` / `none` | `contains` (negated for `none`) | FULL |
-| `str_starts_with_any` / `str_ends_with_any` | `startsWith` / `endsWith` | FULL |
+| `str_contains_any` / `none` | `contains` (negated for `none`) | `case_insensitive_match`: StatSig's evaluator lower-cases both sides (`stringCompare(true, …)`) |
+| `str_starts_with_any` / `str_ends_with_any` | `startsWith` / `endsWith` | `case_insensitive_match` (same reason) |
 | `str_matches` | `matches` | `regex_dialect` (only when non-portable features are detected) |
 | `gt` `gte` `lt` `lte` | the numeric operators | FULL |
 | `eq` / `neq` | `in` (negated for `neq`) | FULL |
@@ -696,7 +699,7 @@ There's no email or Slack, since that would need a server (§3.6).
 
 ## 15. Safety
 - **Pre-image** of every LD flag or segment environment before it's updated, stored in IndexedDB and in the workspace file.
-  - **Undo run** archives what was created and restores what was updated.
+  - **Undo run** deletes what the run created (flags, segments; context kinds can only be archived) and restores what it updated. *M3 deletes rather than archives created flags: an archived flag keeps its key, so re-migrating would collide, and nothing can depend on a flag created minutes earlier. Created flags are deleted at their environment step, newest first, because LD refuses to delete a flag that's a prerequisite or a segment a flag still uses.*
   - If the local pre-image is gone, undo falls back to the `previousVersion` in the LD audit log entry for that write. Verify this in M0.
 - **Ownership guard:** LD resources without our provenance need a `key_collision` decision before we touch them.
 - **Production confirmation:** typed confirmation for production syncs.
