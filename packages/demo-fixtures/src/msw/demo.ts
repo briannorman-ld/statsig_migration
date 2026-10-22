@@ -6,9 +6,13 @@ import { createStatsigConsoleHandlers, type MockStatsigOptions } from './statsig
 /** A dummy Console key for demo sources. The mock checks it so the auth path is exercised. */
 export const DEMO_STATSIG_API_KEY = 'console-DEMO-acme-retail-not-a-real-key';
 
-/** Same-origin path, so the strict CSP (`connect-src 'self' …`) needs no extra host for the demo. */
-export function demoStatsigBaseUrl(origin: string, alias: AcmeAlias): string {
-  return `${origin.replace(/\/+$/, '')}/__demo/statsig/${alias}/console/v1`;
+/**
+ * Same-origin path, so the strict CSP (`connect-src 'self' …`) needs no extra host for the demo.
+ * `root` is the app's origin plus any base path (GitHub Pages serves under /<repo>/), which also
+ * keeps the URL inside the mock service worker's scope.
+ */
+export function demoStatsigBaseUrl(root: string, alias: AcmeAlias): string {
+  return `${root.replace(/\/+$/, '')}/__demo/statsig/${alias}/console/v1`;
 }
 
 export interface DemoHandlerOptions extends Omit<MockStatsigOptions, 'baseUrl' | 'getDataset' | 'apiKey'> {

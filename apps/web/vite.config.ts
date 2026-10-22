@@ -18,6 +18,9 @@ function csp(): Plugin {
 }
 
 export default defineConfig({
+  // GitHub Pages serves the site under /<repo>/; the deploy workflow sets BASE_PATH. Locally and
+  // on Vercel the app lives at the root.
+  base: process.env.BASE_PATH ?? '/',
   plugins: [react(), tailwindcss(), csp()],
   worker: { format: 'es' },
   build: { target: 'es2022', sourcemap: true },

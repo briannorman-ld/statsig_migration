@@ -22,6 +22,11 @@ export const DEMO_LD_PROJECT = { instance: 'us' as const, projectKey: 'statsig-m
  */
 export const DEMO_ENV_HINTS: Record<string, string> = { staging: 'test' };
 
+/** Where the app is served from, e.g. `https://x.github.io/statsig_migration` (no trailing slash). */
+export function appRoot(): string {
+  return new URL(import.meta.env.BASE_URL, location.origin).href.replace(/\/+$/, '');
+}
+
 let started: Promise<void> | undefined;
 let demoSnapshot = 1;
 
@@ -40,7 +45,7 @@ export function startDemoMock(): Promise<void> {
     const file = (data as unknown as { default: import('@sslm/demo-fixtures').AcmeRetailFile }).default;
     const worker = setupWorker(
       ...fixtures.createAcmeDemoHandlers({
-        origin: location.origin,
+        origin: appRoot(),
         getDataset: (alias) => file.projects[alias][demoSnapshot - 1]!,
         // Occasional 429s so the adaptive backoff is visible (PLAN §19.1). Browser-realistic:
         // StatSig's 429s carry no CORS header, so they surface as network errors.
@@ -49,7 +54,7 @@ export function startDemoMock(): Promise<void> {
         latencyMs: 40,
       }),
     );
-    await worker.start({ serviceWorker: { url: '/mockServiceWorker.js' }, onUnhandledFrame: 'bypass', quiet: true });
+    await worker.start({ serviceWorker: { url: `${import.meta.env.BASE_URL}mockServiceWorker.js` }, onUnhandledFrame: 'bypass', quiet: true });
   })();
   return started;
 }
@@ -70,7 +75,7 @@ export async function ensureDemoWorkspace(): Promise<string> {
     alias,
     label: `acme-${alias}`,
     kind: 'console_api',
-    baseUrl: demoStatsigBaseUrl(location.origin, alias),
+    baseUrl: demoStatsigBaseUrl(appRoot(), alias),
     isDemo: true,
     createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
   }));
