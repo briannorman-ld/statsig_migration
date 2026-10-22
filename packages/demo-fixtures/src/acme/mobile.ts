@@ -124,6 +124,21 @@ export function acmeMobile(): ProjectSeed {
         rules: [{ name: '5.1.0', conditions: [{ type: 'app_version', operator: 'version_eq', targetValue: '5.1.0' }] }],
       },
       {
+        id: 'android_min_version',
+        description: 'Four-part build versions (5.2.0.100) compare fine in StatSig but are not valid semver for LD.',
+        owner: P.dana,
+        tags: ['mobile'],
+        targetApps: ['acme-android'],
+        rules: [{ name: 'Build 5.2.0.100+', conditions: [{ type: 'app_version', operator: 'version_gte', targetValue: '5.2.0.100' }] }],
+      },
+      {
+        id: 'beta_channel_features',
+        description: 'Prerelease suffix: StatSig strips “-beta” before comparing; LD orders prereleases below the release.',
+        owner: P.dana,
+        tags: ['mobile'],
+        rules: [{ name: 'Beta builds 5.3+', conditions: [{ type: 'app_version', operator: 'version_gte', targetValue: '5.3.0-beta' }] }],
+      },
+      {
         id: 'tablet_layout',
         description: 'Two-column layout on tablets.',
         owner: P.dana,

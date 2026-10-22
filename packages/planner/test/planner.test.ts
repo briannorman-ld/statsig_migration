@@ -56,6 +56,13 @@ describe('planMigration', () => {
     expect(plan.items.find((i) => i.entityId === 'beta_testers')).toMatchObject({ kind: 'segment', dependency: true, status: 'ready' });
   });
 
+  it('blocks a gate whose segment cannot migrate (docs/KNOWN-EDGE-CASES.md 5.7, 9.8)', () => {
+    const plan = planMigration(acceptAll(request(['early_adopter_badge'])));
+    expect(plan.ready).toBe(false);
+    expect(plan.items.find((i) => i.entityId === 'early_adopters')).toMatchObject({ kind: 'segment', status: 'skipped', reason: expect.stringMatching(/can't be inlined/) });
+    expect(plan.items.find((i) => i.entityId === 'early_adopter_badge')).toMatchObject({ status: 'blocked', reason: expect.stringMatching(/depends on/) });
+  });
+
   it('pulls in a prerequisite gate and migrates it first in the same environment', () => {
     const plan = planMigration(acceptAll(request(['checkout_express_pay'])));
     expect(plan.ready).toBe(true);

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { CanonicalSnapshot, Gate } from '@sslm/canonical';
+import type { CanonicalSnapshot, Condition, Gate } from '@sslm/canonical';
 import { caseFoldedPattern, mapGate, mapSegment, type MapArgs, type Resolution } from '../src/index.ts';
 import { acmeSnapshot, CAPS, NOW, profileFor, server } from './fixtures.ts';
 
@@ -27,7 +27,8 @@ describe('operator pitfalls (CLAUDE.md, PLAN §10.3)', () => {
 
   it('`any` is case-insensitive in StatSig, so it needs a decision; the recommended regex is exact', () => {
     const r = mapGate(args('search_v2'));
-    expect(types(r)).toEqual(['case_insensitive_match', 'case_insensitive_match', 'client_side_availability']);
+    // unit_type_kind: search_v2 has a custom-ID override on a userID gate (see edge cases below).
+    expect(types(r)).toEqual(['case_insensitive_match', 'case_insensitive_match', 'client_side_availability', 'unit_type_kind']);
     const re = new RegExp(r.env.rules[0]!.clauses[0]!.values[0] as string);
     expect(['Pro', 'pro', 'PRO', 'pRo'].every((v) => re.test(v))).toBe(true);
     expect(re.test('Proton')).toBe(false);
@@ -149,7 +150,12 @@ describe('overrides and rollouts', () => {
     const staging = mapGate(args('new_checkout_flow', { env: { statsig: 'staging', ld: 'test' } }));
     const pass = (r: typeof prod) => r.env.targets.find((t) => t.variation === 0)!.values;
     expect(pass(prod)).toEqual(['user-qa-1', 'user-qa-2']);
-    expect(pass(staging)).toEqual(['user-staging-tester', 'user-qa-1', 'user-qa-2']);
+    // user-vip-complainer fails in every environment but passes in staging: the environment-specific
+    // override wins there, and the conflict is reported.
+    expect(pass(staging)).toEqual(['user-staging-tester', 'user-vip-complainer', 'user-qa-1', 'user-qa-2']);
+    expect(staging.env.targets.find((t) => t.variation === 1)).toBeUndefined();
+    expect(staging.fidelity.notes.map((n) => n.message)).toContainEqual(expect.stringMatching(/1 ID is overridden both to pass and to fail/));
+    expect(prod.env.targets.find((t) => t.variation === 1)!.values).toEqual(['user-vip-complainer']);
   });
 
   it('a public partial rollout becomes the fallthrough rollout and needs an acknowledgement', () => {
@@ -191,7 +197,7 @@ describe('resolutions (PLAN §8.1)', () => {
   });
 
   it('a workspace policy answers every decision of its type', () => {
-    const profile = { ...profileFor(web, MAPPING), policies: { client_side_availability: 'both', case_insensitive_match: 'variants' } };
+    const profile = { ...profileFor(web, MAPPING), policies: { client_side_availability: 'both', case_insensitive_match: 'variants', unit_type_kind: 'create:custom' } };
     const r = mapGate(args('search_v2', { profile }));
     expect(r.unresolved).toEqual([]);
     expect(r.env.rules[0]!.clauses[0]).toMatchObject({ op: 'in', values: ['Pro', 'pro', 'PRO', 'Enterprise', 'enterprise', 'ENTERPRISE'] });
@@ -246,5 +252,188 @@ describe('profile', () => {
     expect(p.sources[web.source.sourceId]!.envMapping).toEqual({ development: null, staging: 'test', production: 'production', qa: null });
     p.sources[web.source.sourceId]!.envMapping.staging = null;
     expect(reconcileProfile(p, [web], ld, { staging: 'test' }).sources[web.source.sourceId]!.envMapping.staging).toBeNull();
+  });
+});
+
+/**
+ * One test per row of docs/KNOWN-EDGE-CASES.md that the mapper handles (or knowingly doesn't).
+ * Keep the two in sync: a new row there gets a demo example in packages/demo-fixtures and a
+ * test here.
+ */
+describe('known edge cases (docs/KNOWN-EDGE-CASES.md)', () => {
+  const clause = (r: ReturnType<typeof mapGate>, rule = 0, cond = 0) => r.env.rules[rule]!.clauses[cond]!;
+  /** A copy of `gift_card_upsell` whose single rule has the given conditions (for spec-only operators). */
+  const withConditions = (conds: Partial<Condition>[]): Gate => {
+    const g = web.gates.find((x) => x.id === 'gift_card_upsell')!;
+    return { ...g, rules: [{ ...g.rules[0]!, conditions: conds.map((c) => ({ type: 'custom_field', field: 'plan', operator: null, targetValue: null, raw: c, ...c }) as Condition) }] };
+  };
+
+  describe('gate references', () => {
+    it('fails_gate on an inlinable gate is inlined as a negation', () => {
+      const r = mapGate(args('non_staff_survey'));
+      expect(r.fidelity.overall).toBe('full');
+      expect(clause(r)).toMatchObject({ attribute: 'email', op: 'matches', negate: true });
+    });
+
+    it('fails_gate on a gate with a partial rollout is blocking: no prerequisite can express a negation', () => {
+      const r = mapGate(args('express_pay_fallback'));
+      const d = r.unresolved.find((x) => x.type === 'gate_reference')!;
+      expect(d.severity).toBe('blocking');
+      expect(d.options.map((o) => o.key)).toEqual(['drop_condition', 'drop_rule', 'skip']);
+    });
+
+    it('fails_gate on a gate with overrides cannot be inlined exactly', () => {
+      const d = mapGate(args('consumer_pricing')).unresolved.find((x) => x.type === 'gate_reference')!;
+      expect(d.explanation).toMatch(/has overrides/);
+    });
+
+    it('passes_gate in only some rules offers no prerequisite', () => {
+      const d = mapGate(args('checkout_upsell_v2')).unresolved.find((x) => x.type === 'gate_reference')!;
+      expect(d.severity).toBe('blocking');
+      expect(d.options.some((o) => o.key === 'prerequisite')).toBe(false);
+    });
+
+    it('gate references that form a cycle cannot be inlined; the planner refuses the prerequisite', () => {
+      const tmpl = web.gates.find((g) => g.id === 'checkout_promo_banner')!;
+      const ref = (id: string, to: string): Gate => ({
+        ...tmpl,
+        id,
+        uid: `${tmpl.source.sourceId}/gate/${id}`,
+        rules: [{ ...tmpl.rules[0]!, conditions: [{ type: 'passes_gate', operator: null, targetValue: to, raw: {} }] }],
+      });
+      const snapshot: CanonicalSnapshot = { ...web, gates: [...web.gates, ref('cyc_a', 'cyc_b'), ref('cyc_b', 'cyc_a')] };
+      const entity = snapshot.gates.find((g) => g.id === 'cyc_a')!;
+      const d = mapGate(args('checkout_promo_banner', { canonical: { snapshot }, entity })).unresolved.find((x) => x.type === 'gate_reference')!;
+      expect(d.explanation).toMatch(/cycle/);
+      // Known gap: the mapper still offers "prerequisite" (every rule requires the gate). LD forbids
+      // prerequisite cycles; the planner reports "Prerequisites form a cycle" and refuses the plan.
+      expect(d.recommended).toBe('prerequisite');
+    });
+
+    it('a rule that would expand into more than 10 LD rules is blocking', () => {
+      const r = mapGate(args('cross_sell_matrix'));
+      expect(r.unresolved.find((x) => x.type === 'rule_expansion')).toMatchObject({ severity: 'blocking', title: expect.stringMatching(/12 LD rules/) });
+      expect(r.env.rules).toEqual([]);
+    });
+  });
+
+  describe('rules and rollouts', () => {
+    it('a 0% rule is an exclusion: it serves false and stops evaluation', () => {
+      const r = mapGate(args('reviews_v2'));
+      expect(r.env.rules[0]).toMatchObject({ description: 'Exclude load tests', variation: 1 });
+      expect(r.env.fallthrough).toEqual({ variation: 0 });
+    });
+
+    it('rules after a public 100% rule are unreachable and dropped', () => {
+      const r = mapGate(args('free_returns'));
+      expect(r.env.rules).toEqual([]);
+      expect(r.env.fallthrough).toEqual({ variation: 0 });
+      expect(r.fidelity.notes.map((n) => n.message)).toContainEqual(expect.stringMatching(/can never match/));
+    });
+
+    it('a gate without rules is on and serves false', () => {
+      const r = mapGate(args('payments_v3_scaffold'));
+      expect(r.env).toMatchObject({ on: true, rules: [], fallthrough: { variation: 1 } });
+      expect(r.fidelity.notes.map((n) => n.message)).toContainEqual(expect.stringMatching(/STALE_NO_RULES/));
+    });
+
+    it('stableID rollouts bucket by the device context kind', () => {
+      const r = mapGate(args('anon_homepage_variant'));
+      expect(r.env.fallthrough.rollout?.contextKind).toBe('device');
+      expect(types(r)).toContain('unit_type_kind');
+    });
+
+    it('gate holdouts are not carried over (known gap: no note yet)', () => {
+      const r = mapGate(args('new_checkout_flow'));
+      expect(web.gates.find((g) => g.id === 'new_checkout_flow')!.holdoutIds).toEqual(['checkout_holdout']);
+      expect(r.fidelity.notes.some((n) => /holdout/i.test(n.message))).toBe(false);
+    });
+  });
+
+  describe('operators', () => {
+    it('numeric `any` targets become strings (known gap: LD `in` is type-strict)', () => {
+      expect(clause(mapGate(args('loyalty_tier_perks')))).toMatchObject({ op: 'in', values: ['2', '3'] });
+    });
+
+    it('encoded_any has no equivalent anywhere and is a blocking decision', () => {
+      const d = mapGate(args('legacy_partner_allowlist')).unresolved.find((x) => x.type === 'unsupported_condition')!;
+      expect(d.title).toMatch(/encoded_any/);
+    });
+
+    it('spec-only operators: eq / neq / version_neq / str_starts_with_any / str_ends_with_any', () => {
+      const r = mapGate(
+        args('gift_card_upsell', {
+          entity: withConditions([
+            { operator: 'eq', targetValue: 'pro' },
+            { operator: 'neq', targetValue: 'trial' },
+            { field: 'appVersion', operator: 'version_neq', targetValue: '2.0.0' },
+            { operator: 'str_starts_with_any', targetValue: ['Pro'] },
+            { operator: 'str_ends_with_any', targetValue: ['Plus'] },
+          ]),
+        }),
+      );
+      const cs = r.env.rules[0]!.clauses;
+      expect(cs[0]).toMatchObject({ op: 'in', values: ['pro'], negate: false });
+      expect(cs[1]).toMatchObject({ op: 'in', values: ['trial'], negate: true });
+      expect(cs[2]).toMatchObject({ op: 'semVerEqual', values: ['2.0.0'], negate: true });
+      expect(cs[3]).toMatchObject({ op: 'matches', values: ['^[pP][rR][oO]'] });
+      expect(cs[4]).toMatchObject({ op: 'matches', values: ['[pP][lL][uU][sS]$'] });
+      // neq passes users without the attribute in StatSig; LD never matches them.
+      expect(r.unresolved.filter((d) => d.type === 'negated_missing_attribute')).toHaveLength(1);
+    });
+
+    it('4-part and prerelease versions pass through unchanged (known gap: not valid LD semver)', () => {
+      const r = mapGate(args('gift_card_upsell', { entity: withConditions([{ type: 'app_version', operator: 'version_gte', targetValue: '5.2.0.100' }]) }));
+      expect(clause(r)).toMatchObject({ attribute: 'appVersion', op: 'semVerLessThan', values: ['5.2.0.100'], negate: true });
+      expect(r.unresolved.map((d) => d.type)).not.toContain('unsupported_condition');
+    });
+  });
+
+  describe('names, keys and overrides', () => {
+    it('a StatSig name with spaces becomes a sanitized LD key, with a note', () => {
+      const r = mapGate(args('Holiday Banner 2026'));
+      expect(r.flagKey).toBe('Holiday_Banner_2026');
+      expect(r.fidelity.notes.map((n) => n.message)).toContainEqual(expect.stringMatching(/differs from the StatSig name/));
+    });
+
+    it('a tag LD cannot spell is renamed, with a note', () => {
+      const r = mapGate(args('eu_cookie_banner'));
+      expect(r.shell.tags).toContain('core');
+      expect(r.fidelity.notes.map((n) => n.message)).toContainEqual(expect.stringMatching(/renamed to fit LD's tag format/));
+    });
+
+    it('custom-ID overrides on a userID gate ask for a context kind named after the unknown unit type', () => {
+      const r = mapGate(args('search_v2'));
+      expect(r.env.targets).toContainEqual({ contextKind: 'custom', variation: 0, values: ['acct_3001'] });
+      expect(r.unresolved.find((d) => d.type === 'unit_type_kind')?.subject.id).toBe('customID');
+    });
+  });
+
+  describe('segments', () => {
+    const seg = (id: string, env = { statsig: 'production', ld: 'production' }) =>
+      mapSegment({ canonical: { snapshot: web }, entity: web.segments.find((s) => s.id === id)!, profile: profileFor(web, MAPPING), resolutions: new Map(), capabilities: CAPS, env, now: NOW });
+
+    it('a segment rule with a pass percentage becomes a weighted rule and needs an acknowledgement', () => {
+      const r = seg('churn_risk');
+      expect(r.desired?.rules[0]).toMatchObject({ weight: 10_000, rolloutContextKind: 'user' });
+      expect(r.unresolved.map((d) => d.type)).toEqual(['partial_rollout_rebucket']);
+    });
+
+    it('a disabled segment has no rules, so nobody matches', () => {
+      const r = seg('legacy_partners');
+      expect(r.desired?.rules).toEqual([]);
+      expect(r.fidelity.notes.map((n) => n.message)).toContainEqual(expect.stringMatching(/Disabled in StatSig/));
+    });
+
+    it('a gate reference inside a segment is inlined when exact, and skips the segment otherwise', () => {
+      expect(seg('staff_or_beta').desired?.rules.map((x) => x.description)).toEqual(['Staff', 'Opted in']);
+      expect(seg('early_adopters').skipped).toMatch(/can't be inlined/);
+      // The referencing gate maps as "full": only the planner sees the skipped dependency.
+      expect(mapGate(args('early_adopter_badge')).fidelity.overall).toBe('full');
+    });
+
+    it('an empty ID list is an empty LD segment', () => {
+      expect(seg('beta_waitlist').desired?.included).toEqual([]);
+    });
   });
 });

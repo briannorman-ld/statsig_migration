@@ -6,7 +6,9 @@ const STAFF_EMAIL: ConditionSeed = { type: 'email', operator: 'str_contains_any'
 
 /**
  * `acme-web`: the storefront's StatSig project (Cloud). Designed so every condition type and
- * operator the Console API can express appears at least once (PLAN §19.2, §10.3).
+ * operator the Console API can express appears at least once (PLAN §19.2, §10.3), and so every
+ * mapping edge case in docs/KNOWN-EDGE-CASES.md has a demo example. When you add an edge case
+ * there, add the example here (and a golden-file line follows automatically).
  *
  * Names shared with `acme-mobile` (consolidation demo):
  * - identical: employees_only, maintenance_mode, kill_switch_payments
@@ -87,6 +89,49 @@ export function acmeWeb(): ProjectSeed {
         rules: [{ name: 'Staff', conditions: [{ type: 'passes_gate', targetValue: 'employees_only' }] }],
       },
       {
+        id: 'checkout_upsell_v2',
+        description: 'Post-purchase upsell. Only one of two rules requires new_checkout_flow, so a prerequisite is not equivalent, and the reference cannot be inlined (partial rollout).',
+        owner: P.bob,
+        tags: ['checkout'],
+        rules: [
+          { name: 'New checkout users', conditions: [{ type: 'passes_gate', targetValue: 'new_checkout_flow' }] },
+          { name: 'Staff', conditions: [STAFF_EMAIL] },
+        ],
+      },
+      {
+        id: 'express_pay_fallback',
+        description: 'Legacy pay button for users who fail new_checkout_flow (fails_gate on a gate with a partial rollout: no prerequisite can express it).',
+        owner: P.bob,
+        tags: ['checkout'],
+        rules: [{ name: 'Old checkout', conditions: [{ type: 'fails_gate', targetValue: 'new_checkout_flow' }] }],
+      },
+      {
+        id: 'non_staff_survey',
+        description: 'NPS survey for everyone who is not staff (fails_gate on an inlinable gate: inlined as a negation).',
+        owner: P.marco,
+        tags: ['growth'],
+        rules: [{ name: 'Not staff', conditions: [{ type: 'fails_gate', targetValue: 'employees_only' }] }],
+      },
+      {
+        id: 'consumer_pricing',
+        description: 'Consumer prices for accounts that fail b2b_bulk_ordering. That gate has overrides, so “fails” cannot be inlined exactly.',
+        owner: P.bob,
+        idType: 'companyID',
+        tags: ['checkout'],
+        rules: [{ name: 'Not bulk', conditions: [{ type: 'fails_gate', targetValue: 'b2b_bulk_ordering' }] }],
+      },
+      {
+        id: 'free_returns',
+        description: 'Launched to everyone; the staff rule left below the public rule can never match.',
+        owner: P.bob,
+        tags: ['checkout'],
+        status: 'Launched',
+        rules: [
+          { name: 'Everyone', conditions: [{ type: 'public' }] },
+          { name: 'Staff (leftover)', conditions: [STAFF_EMAIL] },
+        ],
+      },
+      {
         id: 'checkout_targeting_gate',
         description: 'Targeting gate for checkout experiments: US web users.',
         owner: P.bob,
@@ -157,6 +202,31 @@ export function acmeWeb(): ProjectSeed {
           },
         ],
       },
+      {
+        id: 'reviews_v2',
+        description: 'New reviews widget for everyone except load-test accounts: a 0% rule is an exclusion.',
+        owner: P.priya,
+        tags: ['search'],
+        rules: [
+          { name: 'Exclude load tests', passPercentage: 0, conditions: [{ type: 'email', operator: 'str_contains_any', targetValue: ['loadtest'] }] },
+          { name: 'Everyone', conditions: [{ type: 'public' }] },
+        ],
+      },
+      {
+        id: 'cross_sell_matrix',
+        description: 'Cross-sell for shoppers missing items in two category sets. Two not_array_contains_all conditions multiply into 12 LD rules (cap 10).',
+        owner: P.priya,
+        tags: ['search'],
+        rules: [
+          {
+            name: 'Incomplete wardrobe and home',
+            conditions: [
+              { type: 'custom_field', field: 'purchased_categories', operator: 'not_array_contains_all', targetValue: ['tops', 'bottoms', 'shoes', 'outerwear'] },
+              { type: 'custom_field', field: 'purchased_categories', operator: 'not_array_contains_all', targetValue: ['kitchen', 'bedding', 'decor'] },
+            ],
+          },
+        ],
+      },
       // --- Derived attributes (browser / OS / country from IP) ---------------------------------
       {
         id: 'dark_mode',
@@ -197,9 +267,9 @@ export function acmeWeb(): ProjectSeed {
       },
       {
         id: 'eu_cookie_banner',
-        description: 'Cookie consent banner in the EU (country derived from IP).',
+        description: 'Cookie consent banner in the EU (country derived from IP). Tagged “★ Core”, which LD tags cannot spell.',
         owner: P.alice,
-        tags: ['platform'],
+        tags: ['platform', '★ Core'],
         type: 'PERMANENT',
         rules: [{ name: 'EU', conditions: [{ type: 'country', operator: 'any', targetValue: ['DE', 'FR', 'ES', 'IT', 'NL', 'IE'] }] }],
       },
@@ -283,6 +353,42 @@ export function acmeWeb(): ProjectSeed {
         rules: [{ name: 'Not on blocklist', conditions: [{ type: 'fails_segment', targetValue: 'fraud_blocklist' }] }],
       },
       {
+        id: 'anon_homepage_variant',
+        description: 'Homepage variant for anonymous visitors, bucketed by stableID (LD “device” context kind).',
+        owner: P.marco,
+        idType: 'stableID',
+        tags: ['growth'],
+        rules: [{ name: 'Half of devices', passPercentage: 50, conditions: [{ type: 'public' }] }],
+      },
+      {
+        id: 'winback_offer',
+        description: 'Win-back offer for the churn_risk segment, whose rule samples 10% of matching users.',
+        owner: P.marco,
+        tags: ['growth'],
+        rules: [{ name: 'At risk', conditions: [{ type: 'passes_segment', targetValue: 'churn_risk' }] }],
+      },
+      {
+        id: 'labs_menu',
+        description: 'Labs menu for the staff_or_beta segment, which references a gate (inlined into the LD segment).',
+        owner: P.marco,
+        tags: ['growth'],
+        rules: [{ name: 'Labs', conditions: [{ type: 'passes_segment', targetValue: 'staff_or_beta' }] }],
+      },
+      {
+        id: 'early_adopter_badge',
+        description: 'Badge for the early_adopters segment, which references a gate with a partial rollout (the segment cannot migrate, so this gate is blocked).',
+        owner: P.bob,
+        tags: ['growth'],
+        rules: [{ name: 'Early adopters', conditions: [{ type: 'passes_segment', targetValue: 'early_adopters' }] }],
+      },
+      {
+        id: 'referral_bonus',
+        description: 'Bonus for referral partners. References a segment that is not in this project (deleted, or never exported).',
+        owner: P.marco,
+        tags: ['growth'],
+        rules: [{ name: 'Partners', conditions: [{ type: 'passes_segment', targetValue: 'referral_partners' }] }],
+      },
+      {
         id: 'vip_early_access',
         description: 'Early access for VIP customers (small ID list).',
         owner: P.marco,
@@ -306,6 +412,20 @@ export function acmeWeb(): ProjectSeed {
           { name: 'Low balance', conditions: [{ type: 'custom_field', field: 'gift_card_balance', operator: 'gt', targetValue: 0 }, { type: 'custom_field', field: 'gift_card_balance', operator: 'lte', targetValue: 25 }] },
           { name: 'Gold tier', conditions: [{ type: 'custom_field', field: 'loyalty_points', operator: 'gte', targetValue: 5000 }, { type: 'custom_field', field: 'loyalty_points', operator: 'lt', targetValue: 20000 }] },
         ],
+      },
+      {
+        id: 'loyalty_tier_perks',
+        description: 'Perks for loyalty tiers 2 and 3. Numeric target values: StatSig compares them as strings, LD `in` compares typed values.',
+        owner: P.marco,
+        tags: ['growth'],
+        rules: [{ name: 'Tier 2+', conditions: [{ type: 'custom_field', field: 'loyalty_tier', operator: 'any', targetValue: [2, 3] }] }],
+      },
+      {
+        id: 'legacy_partner_allowlist',
+        description: 'Legacy allowlist on the deprecated encoded_any operator (hashed values). Current StatSig SDKs and LD have no equivalent.',
+        owner: P.former,
+        tags: ['platform'],
+        rules: [{ name: 'Encoded partners', conditions: [{ type: 'custom_field', field: 'partner_code', operator: 'encoded_any', targetValue: ['Z3ZhQ2xpZW50', 'c2VydmljZTE='] }] }],
       },
       {
         id: 'new_customer_onboarding',
@@ -418,6 +538,23 @@ export function acmeWeb(): ProjectSeed {
         rules: [{ name: 'Everyone', conditions: [{ type: 'public' }] }],
       },
       {
+        id: 'payments_v3_scaffold',
+        description: 'Created for a future launch; no rules yet (STALE_NO_RULES).',
+        owner: P.sam,
+        tags: ['platform'],
+        type: 'STALE',
+        typeReason: 'STALE_NO_RULES',
+        checksPerHour: 0,
+        rules: [],
+      },
+      {
+        id: 'Holiday Banner 2026',
+        description: 'Name with spaces and capitals: legal in StatSig, but LD keys allow only letters, digits, “.”, “_” and “-”.',
+        owner: P.marco,
+        tags: ['growth'],
+        rules: [{ name: 'Everyone', conditions: [{ type: 'public' }] }],
+      },
+      {
         id: 'stale_reviews_widget',
         description: 'Nobody checks this gate any more.',
         owner: P.former,
@@ -501,6 +638,23 @@ export function acmeWeb(): ProjectSeed {
         defaultValue: { rps: 50 },
         rules: [{ name: 'New limits (50%)', passPercentage: 50, conditions: [{ type: 'public' }], returnValue: { rps: 80 } }],
       },
+      {
+        id: 'maintenance_mode',
+        description: 'Maintenance page copy. Same name as the maintenance_mode gate: StatSig namespaces gates and configs separately, LD keys are one namespace.',
+        owner: P.sam,
+        tags: ['platform'],
+        defaultValue: { message: 'We will be back shortly.', eta_minutes: 30 },
+        rules: [],
+      },
+      {
+        id: 'legacy_pricing_rules',
+        description: 'Disabled config whose only rule returns the default value (nothing to add as a variation).',
+        owner: P.former,
+        tags: ['checkout'],
+        isEnabled: false,
+        defaultValue: { rounding: 'nearest', currency_display: 'symbol' },
+        rules: [{ name: 'Same as default', conditions: [STAFF_EMAIL], returnValue: { rounding: 'nearest', currency_display: 'symbol' } }],
+      },
     ],
     segments: [
       {
@@ -520,6 +674,45 @@ export function acmeWeb(): ProjectSeed {
         description: 'B2B accounts on the enterprise plan.',
         owner: P.bob,
         rules: [{ name: 'Enterprise plan', conditions: [{ type: 'custom_field', field: 'account_plan', operator: 'any', targetValue: ['enterprise'] }] }],
+      },
+      {
+        id: 'churn_risk',
+        type: 'rule_based',
+        description: 'Customers at risk of churning; a 10% sample (segment rules have pass percentages too).',
+        owner: P.marco,
+        rules: [{ name: 'Inactive 90 days (10%)', passPercentage: 10, conditions: [{ type: 'custom_field', field: 'days_since_order', operator: 'gte', targetValue: 90 }] }],
+      },
+      {
+        id: 'legacy_partners',
+        type: 'rule_based',
+        description: 'Disabled segment: nobody matches it.',
+        owner: P.former,
+        isEnabled: false,
+        rules: [{ name: 'Legacy plan', conditions: [{ type: 'custom_field', field: 'account_plan', operator: 'any', targetValue: ['legacy'] }] }],
+      },
+      {
+        id: 'staff_or_beta',
+        type: 'rule_based',
+        description: 'Staff (via the employees_only gate) or beta opt-ins. A gate reference inside a segment must inline: LD segments have no prerequisites.',
+        owner: P.marco,
+        rules: [
+          { name: 'Staff', conditions: [{ type: 'passes_gate', targetValue: 'employees_only' }] },
+          { name: 'Opted in', conditions: [{ type: 'custom_field', field: 'beta_opt_in', operator: 'any', targetValue: ['true'] }] },
+        ],
+      },
+      {
+        id: 'early_adopters',
+        type: 'rule_based',
+        description: 'Users in the new checkout rollout. References a gate with a partial rollout, which cannot be inlined into an LD segment.',
+        owner: P.bob,
+        rules: [{ name: 'New checkout', conditions: [{ type: 'passes_gate', targetValue: 'new_checkout_flow' }] }],
+      },
+      {
+        id: 'beta_waitlist',
+        type: 'id_list',
+        description: 'Waitlist for the next beta; currently empty.',
+        owner: P.marco,
+        idList: { pattern: 'wait-{n}', count: 0, pad: 3 },
       },
       {
         id: 'vip_customers',
@@ -640,6 +833,36 @@ export function acmeWeb(): ProjectSeed {
           { name: 'Badges', size: 50, parameterValues: { show_badges: true } },
         ],
       },
+      {
+        id: 'old_banner_test',
+        description: 'Banner test from last year. Archived.',
+        hypothesis: 'A sticky banner increases newsletter signups.',
+        owner: P.former,
+        tags: ['growth'],
+        status: 'archived',
+        allocation: 100,
+        groups: [
+          { name: 'Control', size: 50, parameterValues: { sticky: false } },
+          { name: 'Sticky', size: 50, parameterValues: { sticky: true } },
+        ],
+        startedDaysAgo: 400,
+        endedDaysAgo: 380,
+      },
+      {
+        id: 'b2b_discount_tiers',
+        description: 'Tiered discounts for B2B accounts, randomized by companyID.',
+        hypothesis: 'Tiered discounts increase reorder rate.',
+        owner: P.bob,
+        idType: 'companyID',
+        tags: ['checkout'],
+        status: 'setup',
+        allocation: 100,
+        groups: [
+          { name: 'Control', size: 50, parameterValues: { discount_pct: 0 } },
+          { name: 'Tiered', size: 50, parameterValues: { discount_pct: 5 } },
+        ],
+        primaryMetrics: [{ name: 'revenue', type: 'sum' }],
+      },
     ],
     layers: [
       {
@@ -713,8 +936,11 @@ export function acmeWeb(): ProjectSeed {
         gate: 'new_checkout_flow',
         passingUserIDs: ['user-qa-1', 'user-qa-2'],
         failingUserIDs: ['user-vip-complainer'],
-        environmentOverrides: [{ environment: 'staging', unitID: 'userID', passingIDs: ['user-staging-tester'], failingIDs: [] }],
+        // user-vip-complainer fails everywhere but passes in staging: a conflict LD can't hold.
+        environmentOverrides: [{ environment: 'staging', unitID: 'userID', passingIDs: ['user-staging-tester', 'user-vip-complainer'], failingIDs: [] }],
       },
+      // Custom-ID overrides on a userID gate: the Console API doesn't say which unit type.
+      { gate: 'search_v2', passingCustomIDs: ['acct_3001'] },
       {
         gate: 'b2b_bulk_ordering',
         passingCustomIDs: ['acct_2001'],

@@ -1,3 +1,4 @@
+import { PEOPLE as P } from './people.ts';
 import type { ProjectSeed } from './seed-types.ts';
 
 export const SNAPSHOT_COUNT = 2;
@@ -39,6 +40,24 @@ function step2(s: ProjectSeed): void {
     const modern = dm?.rules[0]?.conditions[0];
     if (modern && Array.isArray(modern.targetValue)) modern.targetValue = [...(modern.targetValue as string[]), 'Safari'];
     bump(dm, 3);
+    // A migrated gate is archived in StatSig → the LD flag should be retired, not synced.
+    const lbb = gate('legacy_browser_banner');
+    if (lbb) Object.assign(lbb, { status: 'Archived', isEnabled: false, archivedDaysAgo: 2, archiveReason: 'Safari 15 is below our support floor now' });
+    // A gate is switched off → drift in the on/off state only.
+    const bot = gate('bot_detection_challenge');
+    if (bot) Object.assign(bot, { isEnabled: false, status: 'Disabled' });
+    bump(bot, 3);
+    // A new gate appears → "new in StatSig, not yet in LD".
+    s.gates.push({
+      id: 'checkout_gift_wrap',
+      description: 'Gift-wrap option at checkout (added in snapshot 2).',
+      owner: P.bob,
+      tags: ['checkout'],
+      createdDaysAgo: 3,
+      modifiedDaysAgo: 1,
+      version: 1,
+      rules: [{ name: 'Staff', conditions: [{ type: 'email', operator: 'str_contains_any', targetValue: ['@acmeretail.example'] }] }],
+    });
     // An experiment concludes.
     const exp = s.experiments.find((e) => e.id === 'search_ranking_v3');
     if (exp) {

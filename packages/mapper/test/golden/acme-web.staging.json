@@ -5,7 +5,8 @@
       "flagKey": "new_checkout_flow",
       "fidelity": "partial",
       "notes": [
-        "partial: 20% rollout re-buckets users (StatSig and LD hash differently). [rule “Public 20%”]"
+        "partial: 20% rollout re-buckets users (StatSig and LD hash differently). [rule “Public 20%”]",
+        "partial: 1 ID is overridden both to pass and to fail; the environment-specific (or first) override wins."
       ],
       "decisions": [
         "choice client_side_availability (flag settings) → both",
@@ -73,15 +74,9 @@
             "variation": 0,
             "values": [
               "user-staging-tester",
+              "user-vip-complainer",
               "user-qa-1",
               "user-qa-2"
-            ]
-          },
-          {
-            "contextKind": "user",
-            "variation": 1,
-            "values": [
-              "user-vip-complainer"
             ]
           }
         ],
@@ -176,6 +171,163 @@
             "variation": 0
           }
         ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "checkout_upsell_v2",
+      "flagKey": "checkout_upsell_v2",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Rule requiring gate “new_checkout_flow” dropped. [rule “New checkout users”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking gate_reference (references new_checkout_flow) → no default",
+        "choice case_insensitive_match (rule “Staff” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "express_pay_fallback",
+      "flagKey": "express_pay_fallback",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Rule requiring gate “new_checkout_flow” dropped. [rule “Old checkout”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking gate_reference (references new_checkout_flow) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "non_staff_survey",
+      "flagKey": "non_staff_survey",
+      "fidelity": "full",
+      "notes": [
+        "full: Inlined “fails employees_only” (1 alternative). [rule “Not staff”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (via employees_only › rule “Acme staff” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Not staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "consumer_pricing",
+      "flagKey": "consumer_pricing",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Rule requiring gate “b2b_bulk_ordering” dropped. [rule “Not bulk”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking gate_reference (references b2b_bulk_ordering) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "free_returns",
+      "flagKey": "free_returns",
+      "fidelity": "full",
+      "notes": [
+        "full: Rule “Everyone” matches everyone; the 1 rule after it can never match and is dropped."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
         "targets": [],
         "prerequisites": []
       }
@@ -330,9 +482,12 @@
       "decisions": [
         "choice client_side_availability (flag settings) → both",
         "choice case_insensitive_match (rule “Pro & Enterprise, English” › condition 1) → regex",
-        "choice case_insensitive_match (rule “Pro & Enterprise, English” › condition 2) → regex"
+        "choice case_insensitive_match (rule “Pro & Enterprise, English” › condition 2) → regex",
+        "choice unit_type_kind (customID) → create:custom"
       ],
-      "dependencies": [],
+      "dependencies": [
+        "context_kind:custom"
+      ],
       "env": {
         "ldEnv": "test",
         "statsigEnv": "staging",
@@ -370,7 +525,15 @@
             "variation": 0
           }
         ],
-        "targets": [],
+        "targets": [
+          {
+            "contextKind": "custom",
+            "variation": 0,
+            "values": [
+              "acct_3001"
+            ]
+          }
+        ],
         "prerequisites": []
       }
     },
@@ -475,6 +638,71 @@
             "variation": 0
           }
         ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "reviews_v2",
+      "flagKey": "reviews_v2",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Exclude load tests” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [
+          {
+            "description": "Exclude load tests",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "[lL][oO][aA][dD][tT][eE][sS][tT]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 1
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "cross_sell_matrix",
+      "flagKey": "cross_sell_matrix",
+      "fidelity": "full",
+      "notes": [
+        "full: not_array_contains_all expands into 4 LD rules (one per value). [rule “Incomplete wardrobe and home” › condition 1]",
+        "full: not_array_contains_all expands into 3 LD rules (one per value). [rule “Incomplete wardrobe and home” › condition 2]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking rule_expansion (rule “Incomplete wardrobe and home”) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
         "targets": [],
         "prerequisites": []
       }
@@ -634,6 +862,7 @@
       "flagKey": "eu_cookie_banner",
       "fidelity": "partial",
       "notes": [
+        "full: Tag “★ Core” renamed to fit LD's tag format.",
         "partial: Your app must send “country” (StatSig derived it from the IP address). [rule “EU” › condition 1]"
       ],
       "decisions": [
@@ -956,6 +1185,189 @@
       }
     },
     {
+      "gate": "anon_homepage_variant",
+      "flagKey": "anon_homepage_variant",
+      "fidelity": "partial",
+      "notes": [
+        "partial: 50% rollout re-buckets users (StatSig and LD hash differently). [rule “Half of devices”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "acknowledge partial_rollout_rebucket (rule “Half of devices”) → acknowledge",
+        "choice unit_type_kind (stableID) → create:device"
+      ],
+      "dependencies": [
+        "context_kind:device"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "rollout": {
+            "contextKind": "device",
+            "variations": [
+              {
+                "variation": 0,
+                "weight": 50000
+              },
+              {
+                "variation": 1,
+                "weight": 50000
+              }
+            ]
+          }
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "winback_offer",
+      "flagKey": "winback_offer",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "segment:churn_risk"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "At risk",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "churn_risk"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "labs_menu",
+      "flagKey": "labs_menu",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "segment:staff_or_beta"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Labs",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "staff_or_beta"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "early_adopter_badge",
+      "flagKey": "early_adopter_badge",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "segment:early_adopters"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Early adopters",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "early_adopters"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "referral_bonus",
+      "flagKey": "referral_bonus",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking missing_reference (rule “Partners” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
       "gate": "vip_early_access",
       "flagKey": "vip_early_access",
       "fidelity": "full",
@@ -1085,6 +1497,68 @@
             "variation": 0
           }
         ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "loyalty_tier_perks",
+      "flagKey": "loyalty_tier_perks",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Tier 2+",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "loyalty_tier",
+                "op": "in",
+                "values": [
+                  "2",
+                  "3"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "legacy_partner_allowlist",
+      "flagKey": "legacy_partner_allowlist",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking unsupported_condition (rule “Encoded partners” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
         "targets": [],
         "prerequisites": []
       }
@@ -1521,6 +1995,54 @@
       }
     },
     {
+      "gate": "payments_v3_scaffold",
+      "flagKey": "payments_v3_scaffold",
+      "fidelity": "full",
+      "notes": [
+        "full: StatSig marks this gate stale (STALE_NO_RULES). Consider hard-coding it instead of migrating."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "Holiday Banner 2026",
+      "flagKey": "Holiday_Banner_2026",
+      "fidelity": "full",
+      "notes": [
+        "full: Flag key “Holiday_Banner_2026” differs from the StatSig name “Holiday Banner 2026” (LD keys allow letters, digits, . _ -)."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
       "gate": "stale_reviews_widget",
       "flagKey": "stale_reviews_widget",
       "fidelity": "full",
@@ -1626,6 +2148,95 @@
           ]
         }
       ],
+      "included": 0,
+      "includedContexts": []
+    },
+    {
+      "segment": "churn_risk",
+      "fidelity": "full",
+      "decisions": [
+        "acknowledge partial_rollout_rebucket (rule “Inactive 90 days (10%)”)"
+      ],
+      "rules": [
+        {
+          "description": "Inactive 90 days (10%)",
+          "clauses": [
+            {
+              "contextKind": "user",
+              "attribute": "days_since_order",
+              "op": "greaterThanOrEqual",
+              "values": [
+                90
+              ],
+              "negate": false
+            }
+          ],
+          "weight": 10000,
+          "rolloutContextKind": "user"
+        }
+      ],
+      "included": 0,
+      "includedContexts": []
+    },
+    {
+      "segment": "legacy_partners",
+      "fidelity": "full",
+      "decisions": [],
+      "rules": [],
+      "included": 0,
+      "includedContexts": []
+    },
+    {
+      "segment": "staff_or_beta",
+      "fidelity": "full",
+      "decisions": [
+        "choice case_insensitive_match (via employees_only › rule “Acme staff” › condition 1)",
+        "choice case_insensitive_match (rule “Opted in” › condition 1)"
+      ],
+      "rules": [
+        {
+          "description": "Staff",
+          "clauses": [
+            {
+              "contextKind": "user",
+              "attribute": "email",
+              "op": "matches",
+              "values": [
+                "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+              ],
+              "negate": false
+            }
+          ]
+        },
+        {
+          "description": "Opted in",
+          "clauses": [
+            {
+              "contextKind": "user",
+              "attribute": "beta_opt_in",
+              "op": "matches",
+              "values": [
+                "^[tT][rR][uU][eE]$"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "included": 0,
+      "includedContexts": []
+    },
+    {
+      "segment": "early_adopters",
+      "skipped": "rule “New checkout” references a gate that can't be inlined (gate “new_checkout_flow” has a 20% rollout in rule “Public 20%”, which can't be inlined exactly)",
+      "fidelity": "skipped",
+      "decisions": []
+    },
+    {
+      "segment": "beta_waitlist",
+      "fidelity": "full",
+      "decisions": [],
+      "rules": [],
       "included": 0,
       "includedContexts": []
     },

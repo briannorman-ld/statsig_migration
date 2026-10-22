@@ -44,12 +44,14 @@ function golden(snap: CanonicalSnapshot, statsig: string, ld: string) {
   return { gates, segments };
 }
 
-describe('mapper golden files (acme-web)', () => {
+describe('mapper golden files', () => {
   it.each([
-    ['staging', 'test'],
-    ['production', 'production'],
-  ])('%s → LD %s', async (statsig, ld) => {
-    const snap = await acmeSnapshot('web');
-    await expect(JSON.stringify(golden(snap, statsig, ld), null, 2) + '\n').toMatchFileSnapshot(`golden/acme-web.${statsig}.json`);
+    ['web', 'staging', 'test'],
+    ['web', 'production', 'production'],
+    // acme-mobile: version operators, javascript / experiment_group conditions, deviceID lists.
+    ['mobile', 'production', 'production'],
+  ] as const)('acme-%s %s → LD %s', async (alias, statsig, ld) => {
+    const snap = await acmeSnapshot(alias);
+    await expect(JSON.stringify(golden(snap, statsig, ld), null, 2) + '\n').toMatchFileSnapshot(`golden/acme-${alias}.${statsig}.json`);
   });
 });

@@ -17,13 +17,37 @@ async function crawlWeb(opts: Parameters<typeof testClient>[1] = {}) {
 }
 
 describe('Console API adapter against the simulated StatSig', () => {
+  it('reads only the kinds asked for, without requesting the others', async () => {
+    const d = mockProject('web');
+    const { client, issues } = testClient('web');
+    const requested: string[] = [];
+    const seen = new Set<string>();
+    const raw = await crawlConsoleProject(client, issues, {
+      kinds: ['gate', 'segment'],
+      onProgress: (p) => {
+        requested.push(p.endpoint);
+        seen.add(`${p.total}`);
+      },
+    });
+    const snap = normalizeConsoleSnapshot(raw, { source: SOURCE, takenAt: '2026-10-01T00:00:00.000Z' });
+    expect(snap.gates).toHaveLength(d.gates.length);
+    expect(countsByKind(snap)).toMatchObject({ segment: 10, config: 0, experiment: 0, layer: 0, holdout: 0, autotune: 0, metric: 0, param_store: 0 });
+    expect(requested).toContain('/gates');
+    expect(requested).toContain('/segments');
+    expect(requested).toContain('/environments'); // project-level endpoints always run
+    expect(requested).not.toContain('/experiments');
+    expect(requested).not.toContain('/metrics/list');
+    // Left out by choice is not a skipped fetch (only the usual deferred big ID lists appear).
+    expect(raw.skipped.map((x) => x.endpoint).filter((e) => !e.endsWith('/id_list'))).toEqual([]);
+  });
+
   it('crawls and normalizes acme-web', async () => {
     const d = mockProject('web');
     const { snap, issues } = await crawlWeb();
     expect(issues).toEqual([]);
     expect(snap.gates).toHaveLength(d.gates.length); // includes the archived gate
     expect(snap.gates.find((g) => g.id === 'legacy_wishlist')?.archived).toBe(true);
-    expect(countsByKind(snap)).toMatchObject({ gate: d.gates.length - 1, config: d.dynamicConfigs.length, segment: 5, experiment: 6, layer: 2, holdout: 2, autotune: 1, metric: 7, param_store: 1 });
+    expect(countsByKind(snap)).toMatchObject({ gate: d.gates.length - 1, config: d.dynamicConfigs.length, segment: 10, experiment: 7, layer: 2, holdout: 2, autotune: 1, metric: 7, param_store: 1 });
     expect(snap.environments.map((e) => e.name)).toEqual(['development', 'staging', 'production', 'qa']);
     expect(snap.unitTypes.map((u) => u.name)).toEqual(['userID', 'stableID', 'companyID']);
     expect(snap.completeness.missing).toEqual(['salts']);
@@ -37,7 +61,7 @@ describe('Console API adapter against the simulated StatSig', () => {
     expect(ncf.overrides).toEqual([
       { unitType: 'userID', ids: ['user-qa-1', 'user-qa-2'], value: { kind: 'gate', pass: true }, environment: null },
       { unitType: 'userID', ids: ['user-vip-complainer'], value: { kind: 'gate', pass: false }, environment: null },
-      { unitType: 'userID', ids: ['user-staging-tester'], value: { kind: 'gate', pass: true }, environment: 'staging' },
+      { unitType: 'userID', ids: ['user-staging-tester', 'user-vip-complainer'], value: { kind: 'gate', pass: true }, environment: 'staging' },
     ]);
     expect(ncf.owner?.email).toBe('bob.okafor@acmeretail.example');
 

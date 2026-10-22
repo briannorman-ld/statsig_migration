@@ -14,11 +14,12 @@ describe('spec re-upload diffing and sanity checks (PLAN §4.2)', () => {
   it('diffs snapshot 1 → 2 down to the environments whose targeting changed', () => {
     const d = diffSnapshots(snap(1), snap(2), ['development', 'staging', 'production', 'qa']);
     const byId = Object.fromEntries(d.changed.map((c) => [`${c.kind}/${c.id}`, c]));
-    expect(Object.keys(byId).sort()).toEqual(['config/shipping_thresholds', 'experiment/search_ranking_v3', 'gate/dark_mode', 'gate/new_checkout_flow']);
+    expect(Object.keys(byId).sort()).toEqual(['config/shipping_thresholds', 'experiment/search_ranking_v3', 'gate/bot_detection_challenge', 'gate/dark_mode', 'gate/new_checkout_flow']);
     expect(byId['gate/new_checkout_flow']!.targetingChangedIn).toEqual(['development', 'staging', 'production', 'qa']);
     expect(byId['experiment/search_ranking_v3']!.otherChanged).toBe(true);
-    expect(d.added).toEqual([]);
-    expect(d.removed).toEqual([]);
+    // A gate added in snapshot 2, and one archived (archived entities are absent from specs).
+    expect(d.added).toEqual([{ kind: 'gate', id: 'checkout_gift_wrap' }]);
+    expect(d.removed).toEqual([{ kind: 'gate', id: 'legacy_browser_banner' }]);
   });
 
   it('dedupes uploads where only `time` changed', () => {

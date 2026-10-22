@@ -1,0 +1,706 @@
+{
+  "gates": [
+    {
+      "gate": "employees_only",
+      "flagKey": "employees_only",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Acme staff” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Acme staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "maintenance_mode",
+      "flagKey": "maintenance_mode",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Internal IPs",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "ip",
+                "op": "in",
+                "values": [
+                  "10.0.0.1",
+                  "10.0.0.2"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "kill_switch_payments",
+      "flagKey": "kill_switch_payments",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "new_checkout_flow",
+      "flagKey": "new_checkout_flow",
+      "fidelity": "partial",
+      "notes": [
+        "partial: 50% rollout re-buckets users (StatSig and LD hash differently). [rule “App 5.2+ (50%)”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Staff” › condition 1) → regex",
+        "acknowledge partial_rollout_rebucket (rule “App 5.2+ (50%)”) → acknowledge"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "App 5.2+ (50%)",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "appVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "5.2.0"
+                ],
+                "negate": true
+              }
+            ],
+            "rollout": {
+              "contextKind": "user",
+              "variations": [
+                {
+                  "variation": 0,
+                  "weight": 50000
+                },
+                {
+                  "variation": 1,
+                  "weight": 50000
+                }
+              ]
+            }
+          }
+        ],
+        "targets": [
+          {
+            "contextKind": "user",
+            "variation": 0,
+            "values": [
+              "user-qa-1"
+            ]
+          }
+        ],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "dark_mode",
+      "flagKey": "dark_mode",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “osName” (StatSig derived it from the user agent). [rule “iOS 13+” › condition 1]",
+        "partial: Your app must send “osVersion” (StatSig derived it from the user agent). [rule “iOS 13+” › condition 2]",
+        "partial: Your app must send “osName” (StatSig derived it from the user agent). [rule “Android 10+” › condition 1]",
+        "partial: Your app must send “osVersion” (StatSig derived it from the user agent). [rule “Android 10+” › condition 2]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “iOS 13+” › condition 1) → map",
+        "choice case_insensitive_match (rule “iOS 13+” › condition 1) → regex",
+        "choice derived_attribute (rule “iOS 13+” › condition 2) → map",
+        "choice derived_attribute (rule “Android 10+” › condition 1) → map",
+        "choice case_insensitive_match (rule “Android 10+” › condition 1) → regex",
+        "choice derived_attribute (rule “Android 10+” › condition 2) → map"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "iOS 13+",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "osName",
+                "op": "matches",
+                "values": [
+                  "^[iI][oO][sS]$"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "osVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "13.0"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          },
+          {
+            "description": "Android 10+",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "osName",
+                "op": "matches",
+                "values": [
+                  "^[aA][nN][dD][rR][oO][iI][dD]$"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "osVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "10"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "search_v2",
+      "flagKey": "search_v2",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "ios_rating_prompt",
+      "flagKey": "ios_rating_prompt",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “osName” (StatSig derived it from the user agent). [rule “iOS 5.x” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “iOS 5.x” › condition 1) → map",
+        "choice case_insensitive_match (rule “iOS 5.x” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "iOS 5.x",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "osName",
+                "op": "matches",
+                "values": [
+                  "^[iI][oO][sS]$"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "appVersion",
+                "op": "semVerGreaterThan",
+                "values": [
+                  "5.0.0"
+                ],
+                "negate": false
+              },
+              {
+                "contextKind": "user",
+                "attribute": "appVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "6.0.0"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "force_upgrade_banner",
+      "flagKey": "force_upgrade_banner",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Old builds",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "appVersion",
+                "op": "semVerGreaterThan",
+                "values": [
+                  "4.9.9"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "push_v2_pilot",
+      "flagKey": "push_v2_pilot",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "5.1.0",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "appVersion",
+                "op": "semVerEqual",
+                "values": [
+                  "5.1.0"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "android_min_version",
+      "flagKey": "android_min_version",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Build 5.2.0.100+",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "appVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "5.2.0.100"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "beta_channel_features",
+      "flagKey": "beta_channel_features",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Beta builds 5.3+",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "appVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "5.3.0-beta"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "tablet_layout",
+      "flagKey": "tablet_layout",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “deviceModel” (StatSig derived it from the user agent). [rule “Tablets” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “Tablets” › condition 1) → map",
+        "choice case_insensitive_match (rule “Tablets” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Tablets",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "deviceModel",
+                "op": "matches",
+                "values": [
+                  "^[iI][pP][aA][dD]13,1$",
+                  "^[sS][mM]-[xX]700$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "device_beta_program",
+      "flagKey": "device_beta_program",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "segment:ios_beta_devices"
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Enrolled devices",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "ios_beta_devices"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "beta_feature_flags",
+      "flagKey": "beta_feature_flags",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "segment:beta_testers"
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Beta",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "beta_testers"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "webview_checkout_fallback",
+      "flagKey": "webview_checkout_fallback",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking unsupported_condition (rule “JS check” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "onboarding_followup",
+      "flagKey": "onboarding_followup",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "blocking unsupported_condition (rule “Carousel group” › condition 1) → no default"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    }
+  ],
+  "segments": [
+    {
+      "segment": "beta_testers",
+      "fidelity": "full",
+      "decisions": [
+        "choice case_insensitive_match (rule “Beta channel” › condition 1)"
+      ],
+      "rules": [
+        {
+          "description": "Beta channel",
+          "clauses": [
+            {
+              "contextKind": "user",
+              "attribute": "release_channel",
+              "op": "matches",
+              "values": [
+                "^[tT][eE][sS][tT][fF][lL][iI][gG][hH][tT]$",
+                "^[pP][lL][aA][yY]_[bB][eE][tT][aA]$"
+              ],
+              "negate": false
+            }
+          ]
+        }
+      ],
+      "included": 0,
+      "includedContexts": []
+    },
+    {
+      "segment": "ios_beta_devices",
+      "fidelity": "full",
+      "decisions": [
+        "choice unit_type_kind (deviceID)"
+      ],
+      "rules": [],
+      "included": 0,
+      "includedContexts": [
+        "device: 40"
+      ]
+    }
+  ]
+}

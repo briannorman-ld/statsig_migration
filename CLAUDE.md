@@ -24,3 +24,4 @@
   - `environment_tier` is resolved statically per environment.
   - Custom unit IDs map to their own context kind, not `user`.
 - The demo (PLAN §19) uses MSW in front of the real adapters. Its dataset in `packages/demo-fixtures` is also the main test fixture.
+- `docs/KNOWN-EDGE-CASES.md` is the running list of places where StatSig and LD differ. When you find a new one: add a row there, a demo example in `packages/demo-fixtures/src/acme/`, and a test in `packages/mapper/test/mapper.test.ts` (the golden files then cover it). Rows marked as gaps are the mapper backlog.
