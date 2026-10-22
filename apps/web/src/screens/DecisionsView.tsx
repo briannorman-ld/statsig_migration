@@ -36,10 +36,10 @@ export function DecisionsView({ snapshots, m, workspaceName }: { snapshots: Cano
   return (
     <div className="max-w-5xl space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-lg font-semibold">Decisions</h2>
-        <div className="flex rounded-md border border-slate-300 text-sm">
+        <h2 className="font-display text-xl font-semibold tracking-tight">Decisions</h2>
+        <div className="flex rounded-md border border-line text-sm">
           {(['open', 'decided'] as const).map((t) => (
-            <button key={t} onClick={() => setTab(t)} className={cx('px-3 py-1.5 first:rounded-l-md last:rounded-r-md', tab === t ? 'bg-slate-900 text-white' : 'hover:bg-slate-50')}>
+            <button key={t} onClick={() => setTab(t)} className={cx('px-3 py-1.5 first:rounded-l-md last:rounded-r-md', tab === t ? 'bg-accent text-on-accent' : 'hover:bg-surface-hover')}>
               {t === 'open' ? `Open (${open.length})` : `Decided (${decided.length})`}
             </button>
           ))}
@@ -58,19 +58,19 @@ export function DecisionsView({ snapshots, m, workspaceName }: { snapshots: Cano
           </Button>
         </div>
       </div>
-      <p className="text-sm text-slate-500">
+      <p className="text-sm text-fg-muted">
         Every place where StatSig can't be translated exactly becomes a decision. Answers apply in every environment and are saved in this workspace.
         {!m.connected && ' Connect LaunchDarkly and map environments to see only the environments you will migrate.'}
         {' '}Blocking and acknowledge decisions always need your answer.
       </p>
       {Object.keys(m.profile.policies).length > 0 && (
         <Card className="p-3 text-sm">
-          <div className="mb-1 text-xs font-semibold text-slate-500">Workspace policies</div>
+          <div className="mb-1 text-xs font-semibold text-fg-muted">Workspace policies</div>
           <ul className="space-y-1">
             {Object.entries(m.profile.policies).map(([t, o]) => (
               <li key={t} className="flex items-center gap-2">
                 <span>{TYPE_LABEL[t] ?? t}</span> → <b>{o}</b>
-                <button className="ml-2 text-xs text-slate-500 hover:text-red-700" onClick={() => void m.setPolicy(t as DecisionType, null)}>
+                <button className="ml-2 text-xs text-fg-muted hover:text-error" onClick={() => void m.setPolicy(t as DecisionType, null)}>
                   remove
                 </button>
               </li>
@@ -88,7 +88,7 @@ export function DecisionsView({ snapshots, m, workspaceName }: { snapshots: Cano
             <h3 className="flex items-center gap-2 text-sm font-semibold">
               {TYPE_LABEL[type] ?? type}
               <Badge tone={SEVERITY_TONE[sev]}>{sev}</Badge>
-              <span className="font-normal text-slate-500">
+              <span className="font-normal text-fg-muted">
                 {instances.length} decision{instances.length === 1 ? '' : 's'} in {entities} item{entities === 1 ? '' : 's'}
               </span>
             </h3>
@@ -105,23 +105,23 @@ export function DecisionsView({ snapshots, m, workspaceName }: { snapshots: Cano
                     onChoose={(o) => void m.resolve(xs.map((x) => x.decision), o)}
                     onPolicy={(o) => void m.setPolicy(type, o)}
                   />
-                  <button className="text-xs text-slate-500 hover:text-slate-800" onClick={() => setExpanded(expanded === groupKey ? undefined : groupKey)}>
+                  <button className="text-xs text-fg-muted hover:text-fg" onClick={() => setExpanded(expanded === groupKey ? undefined : groupKey)}>
                     {expanded === groupKey ? 'Hide' : 'Show'} the {xs.length} affected place{xs.length === 1 ? '' : 's'}
                   </button>
                   {expanded === groupKey && (
-                    <ul className="ml-3 space-y-1 border-l border-slate-200 pl-3 text-xs">
+                    <ul className="ml-3 space-y-1 border-l border-line pl-3 text-xs">
                       {xs.map((x) => (
                         <li key={x.decision.id} className="flex flex-wrap items-center gap-2">
                           <code className="font-medium">{x.decision.subject.id}</code>
-                          <span className="text-slate-500">{x.decision.subject.location}</span>
-                          <span className="text-slate-400">({x.envs.join(', ')})</span>
+                          <span className="text-fg-muted">{x.decision.subject.location}</span>
+                          <span className="text-fg-subtle">({x.envs.join(', ')})</span>
                           {x.decision.options.map((o) => (
-                            <button key={o.key} onClick={() => void m.resolve([x.decision], o.key)} className={cx('rounded border px-1.5 py-0.5', x.resolvedWith?.optionKey === o.key ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 hover:bg-slate-100')}>
+                            <button key={o.key} onClick={() => void m.resolve([x.decision], o.key)} className={cx('rounded border px-1.5 py-0.5', x.resolvedWith?.optionKey === o.key ? 'border-accent bg-accent text-on-accent' : 'border-line hover:bg-surface-hover')}>
                               {o.label}
                             </button>
                           ))}
                           {x.resolvedWith?.via === 'resource' && (
-                            <button className="text-slate-400 hover:text-red-700" onClick={() => void m.clear([x.decision.id])}>
+                            <button className="text-fg-subtle hover:text-error" onClick={() => void m.clear([x.decision.id])}>
                               reset
                             </button>
                           )}

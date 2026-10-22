@@ -2,15 +2,15 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { countsByKind, ENTITY_KINDS, type CanonicalSnapshot, type EntityKind } from '@sslm/canonical';
 import type { SourceRecord } from '@sslm/store';
-import { Badge, Button, Callout, cx, Select, Spinner } from '../components/ui.tsx';
+import { LdMark } from '../components/Brand.tsx';
+import { ThemeToggle } from '../components/ThemeToggle.tsx';
+import { Badge, Button, Callout, cx, Dot, Select, Spinner } from '../components/ui.tsx';
 import { useLdSession } from '../lib/ld.ts';
 import { collectDecisions, fetchDeferredIdLists, isInterrupted } from '../lib/migration.ts';
-import { secrets } from '../lib/secrets.ts';
 import { store } from '../lib/store.ts';
 import { syncConsoleSource } from '../lib/sync.ts';
 import { useMigration } from '../lib/useMigration.ts';
 import { AddSource } from './AddSource.tsx';
-import { ConnectionsView } from './ConnectionsView.tsx';
 import { DecisionsView } from './DecisionsView.tsx';
 import { EntityList } from './EntityList.tsx';
 import { GatesSideBySide } from './GatesSideBySide.tsx';
@@ -22,7 +22,6 @@ import { WarningsView } from './WarningsView.tsx';
 
 export type View =
   | { kind: 'resource'; resource: EntityKind }
-  | { kind: 'connections' }
   | { kind: 'ld' }
   | { kind: 'warnings' }
   | { kind: 'add-source' }
@@ -87,29 +86,6 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
     }
   };
 
-  // Removing a source drops its snapshots and fetched ID lists from this browser and forgets its
-  // key. Nothing in StatSig or LaunchDarkly changes; the source can be added again later.
-  const removeSource = async (s: SourceRecord) => {
-    const synced = snapshots?.[s.id];
-    if (!window.confirm(`Remove "${s.label}" from this workspace?${synced ? ' Its synced snapshot is deleted from this browser.' : ''} StatSig itself is not touched.`)) return;
-    secrets.forget('statsig', s.id);
-    await store.removeSource(s.id);
-    setSync((x) => {
-      const { [s.id]: _, ...rest } = x;
-      return rest;
-    });
-    setHidden((h) => (h.has(s.id) ? toggle(h, s.id) : h));
-  };
-
-  // A workspace with no sources yet (just created) opens on Connections: one place to connect
-  // StatSig and one to connect LaunchDarkly. Decided once, when the source list first loads.
-  const landed = useRef(false);
-  useEffect(() => {
-    if (landed.current || !sources) return;
-    landed.current = true;
-    if (sources.length === 0) setView({ kind: 'connections' });
-  }, [sources]);
-
   // First open of a demo workspace: sync every Console API source that has no snapshot yet.
   useEffect(() => {
     if (!sources || !snapshots) return;
@@ -157,22 +133,29 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
     void fetchDeferredIdLists(workspaceId, sources, pending, m.idLists).catch(() => undefined);
   }, [m, visibleSnaps, sources, workspaceId]);
 
-  if (!workspace) return <div className="p-8 text-slate-500">Loading…</div>;
+  if (!workspace)
+    return (
+      <div className="flex items-center gap-2 p-8 text-sm text-fg-muted">
+        <Spinner /> Loading…
+      </div>
+    );
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center gap-4 border-b border-slate-200 bg-white px-4 py-2.5">
-        <Button variant="ghost" onClick={onExit} className="px-2">
-          ← Workspaces
-        </Button>
-        <div className="flex items-center gap-2">
-          <h1 className="font-semibold">{workspace.name}</h1>
+      <header className="flex items-center gap-3 border-b border-line bg-surface px-4 py-2">
+        <button type="button" onClick={onExit} title="All workspaces" className="flex items-center gap-2.5 rounded-md py-1 pr-2 pl-1 transition-colors hover:bg-surface-hover">
+          <LdMark className="h-5 w-5 text-logo" />
+          <span className="font-display text-[13px] font-semibold tracking-tight text-fg">Migration Console</span>
+        </button>
+        <span aria-hidden className="h-5 w-px bg-line" />
+        <div className="flex min-w-0 items-center gap-2">
+          <h1 className="truncate text-sm font-semibold text-fg">{workspace.name}</h1>
           {workspace.isDemo && <Badge tone="violet">demo</Badge>}
         </div>
         <div className="ml-auto flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-slate-600">
+          <label className="flex items-center gap-2 text-sm text-fg-muted">
             Environment
-            <Select value={env} onChange={(e) => setEnv(e.target.value)} disabled={!envs.length} aria-label="Environment">
+            <Select value={env} onChange={(e) => setEnv(e.target.value)} disabled={!envs.length} aria-label="Environment" className="py-1">
               {envs.map((e) => (
                 <option key={e} value={e}>
                   {e}
@@ -180,34 +163,39 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
               ))}
             </Select>
           </label>
-          <button onClick={() => setView({ kind: 'ld' })} className="flex items-center gap-2 rounded-md border border-slate-200 px-2.5 py-1.5 text-sm hover:bg-slate-50">
-            <span className={cx('h-2 w-2 rounded-full', ld.status === 'connected' ? 'bg-emerald-500' : ld.status === 'error' ? 'bg-red-500' : 'bg-slate-300')} />
+          <button
+            type="button"
+            onClick={() => setView({ kind: 'ld' })}
+            className="flex h-8 items-center gap-2 rounded-md border border-line bg-surface px-2.5 text-sm text-fg shadow-card transition-colors hover:border-line-strong hover:bg-surface-hover"
+          >
+            <Dot tone={ld.status === 'connected' ? 'green' : ld.status === 'error' ? 'red' : 'slate'} />
             {ld.status === 'connected' ? (ld.projectKey ? `LD · ${ld.projectKey}` : 'LD · choose project') : 'Connect LaunchDarkly'}
             {ld.matrix && <Badge tone="blue">{ld.matrix.capabilities.filter((c) => c.status === 'available').length} capabilities</Badge>}
           </button>
+          <ThemeToggle />
         </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <nav className="w-72 shrink-0 overflow-y-auto border-r border-slate-200 bg-white p-3" aria-label="Workspace">
+        <nav className="w-72 shrink-0 overflow-y-auto border-r border-line bg-surface p-3" aria-label="Workspace">
           <SectionTitle>StatSig sources</SectionTitle>
           <ul className="space-y-1.5">
             {(sources ?? []).map((s) => {
               const sn = snapshots?.[s.id];
               const st = sync[s.id];
               return (
-                <li key={s.id} className="rounded-md border border-slate-200 p-2 text-sm">
+                <li key={s.id} className="rounded-md border border-line p-2 text-sm">
                   <div className="flex items-center gap-2">
                     <input type="checkbox" checked={!hidden.has(s.id)} aria-label={`Include ${s.label}`} onChange={() => setHidden((h) => toggle(h, s.id))} />
                     <span className="font-medium">{s.label}</span>
                     <Badge tone={s.kind === 'console_api' ? 'green' : 'amber'}>{s.kind === 'console_api' ? 'Console API' : 'Spec'}</Badge>
                     {s.kind === 'console_api' && (
-                      <button className="ml-auto text-slate-500 hover:text-slate-900 disabled:opacity-40" title="Refresh from StatSig" disabled={st?.running} onClick={() => runSync(s)}>
+                      <button className="ml-auto text-fg-muted hover:text-fg disabled:opacity-40" title="Refresh from StatSig" disabled={st?.running} onClick={() => runSync(s)}>
                         ↻
                       </button>
                     )}
                   </div>
-                  <div className="mt-1 text-xs text-slate-500">
+                  <div className="mt-1 text-xs text-fg-muted">
                     {st?.running ? (
                       <span className="flex items-center gap-1.5">
                         <Spinner /> {st.done ?? 0}/{st.total ?? '…'} {st.endpoint}
@@ -218,8 +206,8 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
                       'not synced'
                     )}
                   </div>
-                  {st?.running && st.retries.length > 0 && <div className="mt-1 text-xs text-amber-700">{st.retries[st.retries.length - 1]}</div>}
-                  {st?.error && <div className="mt-1 text-xs text-red-700">{st.error}</div>}
+                  {st?.running && st.retries.length > 0 && <div className="mt-1 text-xs text-warning">{st.retries[st.retries.length - 1]}</div>}
+                  {st?.error && <div className="mt-1 text-xs text-error">{st.error}</div>}
                 </li>
               );
             })}
@@ -234,7 +222,7 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
               <li key={k}>
                 <NavItem active={view.kind === 'resource' && view.resource === k} onClick={() => setView({ kind: 'resource', resource: k })}>
                   <span>{KIND_LABEL[k]}</span>
-                  <span className="text-slate-500 tabular-nums">{counts[k]}</span>
+                  <span className="text-fg-muted tabular-nums">{counts[k]}</span>
                 </NavItem>
               </li>
             ))}
@@ -255,14 +243,10 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
           </NavItem>
           <NavItem active={view.kind === 'runs'} onClick={() => setView({ kind: 'runs' })}>
             <span>Runs</span>
-            {interrupted.length > 0 ? <Badge tone="amber">interrupted</Badge> : runs?.length ? <span className="text-slate-500 tabular-nums">{runs.length}</span> : null}
+            {interrupted.length > 0 ? <Badge tone="amber">interrupted</Badge> : runs?.length ? <span className="text-fg-muted tabular-nums">{runs.length}</span> : null}
           </NavItem>
 
           <SectionTitle>Workspace</SectionTitle>
-          <NavItem active={view.kind === 'connections'} onClick={() => setView({ kind: 'connections' })}>
-            <span>Connections</span>
-            {(sources ?? []).length === 0 || ld.status !== 'connected' ? <Badge tone="amber">setup</Badge> : null}
-          </NavItem>
           <NavItem active={view.kind === 'ld'} onClick={() => setView({ kind: 'ld' })}>
             <span>LaunchDarkly & capabilities</span>
           </NavItem>
@@ -270,7 +254,7 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
             <span>Source warnings</span>
             {warningCount > 0 && <Badge tone="amber">{warningCount}</Badge>}
           </NavItem>
-          <p className="mt-6 px-2 text-xs text-slate-400">Gates and their segments migrate in M3. Configs, big segments and approvals arrive in M4.</p>
+          <p className="mt-6 px-2 text-xs text-fg-subtle">Gates and their segments migrate in M3. Configs, big segments and approvals arrive in M4.</p>
         </nav>
 
         <main className="min-w-0 flex-1 overflow-y-auto p-5">
@@ -285,18 +269,7 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
             </div>
           )}
           {visible.length === 0 && (view.kind === 'resource' || view.kind === 'decisions' || view.kind === 'mapping') && (
-            <Callout tone="blue">
-              {(sources ?? []).length === 0 ? (
-                <>
-                  <button className="font-medium underline" onClick={() => setView({ kind: 'connections' })}>
-                    Connect a StatSig source
-                  </button>{' '}
-                  to get started.
-                </>
-              ) : (
-                'Waiting for the first sync…'
-              )}
-            </Callout>
+            <Callout tone="blue">{(sources ?? []).length === 0 ? 'Add a StatSig source to get started.' : 'Waiting for the first sync…'}</Callout>
           )}
           {view.kind === 'resource' && visible.length > 0 &&
             (view.resource === 'gate' ? (
@@ -307,21 +280,9 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
           {view.kind === 'decisions' && m && visible.length > 0 && <DecisionsView snapshots={visibleSnaps} m={m} workspaceName={workspace.name} />}
           {view.kind === 'mapping' && m && visible.length > 0 && <MappingView sources={visible} snapshots={snapshots ?? {}} m={m} onConnect={() => setView({ kind: 'ld' })} />}
           {view.kind === 'runs' && m && <RunsView workspaceId={workspaceId} m={m} />}
-          {view.kind === 'connections' && (
-            <ConnectionsView
-              workspace={workspace}
-              sources={sources ?? []}
-              snapshots={snapshots ?? {}}
-              ld={ld}
-              onAddSource={() => setView({ kind: 'add-source' })}
-              onRemoveSource={removeSource}
-              onOpenLd={() => setView({ kind: 'ld' })}
-              onOpenGates={() => setView({ kind: 'resource', resource: 'gate' })}
-            />
-          )}
           {view.kind === 'ld' && <LdPanel workspaceId={workspaceId} workspace={workspace} />}
           {view.kind === 'warnings' && <WarningsView sources={visible} snapshots={snapshots ?? {}} />}
-          {view.kind === 'add-source' && <AddSource workspaceId={workspaceId} onDone={() => setView(ld.status === 'connected' ? { kind: 'resource', resource: 'gate' } : { kind: 'connections' })} />}
+          {view.kind === 'add-source' && <AddSource workspaceId={workspaceId} onDone={() => setView({ kind: 'resource', resource: 'gate' })} />}
         </main>
       </div>
       {migrate && m && (
@@ -332,12 +293,20 @@ export function WorkspaceScreen({ workspaceId, onExit }: { workspaceId: string; 
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h2 className="mt-4 mb-1.5 px-2 text-xs font-semibold tracking-wide text-slate-500 uppercase first:mt-0">{children}</h2>;
+  return <h2 className="mt-4 mb-1.5 px-2 text-xs font-semibold tracking-wide text-fg-muted uppercase first:mt-0">{children}</h2>;
 }
 
 function NavItem({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button onClick={onClick} className={cx('flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm', active ? 'bg-slate-900 text-white' : 'hover:bg-slate-100')}>
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active ? 'page' : undefined}
+      className={cx(
+        'flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm transition-colors duration-150',
+        active ? 'bg-selected font-medium text-selected-fg' : 'text-fg-muted hover:bg-surface-hover hover:text-fg',
+      )}
+    >
       {children}
     </button>
   );

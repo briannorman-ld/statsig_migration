@@ -6,7 +6,7 @@ import type { DecisionPoint } from '@sslm/mapper';
 import { recommendedResolutions, type ItemStatus } from '@sslm/planner';
 import type { SourceRecord } from '@sslm/store';
 import { DecisionCard, FIDELITY_TONE } from '../components/DecisionCard.tsx';
-import { Badge, Button, Callout, Card, cx, Input, Spinner } from '../components/ui.tsx';
+import { Badge, Button, Callout, Card, CloseButton, cx, Input, Spinner } from '../components/ui.tsx';
 import { refreshLdState } from '../lib/ld.ts';
 import { buildPlan, executePlan, fetchDeferredIdLists, undoRun, useActiveRun } from '../lib/migration.ts';
 import type { MigrationContext } from '../lib/useMigration.ts';
@@ -97,19 +97,17 @@ export function MigrateModal({
 
   const busy = phase.kind === 'running' || phase.kind === 'loading';
   return (
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-slate-900/40 p-6" role="dialog" aria-modal="true" aria-label="Migrate to LaunchDarkly">
-      <Card className="flex w-full max-w-5xl flex-col overflow-hidden">
-        <header className="flex items-center gap-3 border-b border-slate-200 px-5 py-3">
-          <h2 className="text-lg font-semibold">Migrate {label}</h2>
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-overlay p-6 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-label="Migrate to LaunchDarkly">
+      <Card className="flex w-full max-w-5xl flex-col overflow-hidden shadow-raised">
+        <header className="flex items-center gap-3 border-b border-line px-5 py-3">
+          <h2 className="font-display text-xl font-semibold tracking-tight">Migrate {label}</h2>
           {m.ld.projectKey && <Badge tone="blue">LD · {m.ld.projectKey}</Badge>}
-          <button onClick={onClose} disabled={phase.kind === 'running'} aria-label="Close" className="ml-auto text-slate-400 hover:text-slate-700 disabled:opacity-30">
-            ✕
-          </button>
+          <CloseButton onClick={onClose} disabled={phase.kind === 'running'} className="ml-auto" />
         </header>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
           {phase.kind === 'loading' && (
-            <div className="flex items-center gap-2 text-sm text-slate-600">
+            <div className="flex items-center gap-2 text-sm text-fg-muted">
               <Spinner /> {phase.message}
             </div>
           )}
@@ -127,7 +125,7 @@ export function MigrateModal({
                 <ItemsTable items={requested} />
                 {deps.length > 0 && (
                   <>
-                    <h4 className="mt-3 mb-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase">Pulled in as dependencies</h4>
+                    <h4 className="mt-3 mb-1.5 text-xs font-semibold tracking-wide text-fg-muted uppercase">Pulled in as dependencies</h4>
                     <ItemsTable items={deps} />
                   </>
                 )}
@@ -143,7 +141,7 @@ export function MigrateModal({
                       Use recommended for {choiceCount} choice{choiceCount === 1 ? '' : 's'}
                     </Button>
                   </div>
-                  {ackCount > 0 && choiceCount === 0 && <p className="text-xs text-slate-500">Acknowledgements and blocking decisions always need an explicit answer.</p>}
+                  {ackCount > 0 && choiceCount === 0 && <p className="text-xs text-fg-muted">Acknowledgements and blocking decisions always need an explicit answer.</p>}
                   {groups.map((xs) => (
                     <DecisionCard
                       key={xs[0]!.id}
@@ -161,16 +159,16 @@ export function MigrateModal({
               <section>
                 <button className="text-sm font-semibold" onClick={() => setShowSteps((x) => !x)}>
                   {showSteps ? '▾' : '▸'} {plan.steps.length} operation{plan.steps.length === 1 ? '' : 's'}
-                  <span className="ml-2 font-normal text-slate-500">
+                  <span className="ml-2 font-normal text-fg-muted">
                     about {plan.requests} LD requests, ~{seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)} min`}
                   </span>
                 </button>
                 {showSteps && (
-                  <ol className="mt-2 list-decimal space-y-0.5 pl-6 font-mono text-xs text-slate-600">
+                  <ol className="mt-2 list-decimal space-y-0.5 pl-6 font-mono text-xs text-fg-muted">
                     {plan.steps.map((s) => (
                       <li key={s.id}>
                         {s.id}
-                        {'exists' in s && s.exists && <span className="text-amber-700"> (exists{s.adopt ? ', adopting' : ''})</span>}
+                        {'exists' in s && s.exists && <span className="text-warning"> (exists{s.adopt ? ', adopting' : ''})</span>}
                       </li>
                     ))}
                   </ol>
@@ -185,9 +183,9 @@ export function MigrateModal({
               )}
 
               {needsConfirm.length > 0 && plan.steps.length > 0 && (
-                <Card className="border-red-200 p-3">
+                <Card className="border-error-line/60 p-3">
                   <label className="block text-sm">
-                    This writes to <b>{needsConfirm.join(', ')}</b>. Type <code className="rounded bg-slate-100 px-1">{needsConfirm.join(', ')}</code> to confirm.
+                    This writes to <b>{needsConfirm.join(', ')}</b>. Type <code className="rounded bg-surface-2 px-1">{needsConfirm.join(', ')}</code> to confirm.
                     <Input className="mt-2 w-64 font-mono" value={confirm} onChange={(e) => setConfirm(e.target.value)} aria-label="Type the environment to confirm" />
                   </label>
                 </Card>
@@ -205,10 +203,10 @@ export function MigrateModal({
           )}
         </div>
 
-        <footer className="flex flex-wrap items-center gap-3 border-t border-slate-200 bg-slate-50 px-5 py-3">
+        <footer className="flex flex-wrap items-center gap-3 border-t border-line bg-surface-2 px-5 py-3">
           {plan && phase.kind === 'plan' && (
             <>
-              <span className="text-sm text-slate-600">
+              <span className="text-sm text-fg-muted">
                 {plan.ready ? (
                   'Ready.'
                 ) : plan.steps.length ? (
@@ -259,7 +257,7 @@ export function MigrateModal({
 function ItemsTable({ items }: { items: NonNullable<ReturnType<typeof buildPlan>>['items'] }) {
   return (
     <table className="w-full text-sm">
-      <thead className="text-left text-xs text-slate-500">
+      <thead className="text-left text-xs text-fg-muted">
         <tr>
           <th className="py-1 pr-3 font-medium">Item</th>
           <th className="py-1 pr-3 font-medium">LD env</th>
@@ -267,7 +265,7 @@ function ItemsTable({ items }: { items: NonNullable<ReturnType<typeof buildPlan>
           <th className="py-1 font-medium">Details</th>
         </tr>
       </thead>
-      <tbody className="divide-y divide-slate-100">
+      <tbody className="divide-y divide-line-soft">
         {items.map((i) => (
           <tr key={`${i.uid}|${i.ldEnv}`} className="align-top">
             <td className="py-1.5 pr-3">
@@ -276,12 +274,12 @@ function ItemsTable({ items }: { items: NonNullable<ReturnType<typeof buildPlan>
             </td>
             <td className="py-1.5 pr-3 font-mono text-xs">
               {i.ldEnv}
-              {i.statsigEnv && i.statsigEnv !== i.ldEnv && <span className="text-slate-400"> ← {i.statsigEnv}</span>}
+              {i.statsigEnv && i.statsigEnv !== i.ldEnv && <span className="text-fg-subtle"> ← {i.statsigEnv}</span>}
             </td>
             <td className="py-1.5 pr-3">
               <Badge tone={ITEM_TONE[i.status]}>{i.status}</Badge> {i.fidelity && i.status === 'ready' && <Badge tone={FIDELITY_TONE[i.fidelity.overall]}>{i.fidelity.overall}</Badge>}
             </td>
-            <td className="py-1.5 text-xs text-slate-600">{i.reason ?? (i.fidelity?.notes.filter((n) => n.fidelity !== 'full').map((n) => n.message).join(' ') || '—')}</td>
+            <td className="py-1.5 text-xs text-fg-muted">{i.reason ?? (i.fidelity?.notes.filter((n) => n.fidelity !== 'full').map((n) => n.message).join(' ') || '—')}</td>
           </tr>
         ))}
       </tbody>
@@ -311,7 +309,7 @@ export function RunSummary({ run }: { run: RunRecord }) {
 export function RunProgress({ run, title, ldBase }: { run?: RunRecord; title: string; ldBase?: string }) {
   if (!run)
     return (
-      <div className="flex items-center gap-2 text-sm text-slate-600">
+      <div className="flex items-center gap-2 text-sm text-fg-muted">
         <Spinner /> Starting…
       </div>
     );
@@ -320,24 +318,24 @@ export function RunProgress({ run, title, ldBase }: { run?: RunRecord; title: st
     <section>
       <div className="mb-2 flex items-center gap-2 text-sm">
         <h3 className="font-semibold">{title}</h3>
-        <span className="text-slate-500">
+        <span className="text-fg-muted">
           {done}/{run.steps.length}
         </span>
         {(run.status === 'running' || run.status === 'undoing') && <Spinner />}
       </div>
-      <div className="mb-3 h-1.5 overflow-hidden rounded bg-slate-100">
-        <div className="h-full bg-slate-900 transition-all" style={{ width: `${(done / Math.max(run.steps.length, 1)) * 100}%` }} />
+      <div className="mb-3 h-1.5 overflow-hidden rounded bg-surface-2">
+        <div className="h-full bg-accent transition-all" style={{ width: `${(done / Math.max(run.steps.length, 1)) * 100}%` }} />
       </div>
       <ul className="space-y-1 text-xs">
         {run.steps.map((s) => (
-          <li key={s.id} className={cx('flex gap-2', s.status === 'pending' && 'text-slate-400')}>
+          <li key={s.id} className={cx('flex gap-2', s.status === 'pending' && 'text-fg-subtle')}>
             <Badge tone={STEP_TONE[s.status]}>{s.status}</Badge>
             <span className="min-w-0">
               <span className="font-medium">{s.label}</span>
-              {s.message && <span className="text-slate-500"> · {s.message}</span>}
-              {s.error && <span className="text-red-700"> · {s.error}</span>}
+              {s.message && <span className="text-fg-muted"> · {s.message}</span>}
+              {s.error && <span className="text-error"> · {s.error}</span>}
               {ldBase && s.status === 'done' && !run.dryRun && s.step.op === 'update_flag_env' && (
-                <a className="ml-1 text-blue-700 hover:underline" target="_blank" rel="noreferrer" href={`${ldBase}/${s.step.ldEnv}/features/${s.step.key}`}>
+                <a className="ml-1 text-link hover:underline" target="_blank" rel="noreferrer" href={`${ldBase}/${s.step.ldEnv}/features/${s.step.key}`}>
                   open ↗
                 </a>
               )}

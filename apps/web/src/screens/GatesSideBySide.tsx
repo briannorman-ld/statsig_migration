@@ -11,13 +11,13 @@ import { ldFlagState, mapGateFor } from '../lib/migration.ts';
 import type { MigrationContext } from '../lib/useMigration.ts';
 
 export const STATUS: Record<MigrationStatus, { label: string; tone: 'slate' | 'green' | 'amber' | 'red' | 'violet'; dot: string }> = {
-  not_in_ld: { label: 'not migrated', tone: 'slate', dot: 'bg-slate-300' },
-  not_migrated: { label: 'not migrated here', tone: 'slate', dot: 'bg-slate-300' },
-  in_sync: { label: 'in sync', tone: 'green', dot: 'bg-emerald-500' },
-  statsig_changed: { label: 'StatSig changed', tone: 'amber', dot: 'bg-amber-500' },
-  decisions_changed: { label: 'decisions changed', tone: 'amber', dot: 'bg-amber-400' },
-  foreign: { label: 'existing LD key', tone: 'red', dot: 'bg-red-400' },
-  other_source: { label: 'migrated from another source', tone: 'violet', dot: 'bg-violet-400' },
+  not_in_ld: { label: 'not migrated', tone: 'slate', dot: 'bg-neutral-fill' },
+  not_migrated: { label: 'not migrated here', tone: 'slate', dot: 'bg-neutral-fill' },
+  in_sync: { label: 'in sync', tone: 'green', dot: 'bg-success-fill' },
+  statsig_changed: { label: 'StatSig changed', tone: 'amber', dot: 'bg-warning-fill' },
+  decisions_changed: { label: 'decisions changed', tone: 'amber', dot: 'bg-warning-fill' },
+  foreign: { label: 'existing LD key', tone: 'red', dot: 'bg-error-fill' },
+  other_source: { label: 'migrated from another source', tone: 'violet', dot: 'bg-purple-fill' },
 };
 
 type StatusFilter = 'all' | 'open' | 'blocking' | 'not_migrated' | 'in_sync' | 'changed';
@@ -123,9 +123,9 @@ export function GatesSideBySide({
   return (
     <div className="pb-20">
       <div className="mb-3 flex flex-wrap items-center gap-3">
-        <h2 className="text-lg font-semibold">Gates</h2>
+        <h2 className="font-display text-xl font-semibold tracking-tight">Gates</h2>
         <Badge>{visible.length}</Badge>
-        <span className="text-sm text-slate-500">
+        <span className="text-sm text-fg-muted">
           StatSig <b>{env}</b>
           {mappedHere.length > 0 && (
             <>
@@ -143,7 +143,7 @@ export function GatesSideBySide({
             <option value="in_sync">In sync</option>
             <option value="changed">Changed since sync</option>
           </Select>
-          <label className="flex items-center gap-1.5 text-sm text-slate-600">
+          <label className="flex items-center gap-1.5 text-sm text-fg-muted">
             <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} /> archived
           </label>
           <Input placeholder="Filter by name" value={q} onChange={(e) => setQ(e.target.value)} className="w-48" aria-label="Filter gates" />
@@ -166,7 +166,7 @@ export function GatesSideBySide({
       )}
       <Card className="overflow-hidden">
         <table className="w-full table-fixed text-sm">
-          <thead className="bg-slate-50 text-left text-xs font-semibold tracking-wide text-slate-500 uppercase">
+          <thead className="bg-surface-2 text-left text-xs font-semibold tracking-wide text-fg-muted uppercase">
             <tr>
               <th className="w-9 px-3 py-2">
                 <input type="checkbox" aria-label="Select all" checked={allSelected} onChange={() => setSelected(allSelected ? new Set() : new Set(selectable.map((r) => r.gate.uid)))} />
@@ -177,7 +177,7 @@ export function GatesSideBySide({
               <th className="px-3 py-2">LaunchDarkly</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody className="divide-y divide-line-soft">
             {visible.map((row) => {
               const { sourceId, gate, shared, result: r } = row;
               const key = `${sourceId}/${gate.id}`;
@@ -187,7 +187,7 @@ export function GatesSideBySide({
               const blocking = r.unresolved.filter((d) => d.severity === 'blocking').length;
               return (
                 <Fragment key={key}>
-                  <tr className={cx('cursor-pointer align-top hover:bg-slate-50', open === key && 'bg-slate-50')} onClick={() => setOpen(open === key ? undefined : key)}>
+                  <tr className={cx('cursor-pointer align-top hover:bg-surface-hover', open === key && 'bg-surface-2')} onClick={() => setOpen(open === key ? undefined : key)}>
                     <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                       <input type="checkbox" aria-label={`Select ${gate.id}`} disabled={gate.archived} checked={selected.has(gate.uid)} onChange={() => toggle(gate.uid)} />
                     </td>
@@ -209,17 +209,17 @@ export function GatesSideBySide({
                         )}
                         {gate.idType !== 'userID' && <Badge tone="blue">{gate.idType}</Badge>}
                       </div>
-                      {gate.description && <div className="mt-0.5 truncate text-xs text-slate-500">{gate.description}</div>}
-                      <div className="mt-0.5 text-xs text-slate-400">
+                      {gate.description && <div className="mt-0.5 truncate text-xs text-fg-muted">{gate.description}</div>}
+                      <div className="mt-0.5 text-xs text-fg-subtle">
                         {gate.owner?.email ?? 'no owner'}
                         {gate.tags.length > 0 && ` · ${gate.tags.join(', ')}`}
                       </div>
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-600">
+                    <td className="px-3 py-2 text-xs text-fg-muted">
                       <div>
                         {res.rules.length} rule{res.rules.length === 1 ? '' : 's'}
                       </div>
-                      {res.dropped.length > 0 && <div className="text-slate-400">{res.dropped.length} not here</div>}
+                      {res.dropped.length > 0 && <div className="text-fg-subtle">{res.dropped.length} not here</div>}
                       {overrides.length > 0 && <div>{overrides.reduce((n, o) => n + o.ids.length, 0)} overrides</div>}
                     </td>
                     <td className="px-3 py-2">
@@ -235,7 +235,7 @@ export function GatesSideBySide({
                     </td>
                   </tr>
                   {open === key && (
-                    <tr className="bg-slate-50">
+                    <tr className="bg-surface-2">
                       <td colSpan={5} className="px-3 pb-4">
                         <Detail row={row} m={m} env={env} res={res} overrides={overrides} flagUrl={flag && ld.projectKey && row.ldEnv ? `${LD_INSTANCES[ld.instance ?? 'us'].origin}/${ld.projectKey}/${row.ldEnv}/features/${flag.key}` : undefined} />
                       </td>
@@ -249,16 +249,16 @@ export function GatesSideBySide({
       </Card>
 
       {selected.size > 0 && (
-        <div className="fixed right-0 bottom-0 left-72 z-40 border-t border-slate-200 bg-white/95 px-5 py-3 shadow-lg backdrop-blur">
+        <div className="fixed right-0 bottom-0 left-72 z-40 border-t border-line bg-surface/95 px-5 py-3 shadow-raised backdrop-blur">
           <div className="flex flex-wrap items-center gap-4">
             <span className="text-sm font-medium">
               {selected.size} gate{selected.size === 1 ? '' : 's'} selected
             </span>
-            <button className="text-sm text-slate-500 hover:text-slate-800" onClick={() => setSelected(new Set())}>
+            <button className="text-sm text-fg-muted hover:text-fg" onClick={() => setSelected(new Set())}>
               Clear
             </button>
             <div className="flex items-center gap-3 text-sm">
-              <span className="text-slate-500">Migrate to LD:</span>
+              <span className="text-fg-muted">Migrate to LD:</span>
               {m.ldEnvs.map((e) => (
                 <label key={e.key} className="flex items-center gap-1.5">
                   <input type="checkbox" checked={envChoice.includes(e.key)} onChange={() => setTargetEnvs(envChoice.includes(e.key) ? envChoice.filter((x) => x !== e.key) : [...envChoice, e.key])} />
@@ -266,7 +266,7 @@ export function GatesSideBySide({
                   {e.critical && <Badge tone="red">critical</Badge>}
                 </label>
               ))}
-              {!m.connected && <span className="text-slate-400">connect LaunchDarkly first</span>}
+              {!m.connected && <span className="text-fg-subtle">connect LaunchDarkly first</span>}
             </div>
             <Button className="ml-auto" disabled={!m.connected || envChoice.length === 0} onClick={() => onMigrate([...selected], envChoice)}>
               Plan migration…
@@ -279,16 +279,16 @@ export function GatesSideBySide({
 }
 
 function LdCell({ row, connected, flagExists, on }: { row: Row; connected: boolean; flagExists: boolean; on?: boolean }) {
-  if (!connected) return <span className="text-xs text-slate-400">—</span>;
+  if (!connected) return <span className="text-xs text-fg-subtle">—</span>;
   const here = row.strip.find((s) => s.ldEnv === row.ldEnv);
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap items-center gap-1.5">
-        {flagExists ? <span className="font-mono text-[13px]">{row.result.flagKey}</span> : <span className="text-xs text-slate-500">not in LD</span>}
+        {flagExists ? <span className="font-mono text-[13px]">{row.result.flagKey}</span> : <span className="text-xs text-fg-muted">not in LD</span>}
         {on !== undefined && <Badge tone={on ? 'green' : 'slate'}>{on ? 'on' : 'off'}</Badge>}
         {here && here.status !== 'not_in_ld' && <Badge tone={STATUS[here.status].tone}>{STATUS[here.status].label}</Badge>}
       </div>
-      <div className="flex gap-2.5 text-[11px] text-slate-500">
+      <div className="flex gap-2.5 text-[11px] text-fg-muted">
         {row.strip.map((s) => (
           <span key={s.ldEnv} className="flex items-center gap-1" title={`${s.ldEnv}: ${STATUS[s.status].label}`}>
             <span className={cx('h-2 w-2 rounded-full', STATUS[s.status].dot)} />
@@ -307,34 +307,34 @@ function Detail({ row, m, env, res, overrides, flagUrl }: { row: Row; m: Migrati
     <div className="space-y-3 pt-1">
       <div className="grid grid-cols-2 gap-3">
         <Card className="p-3">
-          <div className="mb-2 text-xs font-semibold text-slate-500">StatSig · rules applying in {env}</div>
+          <div className="mb-2 text-xs font-semibold text-fg-muted">StatSig · rules applying in {env}</div>
           <StatsigRules rules={res.rules} overrides={overrides} enabled={row.gate.enabled} />
         </Card>
         <Card className="p-3">
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-slate-500">
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-fg-muted">
             <span>
               LaunchDarkly · {r.skipped ? 'not migrated' : row.ldEnv ? `proposed for ${row.ldEnv}` : m.connected ? 'proposed (environment not mapped)' : 'proposed'}
               {r.unresolved.length > 0 && !r.skipped && ' (preview with recommended answers)'}
             </span>
             {flagUrl && (
-              <a href={flagUrl} target="_blank" rel="noreferrer" className="ml-auto font-normal text-blue-700 hover:underline">
+              <a href={flagUrl} target="_blank" rel="noreferrer" className="ml-auto font-normal text-link hover:underline">
                 Open in LD ↗
               </a>
             )}
           </div>
-          {r.skipped ? <p className="text-xs text-slate-500">{r.skipped}</p> : <LdTargeting env={r.env} variations={r.shell.variations} />}
+          {r.skipped ? <p className="text-xs text-fg-muted">{r.skipped}</p> : <LdTargeting env={r.env} variations={r.shell.variations} />}
         </Card>
       </div>
       {r.fidelity.notes.length > 0 && (
         <Card className="p-3">
-          <div className="mb-1.5 text-xs font-semibold text-slate-500">Fidelity</div>
+          <div className="mb-1.5 text-xs font-semibold text-fg-muted">Fidelity</div>
           <ul className="space-y-1 text-xs">
             {r.fidelity.notes.map((n, i) => (
               <li key={i} className="flex gap-2">
                 <Badge tone={FIDELITY_TONE[n.fidelity]}>{n.fidelity}</Badge>
                 <span>
                   {n.message}
-                  {n.location && <span className="text-slate-400"> · {n.location}</span>}
+                  {n.location && <span className="text-fg-subtle"> · {n.location}</span>}
                 </span>
               </li>
             ))}
@@ -343,7 +343,7 @@ function Detail({ row, m, env, res, overrides, flagUrl }: { row: Row; m: Migrati
       )}
       {(r.unresolved.length > 0 || r.applied.length > 0) && (
         <div className="space-y-2">
-          <div className="text-xs font-semibold text-slate-500">Decisions</div>
+          <div className="text-xs font-semibold text-fg-muted">Decisions</div>
           {r.unresolved.map((d) => (
             <DecisionCard key={d.id} decision={d} stale={stale.get(d.id)} compact onChoose={(o) => void m.resolve([d], o)} />
           ))}

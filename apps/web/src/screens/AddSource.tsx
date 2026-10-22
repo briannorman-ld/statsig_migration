@@ -39,7 +39,7 @@ export function AddSource({ workspaceId, onDone }: { workspaceId: string; onDone
 
   return (
     <div className="max-w-2xl space-y-4">
-      <h2 className="text-lg font-semibold">Add a StatSig source</h2>
+      <h2 className="font-display text-xl font-semibold tracking-tight">Add a StatSig source</h2>
       <div className="flex gap-2">
         <Button variant={kind === 'console_api' ? 'primary' : 'secondary'} onClick={() => setKind('console_api')}>
           Console API key (recommended)
@@ -64,7 +64,7 @@ export function AddSource({ workspaceId, onDone }: { workspaceId: string; onDone
             <div>
               <Label htmlFor="src-key">Console API key (read-only)</Label>
               <Input id="src-key" type="password" autoComplete="off" spellCheck={false} placeholder="console-…" value={key} onChange={(e) => setKey(e.target.value)} />
-              <p className="mt-1.5 text-xs text-slate-500">Kept in memory only and sent only to statsigapi.net.</p>
+              <p className="mt-1.5 text-xs text-fg-muted">Kept in memory only and sent only to statsigapi.net.</p>
             </div>
             <Callout>
               Not yet verified: whether StatSig allows browser access to the Console API (M0 spike #1). If it doesn’t, this fails with “StatSig unreachable” and the
@@ -75,7 +75,7 @@ export function AddSource({ workspaceId, onDone }: { workspaceId: string; onDone
           <div>
             <Label htmlFor="src-file">Config spec file (.json, .json.gz)</Label>
             <input id="src-file" type="file" accept=".json,.gz,.br,application/json" onChange={(e) => setFile(e.target.files?.[0])} className="text-sm" />
-            <p className="mt-1.5 text-xs text-slate-500">
+            <p className="mt-1.5 text-xs text-fg-muted">
               Fetch with <code>curl -o spec.json "https://api.statsigcdn.com/v2/download_config_specs/&lt;CLIENT_KEY&gt;.json"</code> using a client key that has only the
               “Allow Download Config Specs” scope and covers all environments and target apps. The file stays in this browser.
             </p>

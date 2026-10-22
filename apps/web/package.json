@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/sora": "5.3.0",
+    "@launchpad-ui/tokens": "0.19.0",
     "@sslm/adapters": "workspace:*",
     "@sslm/canonical": "workspace:*",
     "@sslm/demo-fixtures": "workspace:*",

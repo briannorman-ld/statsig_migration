@@ -1,11 +1,216 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
-@theme {
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  --color-statsig: #194b7d;
-  --color-ld: #405bff;
+/*
+ * Visual system: LaunchPad UI tokens (LaunchDarkly's product design system) provide the semantic
+ * light/dark palette, Inter, radii and motion; the 2026 brand layer adds Sora display type, the
+ * named gradients and the Osmo mark (components/Brand.tsx). Everything is self-hosted, so the
+ * CSP stays at font-src/style-src 'self'. Theme switching is `data-theme` on <html> (lib/theme.ts).
+ */
+@import '@launchpad-ui/tokens/fonts.css';
+@import '@launchpad-ui/tokens/index.css';
+@import '@launchpad-ui/tokens/themes.css';
+@import '@fontsource/sora/600.css';
+@import '@fontsource/sora/700.css';
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* App-level aliases over LaunchPad semantics. Light: white cards on a cool gray canvas. Dark: the
+ * brand's layered surfaces, with the near-LD-Black canvas (gray-950) and raised gray-900 cards. */
+:root {
+  color-scheme: light;
+  --app-canvas: var(--lp-color-bg-ui-secondary);
+  --app-surface: var(--lp-color-bg-ui-primary);
+  --app-surface-2: var(--lp-color-bg-ui-tertiary);
+  --app-surface-hover: var(--lp-color-bg-interactive-secondary-hover);
+  --app-fg: var(--lp-color-text-ui-primary-base);
+  --app-fg-muted: var(--lp-color-text-ui-secondary);
+  --app-fg-subtle: var(--lp-color-gray-500);
+  --app-fg-inverted: var(--lp-color-text-ui-primary-inverted);
+  --app-line: var(--lp-color-border-ui-primary);
+  --app-line-soft: var(--lp-color-border-ui-secondary);
+  --app-line-strong: var(--lp-color-gray-200);
+  --app-accent: var(--lp-color-bg-interactive-primary-base);
+  --app-accent-hover: var(--lp-color-bg-interactive-primary-hover);
+  --app-on-accent: var(--lp-color-text-interactive-primary-base);
+  --app-link: var(--lp-color-text-interactive-base);
+  --app-focus: var(--lp-color-border-interactive-focus);
+  --app-selected: var(--lp-color-bg-interactive-selected);
+  --app-selected-fg: var(--lp-color-text-interactive-selected);
+  --app-selected-line: var(--lp-color-border-interactive-selected);
+  --app-danger: var(--lp-color-bg-interactive-destructive-base);
+  --app-danger-hover: var(--lp-color-bg-interactive-destructive-hover);
+  --app-overlay: rgb(24 26 31 / 0.45);
+  --app-logo: #191919; /* brand rule: the logo is LD Black or White, nothing else */
+  --app-shadow: 0 1px 2px var(--lp-color-shadow-ui-secondary), 0 1px 3px var(--lp-color-shadow-ui-primary);
+  --app-shadow-raised: 0 8px 24px -8px var(--lp-color-shadow-ui-primary), 0 2px 6px var(--lp-color-shadow-ui-secondary);
+
+  --app-success: var(--lp-color-text-feedback-success);
+  --app-success-bg: var(--lp-color-bg-feedback-success);
+  --app-success-line: var(--lp-color-border-feedback-success);
+  --app-success-fill: var(--lp-color-fill-feedback-success);
+  --app-warning: var(--lp-color-text-feedback-warning);
+  --app-warning-bg: var(--lp-color-bg-feedback-warning);
+  --app-warning-line: var(--lp-color-border-feedback-warning);
+  --app-warning-fill: var(--lp-color-fill-feedback-warning);
+  --app-error: var(--lp-color-text-feedback-error);
+  --app-error-bg: var(--lp-color-bg-feedback-error);
+  --app-error-line: var(--lp-color-border-feedback-error);
+  --app-error-fill: var(--lp-color-fill-feedback-error);
+  --app-info: var(--lp-color-text-feedback-info);
+  --app-info-bg: var(--lp-color-bg-feedback-info);
+  --app-info-line: var(--lp-color-border-feedback-info);
+  --app-info-fill: var(--lp-color-fill-feedback-info);
+  --app-purple: var(--lp-color-purple-700);
+  --app-purple-bg: var(--lp-color-purple-50);
+  --app-purple-line: var(--lp-color-purple-200);
+  --app-purple-fill: var(--lp-color-purple-500);
+  --app-neutral-fill: var(--lp-color-gray-300);
 }
 
-html, body, #root { height: 100%; }
-body { @apply bg-slate-50 text-slate-900 antialiased; }
+[data-theme='dark'] {
+  color-scheme: dark;
+  --app-canvas: var(--lp-color-bg-ui-primary);
+  --app-surface: var(--lp-color-bg-ui-secondary);
+  --app-surface-2: var(--lp-color-bg-ui-tertiary);
+  --app-line-strong: var(--lp-color-gray-600);
+  --app-overlay: rgb(0 0 0 / 0.65);
+  --app-logo: #ffffff;
+  --app-shadow: 0 0 0 1px rgb(255 255 255 / 0.02);
+  --app-shadow-raised: 0 12px 32px -12px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(255 255 255 / 0.04);
+  --app-success-line: var(--lp-color-green-700);
+  --app-warning-line: var(--lp-color-yellow-700);
+  --app-error-line: var(--lp-color-red-700);
+  --app-info-line: var(--lp-color-blue-700);
+  --app-purple: var(--lp-color-purple-300);
+  --app-purple-bg: var(--lp-color-purple-900);
+  --app-purple-line: var(--lp-color-purple-700);
+  --app-purple-fill: var(--lp-color-purple-400);
+  --app-neutral-fill: var(--lp-color-gray-600);
+}
+
+/* Before lib/theme.ts runs, follow the OS so the first paint has the right darkness. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    background: rgb(24 26 31);
+  }
+}
+
+@theme inline {
+  --font-sans: var(--lp-font-family-base);
+  --font-display: var(--lp-font-family-sora);
+  --font-mono: var(--lp-font-family-monospace);
+
+  --color-canvas: var(--app-canvas);
+  --color-surface: var(--app-surface);
+  --color-surface-2: var(--app-surface-2);
+  --color-surface-hover: var(--app-surface-hover);
+  --color-fg: var(--app-fg);
+  --color-fg-muted: var(--app-fg-muted);
+  --color-fg-subtle: var(--app-fg-subtle);
+  --color-fg-inverted: var(--app-fg-inverted);
+  --color-line: var(--app-line);
+  --color-line-soft: var(--app-line-soft);
+  --color-line-strong: var(--app-line-strong);
+  --color-accent: var(--app-accent);
+  --color-accent-hover: var(--app-accent-hover);
+  --color-on-accent: var(--app-on-accent);
+  --color-link: var(--app-link);
+  --color-focus: var(--app-focus);
+  --color-selected: var(--app-selected);
+  --color-selected-fg: var(--app-selected-fg);
+  --color-selected-line: var(--app-selected-line);
+  --color-danger: var(--app-danger);
+  --color-danger-hover: var(--app-danger-hover);
+  --color-overlay: var(--app-overlay);
+  --color-logo: var(--app-logo);
+
+  --color-success: var(--app-success);
+  --color-success-bg: var(--app-success-bg);
+  --color-success-line: var(--app-success-line);
+  --color-success-fill: var(--app-success-fill);
+  --color-warning: var(--app-warning);
+  --color-warning-bg: var(--app-warning-bg);
+  --color-warning-line: var(--app-warning-line);
+  --color-warning-fill: var(--app-warning-fill);
+  --color-error: var(--app-error);
+  --color-error-bg: var(--app-error-bg);
+  --color-error-line: var(--app-error-line);
+  --color-error-fill: var(--app-error-fill);
+  --color-info: var(--app-info);
+  --color-info-bg: var(--app-info-bg);
+  --color-info-line: var(--app-info-line);
+  --color-info-fill: var(--app-info-fill);
+  --color-purple: var(--app-purple);
+  --color-purple-bg: var(--app-purple-bg);
+  --color-purple-line: var(--app-purple-line);
+  --color-purple-fill: var(--app-purple-fill);
+  --color-neutral-fill: var(--app-neutral-fill);
+
+  /* 2026 brand base colors, for accents and the source badges. Never for body text. */
+  --color-brand-blue: var(--lp-color-brand-blue-base);
+  --color-brand-cyan: var(--lp-color-brand-cyan-base);
+  --color-brand-lime: var(--lp-color-brand-lime-base);
+  --color-brand-purple: var(--lp-color-brand-purple-base);
+  --color-brand-pink: var(--lp-color-brand-pink-base);
+  --color-brand-orange: var(--lp-color-brand-orange-base);
+
+  --radius-sm: var(--lp-border-radius-regular);
+  --radius-md: var(--lp-border-radius-medium);
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --shadow-card: var(--app-shadow);
+  --shadow-raised: var(--app-shadow-raised);
+}
+
+/* Named brand gradients (base colors only). Used sparingly: the hero title and one accent rule. */
+@utility bg-gradient-brand {
+  background-image: var(--lp-gradient-purple-blue);
+}
+@utility bg-gradient-brand-cyan {
+  background-image: var(--lp-gradient-cyan-blue);
+}
+@utility text-gradient-brand {
+  background-image: linear-gradient(90deg, var(--lp-color-brand-purple-base), var(--lp-color-brand-blue-base));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background: var(--app-canvas);
+    color: var(--app-fg);
+    font-family: var(--lp-font-family-base);
+    font-feature-settings: 'cv11', 'ss01', 'tnum' 0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    transition: background-color var(--lp-duration-200) ease, color var(--lp-duration-200) ease;
+  }
+  ::selection {
+    background: var(--lp-color-blue-100);
+    color: var(--lp-color-gray-950);
+  }
+  :focus-visible {
+    outline: 2px solid var(--app-focus);
+    outline-offset: 2px;
+  }
+  input[type='checkbox'],
+  input[type='radio'] {
+    accent-color: var(--app-accent);
+  }
+  code,
+  kbd,
+  pre {
+    font-family: var(--lp-font-family-monospace);
+  }
+  b,
+  strong {
+    font-weight: 600;
+  }
+}

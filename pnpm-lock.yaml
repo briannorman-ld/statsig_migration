@@ -38,6 +38,12 @@ importers:
 
   apps/web:
     dependencies:
+      '@fontsource/sora':
+        specifier: 5.3.0
+        version: 5.3.0
+      '@launchpad-ui/tokens':
+        specifier: 0.19.0
+        version: 0.19.0
       '@sslm/adapters':
         specifier: workspace:*
         version: link:../../packages/adapters
@@ -300,6 +306,9 @@ packages:
       '@noble/hashes':
         optional: true
 
+  '@fontsource/sora@5.3.0':
+    resolution: {integrity: sha512-SqW3OpKxxfKvxDLPlbdrWf2KooPfbd+W3jaYn483o+Y/JrmU87vjFPNptDqwP428c3vY+gnranLhjcbRaXB0Jw==}
+
   '@inquirer/ansi@2.0.9':
     resolution: {integrity: sha512-0Ywt3S8tqM6TWUcsRlBFQ1x+X3/o8kktX0ZiKAnByYb9GFDknnOhse1PVtfiD2BXPI8ar+BWx9PV9R0lQIcygw==}
     engines: {node: '>=23.5.0 || ^22.13.0 || ^20.17.0'}
@@ -350,6 +359,9 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@launchpad-ui/tokens@0.19.0':
+    resolution: {integrity: sha512-MmHwyva3MdoFdn7Kbkf0CDMWH23WndFBDChqMZIul+baNMj0abpoxl2a4GFeAxpsWu5K+wJFz9SuMW4r631iqw==}
 
   '@msw/url@0.1.2':
     resolution: {integrity: sha512-DdeBLQxQ+ZrtmwEmaj7GQ7lbzPCgbbbyAqOz/I4ulo68hwBpfdNvQJ5bmihJUkAAKOeCmqCIG3OFZGosqFN4mA==}
@@ -1471,6 +1483,8 @@ snapshots:
 
   '@exodus/bytes@1.16.0': {}
 
+  '@fontsource/sora@5.3.0': {}
+
   '@inquirer/ansi@2.0.9': {}
 
   '@inquirer/confirm@6.3.3(@types/node@22.20.5)':
@@ -1516,6 +1530,8 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  '@launchpad-ui/tokens@0.19.0': {}
 
   '@msw/url@0.1.2': {}
 

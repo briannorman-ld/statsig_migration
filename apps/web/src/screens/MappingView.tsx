@@ -17,7 +17,7 @@ export function MappingView({ sources, snapshots, m, onConnect }: { sources: Sou
   };
   return (
     <div className="max-w-4xl space-y-5">
-      <h2 className="text-lg font-semibold">Mapping</h2>
+      <h2 className="font-display text-xl font-semibold tracking-tight">Mapping</h2>
       {!m.connected && (
         <Callout tone="blue">
           <button className="font-medium underline" onClick={onConnect}>
@@ -39,9 +39,9 @@ export function MappingView({ sources, snapshots, m, onConnect }: { sources: Sou
             </h3>
             <div className="grid gap-6 md:grid-cols-2">
               <div>
-                <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">Environments</div>
+                <div className="mb-2 text-xs font-semibold tracking-wide text-fg-muted uppercase">Environments</div>
                 <table className="w-full text-sm">
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-line-soft">
                     {snap.environments.map((e) => (
                       <tr key={e.name}>
                         <td className="py-1.5 pr-3">
@@ -53,7 +53,7 @@ export function MappingView({ sources, snapshots, m, onConnect }: { sources: Sou
                           )}
                           {e.inferred && <Badge tone="amber">inferred</Badge>}
                         </td>
-                        <td className="py-1.5 text-slate-400">→</td>
+                        <td className="py-1.5 text-fg-subtle">→</td>
                         <td className="py-1.5">
                           <Select
                             aria-label={`LD environment for ${e.name}`}
@@ -78,12 +78,12 @@ export function MappingView({ sources, snapshots, m, onConnect }: { sources: Sou
                     <Callout tone="red">Two StatSig environments map to LD “{dup[0]}”. Within one source, map at most one environment to each LD environment.</Callout>
                   </div>
                 )}
-                <p className="mt-2 text-xs text-slate-500">Environments marked “not migrated” keep LD's default (off, serving false) and keep calling StatSig.</p>
+                <p className="mt-2 text-xs text-fg-muted">Environments marked “not migrated” keep LD's default (off, serving false) and keep calling StatSig.</p>
               </div>
               <div>
-                <div className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">Unit types → context kinds</div>
+                <div className="mb-2 text-xs font-semibold tracking-wide text-fg-muted uppercase">Unit types → context kinds</div>
                 <table className="w-full text-sm">
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-line-soft">
                     {snap.unitTypes.map((u) => (
                       <UnitTypeRow
                         key={u.name}
@@ -101,7 +101,7 @@ export function MappingView({ sources, snapshots, m, onConnect }: { sources: Sou
                     ))}
                   </tbody>
                 </table>
-                <p className="mt-2 text-xs text-slate-500">Custom unit IDs get their own context kind; they are never folded into “user”. Kinds that don't exist in LD are created during the migration.</p>
+                <p className="mt-2 text-xs text-fg-muted">Custom unit IDs get their own context kind; they are never folded into “user”. Kinds that don't exist in LD are created during the migration.</p>
               </div>
             </div>
           </Card>
@@ -117,7 +117,7 @@ function UnitTypeRow({ unitType, value, existing, onChange }: { unitType: string
   return (
     <tr>
       <td className="py-1.5 pr-3 font-mono">{unitType}</td>
-      <td className="py-1.5 text-slate-400">→</td>
+      <td className="py-1.5 text-fg-subtle">→</td>
       <td className="py-1.5">
         <div className="flex items-center gap-2">
           <Input
@@ -134,7 +134,7 @@ function UnitTypeRow({ unitType, value, existing, onChange }: { unitType: string
               <option key={k} value={k} />
             ))}
           </datalist>
-          {!value && <span className="text-xs text-slate-400">default “{proposed}”{proposed !== 'user' && !existing.includes(proposed) ? ' (asks first)' : ''}</span>}
+          {!value && <span className="text-xs text-fg-subtle">default “{proposed}”{proposed !== 'user' && !existing.includes(proposed) ? ' (asks first)' : ''}</span>}
           {value && !existing.includes(value) && <Badge tone="blue">will be created</Badge>}
         </div>
       </td>

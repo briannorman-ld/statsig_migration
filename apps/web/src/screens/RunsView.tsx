@@ -38,8 +38,8 @@ export function RunsView({ workspaceId, m }: { workspaceId: string; m: Migration
 
   return (
     <div className="max-w-5xl space-y-4">
-      <h2 className="text-lg font-semibold">Runs</h2>
-      <p className="text-sm text-slate-500">Every migration and dry run, journaled in this browser. The LD audit log has the authoritative write history; each write's comment names the run.</p>
+      <h2 className="font-display text-xl font-semibold tracking-tight">Runs</h2>
+      <p className="text-sm text-fg-muted">Every migration and dry run, journaled in this browser. The LD audit log has the authoritative write history; each write's comment names the run.</p>
       {error && <Callout tone="red">{error}</Callout>}
       {runs.length === 0 && <Callout tone="blue">No runs yet. Select gates and choose “Plan migration”.</Callout>}
       {runs.map((stored) => {
@@ -57,7 +57,7 @@ export function RunsView({ workspaceId, m }: { workspaceId: string; m: Migration
               </button>
               <Badge tone={RUN_TONE[run.status]}>{interrupted ? 'interrupted' : run.status}</Badge>
               {run.dryRun && <Badge tone="violet">dry run</Badge>}
-              <span className="text-xs text-slate-500">
+              <span className="text-xs text-fg-muted">
                 {timeAgo(run.startedAt)} · #{run.id.slice(0, 8)} · {run.steps.length} operations
               </span>
               <div className="ml-auto flex gap-2">
@@ -96,7 +96,7 @@ export function RunsView({ workspaceId, m }: { workspaceId: string; m: Migration
                 </Callout>
               </div>
             )}
-            {!m.connected && !run.dryRun && (interrupted || run.status !== 'undone') && <p className="mt-2 text-xs text-slate-500">Connect LaunchDarkly to resume or undo.</p>}
+            {!m.connected && !run.dryRun && (interrupted || run.status !== 'undone') && <p className="mt-2 text-xs text-fg-muted">Connect LaunchDarkly to resume or undo.</p>}
             {(open === run.id || active?.id === run.id) && (
               <div className={cx('mt-3 space-y-3')}>
                 <RunSummary run={run} />

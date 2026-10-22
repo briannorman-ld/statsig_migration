@@ -10,18 +10,18 @@ export function StatsigRules({ rules, overrides, enabled }: { rules: Rule[]; ove
       {overrides.map((o, i) => (
         <Line key={`o${i}`} label="override">
           {o.ids.length} {o.unitType} ID{o.ids.length === 1 ? '' : 's'} → <b>{o.value.kind === 'gate' ? (o.value.pass ? 'pass' : 'fail') : o.value.groupName}</b>
-          {o.environment && <span className="text-slate-400"> ({o.environment} only)</span>}
+          {o.environment && <span className="text-fg-subtle"> ({o.environment} only)</span>}
         </Line>
       ))}
       {rules.map((r) => (
         <Line key={r.id} label={r.name}>
           {r.conditions.map((c, i) => (
             <span key={i}>
-              {i > 0 && <span className="text-slate-400"> and </span>}
+              {i > 0 && <span className="text-fg-subtle"> and </span>}
               <Cond c={c} />
             </span>
           ))}
-          <span className="text-slate-400"> → </span>
+          <span className="text-fg-subtle"> → </span>
           <b>{r.passPercentage === 100 ? 'pass' : r.passPercentage === 0 ? 'fail' : `${r.passPercentage}% pass`}</b>
         </Line>
       ))}
@@ -38,7 +38,7 @@ function Cond({ c }: { c: Condition }) {
   const value = Array.isArray(c.targetValue) ? c.targetValue.map(String).join(', ') : c.targetValue === undefined || c.targetValue === null ? '' : String(c.targetValue);
   return (
     <span>
-      <code className="text-slate-800">{what}</code> {c.operator ? <span className="text-violet-700">{String(c.operator)}</span> : null} {value && <span className="text-slate-700">{trim(value)}</span>}
+      <code className="text-fg">{what}</code> {c.operator ? <span className="text-purple">{String(c.operator)}</span> : null} {value && <span className="text-fg-muted">{trim(value)}</span>}
     </span>
   );
 }
@@ -49,7 +49,7 @@ export function LdTargeting({ env, variations }: { env: DesiredFlagEnv; variatio
   const serve = (s: VariationOrRollout) =>
     s.rollout ? (
       <b>
-        {s.rollout.variations.map((w) => `${w.weight / 1000}% ${v(w.variation)}`).join(' / ')} <span className="font-normal text-slate-400">by {s.rollout.contextKind}</span>
+        {s.rollout.variations.map((w) => `${w.weight / 1000}% ${v(w.variation)}`).join(' / ')} <span className="font-normal text-fg-subtle">by {s.rollout.contextKind}</span>
       </b>
     ) : (
       <b>{v(s.variation)}</b>
@@ -57,7 +57,7 @@ export function LdTargeting({ env, variations }: { env: DesiredFlagEnv; variatio
   return (
     <div className="space-y-1.5 text-xs">
       <Line label="targeting">
-        <Badge tone={env.on ? 'green' : 'slate'}>{env.on ? 'on' : 'off'}</Badge> <span className="text-slate-400">off serves</span> <b>{v(env.offVariation)}</b>
+        <Badge tone={env.on ? 'green' : 'slate'}>{env.on ? 'on' : 'off'}</Badge> <span className="text-fg-subtle">off serves</span> <b>{v(env.offVariation)}</b>
       </Line>
       {env.prerequisites.map((p) => (
         <Line key={p.key} label="prerequisite">
@@ -73,11 +73,11 @@ export function LdTargeting({ env, variations }: { env: DesiredFlagEnv; variatio
         <Line key={i} label={r.description}>
           {r.clauses.map((c, j) => (
             <span key={j}>
-              {j > 0 && <span className="text-slate-400"> and </span>}
+              {j > 0 && <span className="text-fg-subtle"> and </span>}
               <Clause c={c} />
             </span>
           ))}
-          <span className="text-slate-400"> → </span>
+          <span className="text-fg-subtle"> → </span>
           {serve(r)}
         </Line>
       ))}
@@ -95,14 +95,14 @@ function Clause({ c }: { c: LdClause }) {
     );
   return (
     <span>
-      <code className="text-slate-800">
+      <code className="text-fg">
         {c.contextKind}.{c.attribute}
       </code>{' '}
-      <span className="text-blue-700">
+      <span className="text-link">
         {c.negate ? 'not ' : ''}
         {c.op}
       </span>{' '}
-      <span className="text-slate-700">{trim(c.values.map(String).join(', '))}</span>
+      <span className="text-fg-muted">{trim(c.values.map(String).join(', '))}</span>
     </span>
   );
 }
@@ -110,7 +110,7 @@ function Clause({ c }: { c: LdClause }) {
 function Line({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex gap-2">
-      <span className="w-28 shrink-0 truncate text-slate-400" title={label}>
+      <span className="w-28 shrink-0 truncate text-fg-subtle" title={label}>
         {label}
       </span>
       <span className="min-w-0 break-words">{children}</span>
