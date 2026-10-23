@@ -8,7 +8,7 @@ export interface DcsCondition {
   field?: string | null;
   additionalValues?: Record<string, unknown> | null;
   idType?: string | null;
-  isDeviceBased?: boolean;
+  isDeviceBased?: boolean | null;
 }
 
 /** `user_field` names → canonical condition types (PLAN §4.2 table). Matched case-insensitively. */

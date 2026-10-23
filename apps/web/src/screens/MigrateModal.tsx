@@ -19,12 +19,14 @@ import {
 import { refreshLdState } from "../lib/ld.ts";
 import {
   buildPlan,
+  cancelRun,
   describeSelection,
   executePlan,
   fetchDeferredIdLists,
   snapshotRefs,
   undoRun,
   useActiveRun,
+  useCancelling,
   type MigrationSelection,
 } from "../lib/migration.ts";
 import type { MigrationContext } from "../lib/useMigration.ts";
@@ -81,6 +83,7 @@ export function MigrateModal({
   const [showSteps, setShowSteps] = useState(false);
   const [lastDry, setLastDry] = useState<RunRecord>();
   const activeRun = useActiveRun(workspaceId);
+  const cancelling = useCancelling(workspaceId);
 
   // Load what the plan needs: segments in the target environments and deferred ID lists.
   useEffect(() => {
@@ -345,6 +348,8 @@ export function MigrateModal({
                   ? "Dry run (LD validates, nothing is saved)"
                   : "Migrating"
               }
+              onCancel={() => cancelRun(workspaceId)}
+              cancelling={cancelling}
             />
           )}
 
@@ -511,20 +516,31 @@ export function RunSummary({ run }: { run: RunRecord }) {
       {count("undone") ? `, ${count("undone")} undone` : ""}.
       {count("pending_approval") > 0 &&
         " Those environments require approvals, so the targeting went into LaunchDarkly approval requests; use “Check approvals” on the Runs page once a reviewer has applied them, and the sync status follows."}
-      {run.status === "stopped" &&
-        " The run stopped on an authentication, rate-limit or connection error. Fix it (or give LaunchDarkly a minute), then resume from Runs."}
+      {run.stopReason
+        ? ` ${run.stopReason}`
+        : run.status === "stopped" &&
+          " The run stopped on an authentication, rate-limit or connection error. Fix it (or give LaunchDarkly a minute), then resume from Runs."}
     </Callout>
   );
 }
 
+/**
+ * Step-by-step progress of a run. With `onCancel`, a Cancel button shows while the run is in
+ * progress: the executor finishes the write in flight, journals it and records the run as
+ * stopped, so it can be resumed from Runs.
+ */
 export function RunProgress({
   run,
   title,
   ldBase,
+  onCancel,
+  cancelling,
 }: {
   run?: RunRecord;
   title: string;
   ldBase?: string;
+  onCancel?: () => void;
+  cancelling?: boolean;
 }) {
   if (!run)
     return (
@@ -535,6 +551,7 @@ export function RunProgress({
   const done = run.steps.filter(
     (s) => s.status !== "pending" && s.status !== "running",
   ).length;
+  const inProgress = run.status === "running" || run.status === "undoing";
   return (
     <section>
       <div className="mb-2 flex items-center gap-2 text-sm">
@@ -542,7 +559,22 @@ export function RunProgress({
         <span className="text-fg-muted">
           {done}/{run.steps.length}
         </span>
-        {(run.status === "running" || run.status === "undoing") && <Spinner />}
+        {inProgress && <Spinner />}
+        {inProgress && cancelling && (
+          <span className="text-fg-muted">
+            Cancelling after the current step…
+          </span>
+        )}
+        {inProgress && onCancel && (
+          <Button
+            variant="secondary"
+            className="ml-auto py-1"
+            disabled={cancelling}
+            onClick={onCancel}
+          >
+            {run.status === "undoing" ? "Cancel undo" : "Cancel run"}
+          </Button>
+        )}
       </div>
       <div className="mb-3 h-1.5 overflow-hidden rounded bg-surface-2">
         <div

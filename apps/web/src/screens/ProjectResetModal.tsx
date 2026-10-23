@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Badge, Button, Callout, Card, CloseButton, Input, Spinner } from '../components/ui.tsx';
 import type { LdSession } from '../lib/ld.ts';
 import { resetLdProject, type ResetProgress, type ResetReport } from '../lib/reset.ts';
@@ -31,13 +31,20 @@ const GATES = [
 
 const normalize = (s: string) => s.trim().toLowerCase().replace(/[’‘`]/g, "'");
 
-type Phase = { kind: 'confirm'; step: number } | { kind: 'running'; progress?: ResetProgress } | { kind: 'done'; report: ResetReport } | { kind: 'error'; message: string };
+type Phase = { kind: 'confirm'; step: number } | { kind: 'running'; progress?: ResetProgress; cancelling?: boolean } | { kind: 'done'; report: ResetReport } | { kind: 'error'; message: string };
 
 export function ProjectResetModal({ workspaceId, ld, onClose }: { workspaceId: string; ld: LdSession; onClose: () => void }) {
   const [phase, setPhase] = useState<Phase>({ kind: 'confirm', step: 0 });
   const [typed, setTyped] = useState('');
+  // Cancels the reset in progress: the request in flight finishes, nothing else is deleted.
+  const controller = useRef<AbortController>(null);
   const gate = phase.kind === 'confirm' ? GATES[phase.step]! : undefined;
   const matches = gate ? normalize(typed) === normalize(gate.phrase) : false;
+
+  const cancel = () => {
+    controller.current?.abort(new DOMException('Cancelled by the user.', 'AbortError'));
+    setPhase((p) => (p.kind === 'running' ? { ...p, cancelling: true } : p));
+  };
 
   const next = async () => {
     if (phase.kind !== 'confirm' || !matches) return;
@@ -46,12 +53,16 @@ export function ProjectResetModal({ workspaceId, ld, onClose }: { workspaceId: s
       setTyped('');
       return;
     }
+    const ctrl = new AbortController();
+    controller.current = ctrl;
     setPhase({ kind: 'running' });
     try {
-      const report = await resetLdProject(workspaceId, ld, (progress) => setPhase({ kind: 'running', progress }));
+      const report = await resetLdProject(workspaceId, ld, (progress) => setPhase((p) => ({ kind: 'running', progress, ...(p.kind === 'running' && p.cancelling ? { cancelling: true } : {}) })), ctrl.signal);
       setPhase({ kind: 'done', report });
     } catch (e) {
       setPhase({ kind: 'error', message: (e as Error).message });
+    } finally {
+      controller.current = null;
     }
   };
 
@@ -108,14 +119,16 @@ export function ProjectResetModal({ workspaceId, ld, onClose }: { workspaceId: s
               <div className="h-1.5 overflow-hidden rounded bg-surface-2">
                 <div className="h-full bg-error-fill transition-all" style={{ width: `${phase.progress && phase.progress.total ? (phase.progress.done / phase.progress.total) * 100 : 5}%` }} />
               </div>
-              <p className="text-xs text-fg-subtle">Keep this tab open until it finishes.</p>
+              <p className="text-xs text-fg-subtle">
+                {phase.cancelling ? 'Cancelling: the request in flight finishes, then nothing else is deleted.' : 'Keep this tab open until it finishes. Cancel stops after the current request; what is already deleted stays deleted.'}
+              </p>
             </div>
           )}
           {phase.kind === 'done' && (
             <>
-              <Callout tone={phase.report.failures.length ? 'amber' : 'green'}>
-                Project reset. Deleted {phase.report.deleted.flags} flags, {phase.report.deleted.segments} segments, {phase.report.deleted.metrics} metrics and {phase.report.deleted.environments} environments; archived{' '}
-                {phase.report.archived.experiments} experiments and {phase.report.archived.contextKinds} context kinds.
+              <Callout tone={phase.report.cancelled || phase.report.failures.length ? 'amber' : 'green'}>
+                {phase.report.cancelled ? 'Reset cancelled; the project still holds whatever was not reached. Before the stop it deleted' : 'Project reset. Deleted'} {phase.report.deleted.flags} flags, {phase.report.deleted.segments} segments, {phase.report.deleted.metrics} metrics and{' '}
+                {phase.report.deleted.environments} environments; archived {phase.report.archived.experiments} experiments and {phase.report.archived.contextKinds} context kinds.
                 {phase.report.failures.length > 0 && ` LaunchDarkly refused ${phase.report.failures.length} operation${phase.report.failures.length === 1 ? '' : 's'}:`}
               </Callout>
               {phase.report.failures.length > 0 && (
@@ -142,6 +155,11 @@ export function ProjectResetModal({ workspaceId, ld, onClose }: { workspaceId: s
                 {phase.step < GATES.length - 1 ? 'Continue' : 'Engage project reset'}
               </Button>
             </>
+          )}
+          {phase.kind === 'running' && (
+            <Button variant="secondary" className="ml-auto" disabled={phase.cancelling} onClick={cancel}>
+              {phase.cancelling ? 'Cancelling…' : 'Cancel reset'}
+            </Button>
           )}
           {(phase.kind === 'done' || phase.kind === 'error') && (
             <Button className="ml-auto" onClick={onClose}>

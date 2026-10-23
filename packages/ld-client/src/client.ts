@@ -250,71 +250,76 @@ export class LdClient {
   // --- Writes ---------------------------------------------------------------------------------
 
   /** POST /projects/{p}/environments (reference/launchdarkly/openapi.json EnvironmentPost: name, key, color required). */
-  createEnvironment(projectKey: string, body: { key: string; name: string; color: string; critical?: boolean; tags?: string[] }): Promise<LdEnvironment> {
-    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments`, body, EnvironmentSchema);
+  // Every write takes an optional AbortSignal so a migration run or a project reset can be
+  // cancelled mid-flight; the transport never retries once the signal has fired.
+
+  createEnvironment(projectKey: string, body: { key: string; name: string; color: string; critical?: boolean; tags?: string[] }, signal?: AbortSignal): Promise<LdEnvironment> {
+    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments`, body, EnvironmentSchema, { signal });
   }
 
-  async deleteEnvironment(projectKey: string, envKey: string): Promise<void> {
-    await this.write('DELETE', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}`, undefined, null);
+  async deleteEnvironment(projectKey: string, envKey: string, signal?: AbortSignal): Promise<void> {
+    await this.write('DELETE', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}`, undefined, null, { signal });
   }
 
-  createMetric(projectKey: string, body: Record<string, unknown>): Promise<LdMetric> {
-    return this.write('POST', `/metrics/${encodeURIComponent(projectKey)}`, body, MetricSchema);
+  createMetric(projectKey: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<LdMetric> {
+    return this.write('POST', `/metrics/${encodeURIComponent(projectKey)}`, body, MetricSchema, { signal });
   }
 
-  patchMetricJson(projectKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string } = {}): Promise<LdMetric> {
-    return this.write('PATCH', `/metrics/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, MetricSchema);
+  patchMetricJson(projectKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string; signal?: AbortSignal } = {}): Promise<LdMetric> {
+    return this.write('PATCH', `/metrics/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, MetricSchema, { signal: opts.signal });
   }
 
-  async deleteMetric(projectKey: string, key: string): Promise<void> {
-    await this.write('DELETE', `/metrics/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, undefined, null);
+  async deleteMetric(projectKey: string, key: string, signal?: AbortSignal): Promise<void> {
+    await this.write('DELETE', `/metrics/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, undefined, null, { signal });
   }
 
   /** POST an experiment with its first iteration as a draft (`type: mab` for a bandit). */
-  createExperiment(projectKey: string, envKey: string, body: Record<string, unknown>): Promise<LdExperiment> {
-    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments`, body, ExperimentSchema);
+  createExperiment(projectKey: string, envKey: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<LdExperiment> {
+    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments`, body, ExperimentSchema, { signal });
   }
 
   /** Replaces the experiment's draft iteration. */
-  createIteration(projectKey: string, envKey: string, key: string, body: Record<string, unknown>): Promise<LdExperiment> {
-    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments/${encodeURIComponent(key)}/iterations`, body, ExperimentSchema);
+  createIteration(projectKey: string, envKey: string, key: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<LdExperiment> {
+    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments/${encodeURIComponent(key)}/iterations`, body, ExperimentSchema, { signal });
   }
 
   /** Experiments only take semantic patches (`archiveExperiment`, `updateExperimentFields`, …). */
-  patchExperimentSemantic(projectKey: string, envKey: string, key: string, patch: SemanticPatch): Promise<LdExperiment> {
+  patchExperimentSemantic(projectKey: string, envKey: string, key: string, patch: SemanticPatch, signal?: AbortSignal): Promise<LdExperiment> {
     return this.write('PATCH', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments/${encodeURIComponent(key)}`, patch, ExperimentSchema, {
       contentType: 'application/json; domain-model=launchdarkly.semanticpatch',
+      signal,
     });
   }
 
   /** PUT replaces the whole list of randomization units. */
-  putExperimentationSettings(projectKey: string, body: { randomizationUnits: { randomizationUnit: string; default?: boolean }[] }): Promise<LdExperimentationSettings> {
-    return this.write('PUT', `/projects/${encodeURIComponent(projectKey)}/experimentation-settings`, body, ExperimentationSettingsSchema);
+  putExperimentationSettings(projectKey: string, body: { randomizationUnits: { randomizationUnit: string; default?: boolean }[] }, signal?: AbortSignal): Promise<LdExperimentationSettings> {
+    return this.write('PUT', `/projects/${encodeURIComponent(projectKey)}/experimentation-settings`, body, ExperimentationSettingsSchema, { signal });
   }
 
-  createFlag(projectKey: string, body: Record<string, unknown>): Promise<LdFlag> {
-    return this.write('POST', `/flags/${encodeURIComponent(projectKey)}`, body, FlagSchema);
+  createFlag(projectKey: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<LdFlag> {
+    return this.write('POST', `/flags/${encodeURIComponent(projectKey)}`, body, FlagSchema, { signal });
   }
 
   /** One atomic semantic patch (PLAN §5.1). `dryRun` validates without saving. */
-  patchFlagSemantic(projectKey: string, key: string, patch: SemanticPatch, opts: { dryRun?: boolean } = {}): Promise<LdFlag> {
+  patchFlagSemantic(projectKey: string, key: string, patch: SemanticPatch, opts: { dryRun?: boolean; signal?: AbortSignal } = {}): Promise<LdFlag> {
     return this.write('PATCH', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, patch, FlagSchema, {
       contentType: 'application/json; domain-model=launchdarkly.semanticpatch',
       ...(opts.dryRun ? { query: { dryRun: 'true' } } : {}),
+      signal: opts.signal,
     });
   }
 
-  patchFlagJson(projectKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string; dryRun?: boolean } = {}): Promise<LdFlag> {
-    return this.write('PATCH', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, FlagSchema, opts.dryRun ? { query: { dryRun: 'true' } } : {});
+  patchFlagJson(projectKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string; dryRun?: boolean; signal?: AbortSignal } = {}): Promise<LdFlag> {
+    return this.write('PATCH', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, FlagSchema, { ...(opts.dryRun ? { query: { dryRun: 'true' } } : {}), signal: opts.signal });
   }
 
-  async deleteFlag(projectKey: string, key: string): Promise<void> {
-    await this.write('DELETE', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, undefined, null);
+  async deleteFlag(projectKey: string, key: string, signal?: AbortSignal): Promise<void> {
+    await this.write('DELETE', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, undefined, null, { signal });
   }
 
   /** `unbounded: true` with `unboundedContextKind` creates a big segment (Enterprise), whose members come from imports. */
-  createSegment(projectKey: string, envKey: string, body: { key: string; name: string; description?: string; tags?: string[]; unbounded?: boolean; unboundedContextKind?: string }): Promise<LdSegment> {
-    return this.write('POST', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}`, body, SegmentSchema);
+  createSegment(projectKey: string, envKey: string, body: { key: string; name: string; description?: string; tags?: string[]; unbounded?: boolean; unboundedContextKind?: string }, signal?: AbortSignal): Promise<LdSegment> {
+    return this.write('POST', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}`, body, SegmentSchema, { signal });
   }
 
   /**
@@ -407,17 +412,17 @@ export class LdClient {
     }
   }
 
-  patchSegmentJson(projectKey: string, envKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string; dryRun?: boolean } = {}): Promise<LdSegment> {
-    return this.write('PATCH', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, SegmentSchema, opts.dryRun ? { query: { dryRun: 'true' } } : {});
+  patchSegmentJson(projectKey: string, envKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string; dryRun?: boolean; signal?: AbortSignal } = {}): Promise<LdSegment> {
+    return this.write('PATCH', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, SegmentSchema, { ...(opts.dryRun ? { query: { dryRun: 'true' } } : {}), signal: opts.signal });
   }
 
-  async deleteSegment(projectKey: string, envKey: string, key: string): Promise<void> {
-    await this.write('DELETE', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}`, undefined, null);
+  async deleteSegment(projectKey: string, envKey: string, key: string, signal?: AbortSignal): Promise<void> {
+    await this.write('DELETE', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}`, undefined, null, { signal });
   }
 
   /** PUT is an upsert; `archived: true` is how a context kind is "removed". */
-  async putContextKind(projectKey: string, key: string, body: { name: string; description?: string; archived?: boolean }): Promise<void> {
-    await this.write('PUT', `/projects/${encodeURIComponent(projectKey)}/context-kinds/${encodeURIComponent(key)}`, body, null);
+  async putContextKind(projectKey: string, key: string, body: { name: string; description?: string; archived?: boolean }, signal?: AbortSignal): Promise<void> {
+    await this.write('PUT', `/projects/${encodeURIComponent(projectKey)}/context-kinds/${encodeURIComponent(key)}`, body, null, { signal });
   }
 
   private async write<S extends z.ZodType>(
@@ -425,7 +430,7 @@ export class LdClient {
     path: string,
     body: unknown,
     schema: S | null,
-    opts: { contentType?: string; query?: Record<string, string> } = {},
+    opts: { contentType?: string; query?: Record<string, string>; signal?: AbortSignal } = {},
   ): Promise<z.output<S>> {
     const qs = opts.query ? `?${new URLSearchParams(opts.query)}` : '';
     let res;
@@ -435,6 +440,7 @@ export class LdClient {
         url: `${this.instance.origin}/api/v2${path}${qs}`,
         headers: { Authorization: this.#token, 'LD-API-Version': LD_API_VERSION, ...(opts.contentType ? { 'Content-Type': opts.contentType } : {}) },
         body,
+        signal: opts.signal,
       });
     } catch (e) {
       if (e instanceof HttpError) {

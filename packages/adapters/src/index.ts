@@ -4,3 +4,4 @@ export * from './spec/parse.ts';
 export * from './spec/conditions.ts';
 export * from './spec/normalize.ts';
 export * from './spec/idlists.ts';
+export * from './spec/schemas.ts';
