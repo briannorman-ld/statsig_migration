@@ -45,10 +45,25 @@ export async function stopStaleDemoMock(): Promise<void> {
 
 let started: Promise<void> | undefined;
 let demoSnapshot = 1;
+let timelineSteps = 2;
 
 /** Current position on the scripted StatSig timeline (PLAN §19.3). */
 export function demoTimeline() {
   return demoSnapshot;
+}
+
+/** How many scripted snapshots the dataset has (known once the mock has loaded; 2 until then). */
+export function demoTimelineSteps() {
+  return timelineSteps;
+}
+
+/**
+ * "Advance StatSig timeline" (PLAN §19.3): the simulated StatSig project starts answering with a
+ * later scripted snapshot, so the next sync shows drift, an archive and a new gate. Nothing is
+ * written anywhere; a re-sync of the demo sources picks the new state up.
+ */
+export function setDemoTimeline(step: number): void {
+  demoSnapshot = Math.max(1, Math.min(timelineSteps, Math.round(step)));
 }
 
 export function startDemoMock(): Promise<void> {
@@ -59,6 +74,7 @@ export function startDemoMock(): Promise<void> {
       import('@sslm/demo-fixtures/data/acme-retail.json'),
     ]);
     const file = (data as unknown as { default: import('@sslm/demo-fixtures').AcmeRetailFile }).default;
+    timelineSteps = file.snapshots;
     const worker = setupWorker(
       ...fixtures.createAcmeDemoHandlers({
         origin: appRoot(),

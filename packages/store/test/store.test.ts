@@ -269,3 +269,32 @@ describe("M3 tables", () => {
     expect((await s.listRuns("w")).map((r) => r.id)).toEqual(["b", "a"]);
   });
 });
+
+describe("monitoring tables (M5)", () => {
+  it("round-trips the last check, per-item switches and samples, and deletes them with the workspace", async () => {
+    const s = store();
+    const ws = await s.createWorkspace({ name: "Monitored" });
+    await s.saveMonitorState({ workspaceId: ws.id, lastCheckedAt: "2026-10-23T12:00:00Z", statuses: { test: { a: { name: "active", lastRequested: "2026-10-23T11:00:00Z" } } }, alertKeys: ["a|test:statsig_changed:"] });
+    await s.setMonitorItem({ workspaceId: ws.id, flagKey: "a", ldEnv: "test", ldAuthoritative: true, setAt: "2026-10-23T12:00:00Z" });
+    await s.setMonitorItem({ workspaceId: ws.id, flagKey: "a", ldEnv: "test", ldAuthoritative: false, setAt: "2026-10-23T12:01:00Z" });
+    await s.addMonitorSamples([
+      { id: "s1", workspaceId: ws.id, flagKey: "a", ldEnv: "test", at: "2026-10-23T12:00:00Z", ldStatus: "active", statsigChecksPerHour: 0 },
+      { id: "s2", workspaceId: ws.id, flagKey: "b", ldEnv: "test", at: "2026-10-23T12:00:00Z", ldStatus: "new" },
+    ]);
+    expect((await s.getMonitorState(ws.id))?.statuses.test?.a?.name).toBe("active");
+    expect(await s.listMonitorItems(ws.id)).toEqual([{ workspaceId: ws.id, flagKey: "a", ldEnv: "test", ldAuthoritative: false, setAt: "2026-10-23T12:01:00Z" }]);
+    expect((await s.listMonitorSamples(ws.id)).map((x) => x.id).sort()).toEqual(["s1", "s2"]);
+    await s.deleteMonitorSamples(["s2"]);
+    expect((await s.listMonitorSamples(ws.id)).map((x) => x.id)).toEqual(["s1"]);
+    await s.deleteWorkspace(ws.id);
+    expect(await s.getMonitorState(ws.id)).toBeUndefined();
+    expect(await s.listMonitorItems(ws.id)).toEqual([]);
+    expect(await s.listMonitorSamples(ws.id)).toEqual([]);
+  });
+
+  it("refuses monitor state that carries a secret-looking field", async () => {
+    const s = store();
+    const ws = await s.createWorkspace({ name: "Leaky" });
+    await expect(s.saveMonitorState({ workspaceId: ws.id, lastCheckedAt: "x", statuses: {}, alertKeys: [], ...({ token: "sdk-123" } as object) })).rejects.toBeInstanceOf(SecretInStoreError);
+  });
+});

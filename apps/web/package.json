@@ -19,6 +19,7 @@
     "@sslm/http": "workspace:*",
     "@sslm/ld-client": "workspace:*",
     "@sslm/mapper": "workspace:*",
+    "@sslm/monitoring": "workspace:*",
     "@sslm/planner": "workspace:*",
     "@sslm/statsig-client": "workspace:*",
     "@sslm/store": "workspace:*",

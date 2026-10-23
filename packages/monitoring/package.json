@@ -1,0 +1,9 @@
+{
+  "name": "@sslm/monitoring",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only monitoring (M5): drift from LD provenance, LD flag statuses, cutover lifecycle, reports.",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@sslm/canonical": "workspace:*", "@sslm/mapper": "workspace:*", "@sslm/planner": "workspace:*" }
+}

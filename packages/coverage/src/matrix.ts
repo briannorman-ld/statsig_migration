@@ -745,6 +745,18 @@ export const COVERAGE: CoverageEntry[] = [
     edgeCases: ['1.8'],
   },
   {
+    id: 'operations.monitoring',
+    area: 'operations',
+    statsig: 'Changes after migration: edited, archived or deleted gates and configs; traffic still hitting StatSig',
+    ld: 'Monitoring page: drift from LD provenance, LD flag statuses, cutover funnel, reports',
+    status: 'guided',
+    how: 'Read-only. Compares the StatSig fingerprint recorded at sync with the current snapshot and the flag’s LD modification time with the sync; reads LD flag statuses (new / inactive / active / launched) per environment; re-syncs stay manual.',
+    detail:
+      'Statuses: in sync, StatSig changed, decisions changed, LD changed, conflict (both), archived in StatSig (retire the LD flag), gone from StatSig, LD authoritative (a per-item switch that mutes StatSig changes after cutover). Lifecycle per environment: migrated → dual-running (LD traffic seen) → cut over (LD traffic and zero StatSig checks for 7 days, from samples taken while the tab is open) → safe to archive in StatSig. StatSig check counts come from the Console API and cover all environments; per-environment StatSig exposure sampling (the StatSig side of PLAN §14) is not built yet, and spec-only sources show StatSig traffic as unknown. Checks run on connect and every 15 minutes while the tab is open; there is no background polling or email/Slack alerting without a server.',
+    edgeCases: ['4.7', '15.20', '15.21'],
+    docs: { ld: `${LD}/home/observability/flag-status` },
+  },
+  {
     id: 'operations.dashboards',
     area: 'operations',
     statsig: 'Dashboards, alerts, reports, product and web analytics, session replay',

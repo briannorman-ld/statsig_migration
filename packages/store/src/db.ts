@@ -116,6 +116,43 @@ export interface IdListHashesRecord {
   hashes: string[];
 }
 
+/**
+ * Monitoring (PLAN §14, M5). Local only: the durable half of migration state is the LD provenance.
+ * One sample per (flag, environment) reading worth keeping (see @sslm/monitoring shouldSample).
+ */
+export interface MonitorSampleRecord {
+  id: string;
+  workspaceId: string;
+  flagKey: string;
+  ldEnv: string;
+  at: string;
+  ldStatus: string;
+  lastRequested?: string | null;
+  statsigChecksPerHour?: number | null;
+}
+
+/** Per-(flag, environment) switches: "LD authoritative" (PLAN §7). */
+export interface MonitorItemRecord {
+  workspaceId: string;
+  flagKey: string;
+  ldEnv: string;
+  ldAuthoritative: boolean;
+  setAt: string;
+}
+
+/** The last check: when, what LD said, and which alerts have already been shown. */
+export interface MonitorStateRecord {
+  workspaceId: string;
+  lastCheckedAt: string;
+  /** LD environment key → flag key → status. */
+  statuses: Record<string, Record<string, { name: string; lastRequested?: string }>>;
+  /** Environments whose statuses could not be read on the last check, with the reason. */
+  errors?: Record<string, string>;
+  alertKeys: string[];
+  /** Browser notifications requested by the user for this workspace. */
+  notify?: boolean;
+}
+
 export class MigratorDb extends Dexie {
   workspaces!: EntityTable<WorkspaceRecord, "id">;
   sources!: EntityTable<SourceRecord, "id">;
@@ -127,6 +164,9 @@ export class MigratorDb extends Dexie {
   runs!: EntityTable<RunJournalRecord, "id">;
   idLists!: EntityTable<IdListRecord, "uid">;
   idListHashes!: EntityTable<IdListHashesRecord, "uid">;
+  monitorSamples!: EntityTable<MonitorSampleRecord, "id">;
+  monitorItems!: Dexie.Table<MonitorItemRecord, [string, string, string]>;
+  monitorState!: EntityTable<MonitorStateRecord, "workspaceId">;
 
   constructor(name = "statsig-ld-migrator") {
     super(name);
@@ -152,6 +192,12 @@ export class MigratorDb extends Dexie {
     // M4: hashes from uploaded get_id_lists files (ID-list reconciliation for spec sources).
     this.version(4).stores({
       idListHashes: "uid, workspaceId, sourceId",
+    });
+    // M5: monitoring samples, per-item switches and the last check.
+    this.version(5).stores({
+      monitorSamples: "id, workspaceId, [workspaceId+flagKey+ldEnv], at",
+      monitorItems: "[workspaceId+flagKey+ldEnv], workspaceId",
+      monitorState: "workspaceId",
     });
   }
 }

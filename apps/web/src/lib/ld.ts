@@ -51,6 +51,11 @@ export function useLdSession(workspaceId: string): LdSession {
   );
 }
 
+/** The current session state outside React (the monitoring check reads freshly loaded flags). */
+export function ldSessionSnapshot(workspaceId: string): LdSession {
+  return sessions.get(workspaceId) ?? EMPTY;
+}
+
 export function ldClient(workspaceId: string): LdClient {
   return client(workspaceId);
 }

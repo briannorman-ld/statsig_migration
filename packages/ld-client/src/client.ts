@@ -11,6 +11,8 @@ import {
   ExperimentsSchema,
   ExperimentationSettingsSchema,
   FlagSchema,
+  FlagStatusesSchema,
+  flagStatusKey,
   MetricSchema,
   MetricsSchema,
   FlagsSchema,
@@ -175,6 +177,28 @@ export class LdClient {
       if (e instanceof HttpError && e.status === 404) return null;
       throw e;
     }
+  }
+
+  /**
+   * Flag statuses in one environment (GET /flag-statuses/{p}/{e}): `new`, `inactive`, `active` or
+   * `launched` plus `lastRequested`, keyed by flag key (PLAN §14 cutover). Read-only; one request
+   * per environment. Items whose links name no flag are dropped and reported as a schema issue.
+   */
+  async listFlagStatuses(projectKey: string, envKey: string, signal?: AbortSignal): Promise<Record<string, { name: string; lastRequested?: string }>> {
+    const path = `/flag-statuses/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}`;
+    const page = await this.get(path, FlagStatusesSchema, { signal });
+    const out: Record<string, { name: string; lastRequested?: string }> = {};
+    let unkeyed = 0;
+    for (const item of page.items ?? []) {
+      const key = flagStatusKey(item);
+      if (!key) {
+        unkeyed++;
+        continue;
+      }
+      out[key] = { name: item.name, ...(item.lastRequested ? { lastRequested: item.lastRequested } : {}) };
+    }
+    if (unkeyed) this.onSchemaIssue({ path, issues: [{ path: 'items[]._links', message: `${unkeyed} flag status item(s) without a parent/self link; dropped` }] });
+    return out;
   }
 
   async listSegments(projectKey: string, envKey: string, signal?: AbortSignal): Promise<LdSegment[]> {

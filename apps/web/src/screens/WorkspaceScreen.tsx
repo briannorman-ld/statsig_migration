@@ -36,6 +36,7 @@ import {
   isInterrupted,
   type MigrationSelection,
 } from "../lib/migration.ts";
+import { monitoredItems, useMonitoring, useMonitorNotifications, useMonitorSchedule } from "../lib/monitor.ts";
 import { store } from "../lib/store.ts";
 import { syncConsoleSource } from "../lib/sync.ts";
 import { useMigration } from "../lib/useMigration.ts";
@@ -49,6 +50,7 @@ import { FlagSideBySide } from "./GatesSideBySide.tsx";
 import { LdPanel } from "./LdPanel.tsx";
 import { MappingView } from "./MappingView.tsx";
 import { MigrateModal } from "./MigrateModal.tsx";
+import { MonitoringView } from "./MonitoringView.tsx";
 import { RunsView } from "./RunsView.tsx";
 import { SnapshotsView } from "./SnapshotsView.tsx";
 import { WarningsView } from "./WarningsView.tsx";
@@ -62,6 +64,7 @@ export type View =
   | { kind: "decisions" }
   | { kind: "mapping" }
   | { kind: "runs" }
+  | { kind: "monitoring" }
   | { kind: "snapshots"; sourceId?: string }
   | { kind: "coverage"; focus?: string };
 
@@ -263,6 +266,16 @@ export function WorkspaceScreen({
     (d) => d.decision.severity === "blocking",
   ).length;
   const interrupted = (runs ?? []).filter((r) => isInterrupted(r, workspaceId));
+
+  // Monitoring (PLAN §14): a read-only LD check on connect and every 15 minutes while the tab is
+  // open; drift rows come from the same memoized mapping results the explorers use.
+  const monitorItems = useMemo(
+    () => (m ? monitoredItems(visibleSnaps, m, m.connected) : []),
+    [m, visibleSnaps],
+  );
+  const monitoring = useMonitoring(workspaceId, monitorItems, ld);
+  useMonitorSchedule(workspaceId, ld, visibleSnaps, !viewingPast);
+  useMonitorNotifications(workspaceId, monitoring);
 
   // Load deferred ID lists (≤15k IDs) once per snapshot, so small list segments don't sit behind an
   // "ID list not loaded" decision. Bigger lists (big segments) load on request from Source warnings.
@@ -551,6 +564,15 @@ export function WorkspaceScreen({
             ) : null}
           </NavItem>
           <NavItem
+            active={view.kind === "monitoring"}
+            onClick={() => setView({ kind: "monitoring" })}
+          >
+            <span>Monitoring</span>
+            {monitoring.attention > 0 && (
+              <Badge tone="amber">{monitoring.attention}</Badge>
+            )}
+          </NavItem>
+          <NavItem
             active={view.kind === "coverage"}
             onClick={() => setView({ kind: "coverage" })}
           >
@@ -623,7 +645,8 @@ export function WorkspaceScreen({
           {visible.length === 0 &&
             (view.kind === "resource" ||
               view.kind === "decisions" ||
-              view.kind === "mapping") && (
+              view.kind === "mapping" ||
+              view.kind === "monitoring") && (
               <Callout tone="blue">
                 {(sources ?? []).length === 0 ? (
                   <>
@@ -690,7 +713,8 @@ export function WorkspaceScreen({
           {viewingPast &&
             (view.kind === "decisions" ||
               view.kind === "mapping" ||
-              view.kind === "runs") && (
+              view.kind === "runs" ||
+              view.kind === "monitoring") && (
               <Callout>
                 You are viewing a past snapshot. Decisions, mapping and runs
                 always work on the latest sync.{" "}
@@ -727,6 +751,18 @@ export function WorkspaceScreen({
             )}
           {!viewingPast && view.kind === "runs" && m && (
             <RunsView workspaceId={workspaceId} m={m} />
+          )}
+          {!viewingPast && view.kind === "monitoring" && m && (
+            <MonitoringView
+              workspaceId={workspaceId}
+              workspace={workspace}
+              sources={visible}
+              snapshots={visibleSnaps}
+              m={m}
+              data={monitoring}
+              onMigrate={(selection, ldEnvs) => setMigrate({ selection, ldEnvs })}
+              onResyncSource={(s) => void runSync(s)}
+            />
           )}
           {view.kind === "snapshots" && (
             <SnapshotsView

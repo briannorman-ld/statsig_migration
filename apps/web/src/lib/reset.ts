@@ -8,6 +8,7 @@
  */
 import { LdWriteError, TAG_MIGRATED_ENV, type LdClient } from '@sslm/ld-client';
 import { ldClient, refreshLdState, reprobe, type LdSession } from './ld.ts';
+import { store } from './store.ts';
 
 /** Thrown out of the step in flight when the user cancels; `resetProject` turns it into `report.cancelled`. */
 class ResetCancelled extends Error {
@@ -57,6 +58,8 @@ type Client = Pick<
 export async function resetLdProject(workspaceId: string, ld: LdSession, onProgress?: (p: ResetProgress) => void, signal?: AbortSignal): Promise<ResetReport> {
   if (!ld.projectKey) throw new Error('Choose an LD project first.');
   const report = await resetProject(ldClient(workspaceId), ld.projectKey, onProgress, signal);
+  // The flags the samples and switches were about are gone; monitoring starts over.
+  await store.clearMonitoring(workspaceId);
   // The environment list may have changed: re-probe, then re-read flags and segments.
   await reprobe(workspaceId);
   await refreshLdState(workspaceId);

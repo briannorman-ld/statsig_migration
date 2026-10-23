@@ -142,6 +142,32 @@ export const FlagSchema = z.looseObject({
 export type LdFlag = z.infer<typeof FlagSchema>;
 export type LdFlagConfig = z.infer<typeof FlagConfigSchema>;
 
+/**
+ * Flag status (GET /flag-statuses/{p}/{e}, FlagStatusRep). The items carry no `key` field: the flag
+ * key is the last segment of `_links.parent.href` (`/api/v2/flags/{p}/{key}`) or `_links.self.href`.
+ */
+export const FlagStatusSchema = z.looseObject({
+  name: z.string(),
+  lastRequested: optStr,
+  default: z.unknown().optional(),
+  _links: z.record(z.string(), z.looseObject({ href: optStr, type: optStr })).nullish(),
+});
+export const FlagStatusesSchema = z.looseObject({ items: z.array(FlagStatusSchema).nullish() });
+export type LdFlagStatus = z.infer<typeof FlagStatusSchema>;
+
+/** The flag key a FlagStatusRep is about, from its links; undefined when the links are missing. */
+export function flagStatusKey(s: LdFlagStatus): string | undefined {
+  const href = s._links?.parent?.href ?? s._links?.self?.href;
+  if (!href) return undefined;
+  const last = href.split('?')[0]!.split('/').filter(Boolean).at(-1);
+  if (!last) return undefined;
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
+}
+
 export const SegmentSchema = z.looseObject({
   key: z.string(),
   name: z.string(),

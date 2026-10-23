@@ -68,6 +68,9 @@ importers:
       '@sslm/mapper':
         specifier: workspace:*
         version: link:../../packages/mapper
+      '@sslm/monitoring':
+        specifier: workspace:*
+        version: link:../../packages/monitoring
       '@sslm/planner':
         specifier: workspace:*
         version: link:../../packages/planner
@@ -196,6 +199,18 @@ importers:
       '@sslm/statsig-client':
         specifier: workspace:*
         version: link:../statsig-client
+
+  packages/monitoring:
+    dependencies:
+      '@sslm/canonical':
+        specifier: workspace:*
+        version: link:../canonical
+      '@sslm/mapper':
+        specifier: workspace:*
+        version: link:../mapper
+      '@sslm/planner':
+        specifier: workspace:*
+        version: link:../planner
 
   packages/planner:
     dependencies:

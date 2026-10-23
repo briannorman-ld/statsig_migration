@@ -6,6 +6,9 @@ import {
   type CapabilityRecord,
   type IdListHashesRecord,
   type IdListRecord,
+  type MonitorItemRecord,
+  type MonitorSampleRecord,
+  type MonitorStateRecord,
   type ProfileRecord,
   type RunJournalRecord,
   type SnapshotRecord,
@@ -139,8 +142,14 @@ export class WorkspaceStore {
       this.db.runs,
       this.db.idLists,
       this.db.idListHashes,
+      this.db.monitorSamples,
+      this.db.monitorItems,
+      this.db.monitorState,
     ];
     await this.db.transaction("rw", tables, async () => {
+      await this.db.monitorSamples.where("workspaceId").equals(id).delete();
+      await this.db.monitorItems.where("workspaceId").equals(id).delete();
+      await this.db.monitorState.delete(id);
       await this.db.profiles.delete(id);
       await this.db.resolutions.where("workspaceId").equals(id).delete();
       await this.db.runs.where("workspaceId").equals(id).delete();
@@ -410,6 +419,47 @@ export class WorkspaceStore {
 
   listIdListHashes(workspaceId: string): Promise<IdListHashesRecord[]> {
     return this.db.idListHashes.where("workspaceId").equals(workspaceId).toArray();
+  }
+
+  // --- Monitoring (PLAN §14) --------------------------------------------------------------------
+
+  getMonitorState(workspaceId: string): Promise<MonitorStateRecord | undefined> {
+    return this.db.monitorState.get(workspaceId);
+  }
+
+  async saveMonitorState(rec: MonitorStateRecord): Promise<void> {
+    assertNoSecrets(rec);
+    await this.db.monitorState.put(rec);
+  }
+
+  listMonitorItems(workspaceId: string): Promise<MonitorItemRecord[]> {
+    return this.db.monitorItems.where("workspaceId").equals(workspaceId).toArray();
+  }
+
+  async setMonitorItem(rec: MonitorItemRecord): Promise<void> {
+    await this.db.monitorItems.put(rec);
+  }
+
+  listMonitorSamples(workspaceId: string): Promise<MonitorSampleRecord[]> {
+    return this.db.monitorSamples.where("workspaceId").equals(workspaceId).toArray();
+  }
+
+  async addMonitorSamples(recs: MonitorSampleRecord[]): Promise<void> {
+    if (recs.length) await this.db.monitorSamples.bulkPut(recs);
+  }
+
+  /** Deletes the samples with these ids (retention; see @sslm/monitoring pruneSamples). */
+  async deleteMonitorSamples(ids: string[]): Promise<void> {
+    if (ids.length) await this.db.monitorSamples.bulkDelete(ids);
+  }
+
+  /** Forget monitoring state for a workspace (project reset): samples, switches and the last check. */
+  async clearMonitoring(workspaceId: string): Promise<void> {
+    await this.db.transaction("rw", [this.db.monitorSamples, this.db.monitorItems, this.db.monitorState], async () => {
+      await this.db.monitorSamples.where("workspaceId").equals(workspaceId).delete();
+      await this.db.monitorItems.where("workspaceId").equals(workspaceId).delete();
+      await this.db.monitorState.delete(workspaceId);
+    });
   }
 
   private async touch(workspaceId: string): Promise<void> {
