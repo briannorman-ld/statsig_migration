@@ -82,9 +82,20 @@ export async function connectLd(workspaceId: string, instance: LdInstanceId, tok
   }
 }
 
+/**
+ * The session patch that starts a probe. Switching projects drops the old project's state;
+ * re-probing the *same* project (after creating an environment, or "Re-probe") keeps the matrix
+ * and flags in place until the new ones arrive, so `connected` stays true and no screen flashes
+ * its "Connect LaunchDarkly" banner while the probe runs.
+ */
+export function probeStartPatch(current: LdSession, projectKey: string): Partial<LdSession> {
+  const sameProject = current.projectKey === projectKey && !!current.matrix;
+  return { projectKey, probing: 'Starting', error: undefined, ...(sameProject ? {} : { matrix: undefined, flags: undefined, segments: undefined, experiments: undefined }) };
+}
+
 export async function chooseProject(workspaceId: string, projectKey: string): Promise<void> {
   const c = client(workspaceId);
-  set(workspaceId, { projectKey, probing: 'Starting', matrix: undefined, flags: undefined, error: undefined });
+  set(workspaceId, probeStartPatch(sessions.get(workspaceId) ?? EMPTY, projectKey));
   try {
     const matrix = await probeCapabilities(c, projectKey, { onProgress: (s) => set(workspaceId, { probing: s }) });
     set(workspaceId, { matrix, probing: undefined });

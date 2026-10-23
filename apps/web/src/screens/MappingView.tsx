@@ -43,6 +43,11 @@ export function MappingView({ workspaceId, sources, snapshots, m, onConnect }: {
           to map StatSig environments to the LD project's environments.
         </Callout>
       )}
+      {m.connected && m.ld.probing && (
+        <p className="flex items-center gap-2 text-xs text-fg-muted">
+          <Spinner /> Refreshing the LD project ({m.ld.probing})…
+        </p>
+      )}
       {sources.map((s) => {
         const snap = snapshots[s.id];
         if (!snap) return null;
