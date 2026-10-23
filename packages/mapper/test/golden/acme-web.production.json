@@ -339,6 +339,30 @@
       }
     },
     {
+      "gate": "launched_dark_mode_v1",
+      "flagKey": "launched_dark_mode_v1",
+      "fidelity": "full",
+      "notes": [
+        "full: Launched in StatSig: everyone passes, so the flag is on in production and serves true to everyone."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
       "gate": "checkout_targeting_gate",
       "flagKey": "checkout_targeting_gate",
       "fidelity": "partial",
@@ -2133,6 +2157,7 @@
       "flagKey": "stale_promo_ribbon",
       "fidelity": "full",
       "notes": [
+        "full: Launched in StatSig: everyone passes, so the flag is on in production and serves true to everyone (its 1 rule is not evaluated in StatSig and is not migrated).",
         "full: StatSig marks this gate stale (STALE_ALL_TRUE). Consider hard-coding it instead of migrating."
       ],
       "decisions": [
@@ -2223,6 +2248,579 @@
         "rules": [
           {
             "description": "Staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    }
+  ],
+  "configs": [
+    {
+      "config": "checkout_config",
+      "flagKey": "checkout_config",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “country” (StatSig derived it from the IP address). [rule “US” › condition 1]",
+        "full: The StatSig JSON schema is not carried over: LD JSON variations are not schema-validated."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Staff” › condition 1) → regex",
+        "choice derived_attribute (rule “US” › condition 1) → map",
+        "choice case_insensitive_match (rule “US” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "max_items": 50,
+            "express_enabled": false,
+            "payment_providers": [
+              "card"
+            ]
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "max_items": 500,
+            "express_enabled": true,
+            "payment_providers": [
+              "card",
+              "paypal",
+              "apple_pay"
+            ]
+          },
+          "name": "Staff"
+        },
+        {
+          "value": {
+            "max_items": 100,
+            "express_enabled": true,
+            "payment_providers": [
+              "card",
+              "paypal"
+            ]
+          },
+          "name": "US"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [
+          {
+            "description": "Staff",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "email",
+                "op": "matches",
+                "values": [
+                  "@[aA][cC][mM][eE][rR][eE][tT][aA][iI][lL]\\.[eE][xX][aA][mM][pP][lL][eE]"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 1
+          },
+          {
+            "description": "US",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "country",
+                "op": "matches",
+                "values": [
+                  "^[uU][sS]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 2
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "homepage_hero",
+      "flagKey": "homepage_hero",
+      "fidelity": "partial",
+      "notes": [
+        "partial: 100% rollout split Autumn 50% / Minimal 30% / Video 20% re-buckets users (StatSig and LD hash differently). [rule “Everyone (variants)”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "acknowledge partial_rollout_rebucket (rule “Everyone (variants)”) → acknowledge"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "headline": "Welcome to Acme",
+            "image": "hero-default.jpg"
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "headline": "Fall into savings",
+            "image": "hero-autumn.jpg"
+          },
+          "name": "Autumn"
+        },
+        {
+          "value": {
+            "headline": "Acme.",
+            "image": "hero-minimal.jpg"
+          },
+          "name": "Minimal"
+        },
+        {
+          "value": {
+            "headline": "See it in action",
+            "image": "hero-video.mp4"
+          },
+          "name": "Video"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "rollout": {
+            "contextKind": "user",
+            "variations": [
+              {
+                "variation": 1,
+                "weight": 50000
+              },
+              {
+                "variation": 2,
+                "weight": 30000
+              },
+              {
+                "variation": 3,
+                "weight": 20000
+              }
+            ]
+          }
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "shipping_thresholds",
+      "flagKey": "shipping_thresholds",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “country” (StatSig derived it from the IP address). [rule “UK” › condition 1]",
+        "partial: Your app must send “country” (StatSig derived it from the IP address). [rule “Canada” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “UK” › condition 1) → map",
+        "choice case_insensitive_match (rule “UK” › condition 1) → regex",
+        "choice derived_attribute (rule “Canada” › condition 1) → map",
+        "choice case_insensitive_match (rule “Canada” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "free_shipping_min": 50,
+            "currency": "USD"
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "free_shipping_min": 40,
+            "currency": "GBP"
+          },
+          "name": "UK"
+        },
+        {
+          "value": {
+            "free_shipping_min": 75,
+            "currency": "CAD"
+          },
+          "name": "Canada"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [
+          {
+            "description": "UK",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "country",
+                "op": "matches",
+                "values": [
+                  "^[gG][bB]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 1
+          },
+          {
+            "description": "Canada",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "country",
+                "op": "matches",
+                "values": [
+                  "^[cC][aA]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 2
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "search_ranking_weights",
+      "flagKey": "search_ranking_weights",
+      "fidelity": "full",
+      "notes": [
+        "full: Rule “Staging mix” doesn't apply in production (not enabled here)."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "text": 0.6,
+            "popularity": 0.3,
+            "recency": 0.1
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "text": 0.4,
+            "popularity": 0.4,
+            "recency": 0.2
+          },
+          "name": "Staging mix"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "b2b_order_limits",
+      "flagKey": "b2b_order_limits",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice unit_type_kind (companyID) → create:company"
+      ],
+      "dependencies": [
+        "context_kind:company",
+        "segment:enterprise_accounts"
+      ],
+      "variations": [
+        {
+          "value": {
+            "max_order_value": 10000
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "max_order_value": 250000
+          },
+          "name": "Enterprise accounts"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [
+          {
+            "description": "Enterprise accounts",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "segmentMatch",
+                "op": "segmentMatch",
+                "values": [
+                  "enterprise_accounts"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 1
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "api_rate_limits",
+      "flagKey": "api_rate_limits",
+      "fidelity": "partial",
+      "notes": [
+        "partial: 50% rollout re-buckets users (StatSig and LD hash differently). [rule “New limits (50%)”]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "acknowledge partial_rollout_rebucket (rule “New limits (50%)”) → acknowledge"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "rps": 50
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "rps": 80
+          },
+          "name": "New limits (50%)"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "rollout": {
+            "contextKind": "user",
+            "variations": [
+              {
+                "variation": 1,
+                "weight": 50000
+              },
+              {
+                "variation": 0,
+                "weight": 50000
+              }
+            ]
+          }
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "maintenance_mode",
+      "flagKey": "maintenance_mode",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "message": "We will be back shortly.",
+            "eta_minutes": 30
+          },
+          "name": "Default"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "loyalty_checkout_perks",
+      "flagKey": "loyalty_checkout_perks",
+      "fidelity": "partial",
+      "notes": [
+        "partial: 25% rollout re-buckets users (StatSig and LD hash differently). [rule “Accounts older than 30 days”]",
+        "full: “account_age_days” must be sent as a number: StatSig's numeric operators coerced numeric strings, LD's don't."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "acknowledge partial_rollout_rebucket (rule “Accounts older than 30 days”) → acknowledge",
+        "choice case_insensitive_match (rule “Gold tier” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "free_gift_wrap": false,
+            "priority_support": false
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "free_gift_wrap": true,
+            "priority_support": false
+          },
+          "name": "Accounts older than 30 days"
+        },
+        {
+          "value": {
+            "free_gift_wrap": true,
+            "priority_support": true
+          },
+          "name": "Gold tier"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [
+          {
+            "description": "Accounts older than 30 days",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "account_age_days",
+                "op": "greaterThanOrEqual",
+                "values": [
+                  30
+                ],
+                "negate": false
+              }
+            ],
+            "rollout": {
+              "contextKind": "user",
+              "variations": [
+                {
+                  "variation": 1,
+                  "weight": 25000
+                },
+                {
+                  "variation": 0,
+                  "weight": 75000
+                }
+              ]
+            }
+          },
+          {
+            "description": "Gold tier",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "tier",
+                "op": "matches",
+                "values": [
+                  "^[gG][oO][lL][dD]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 2
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "legacy_pricing_rules",
+      "flagKey": "legacy_pricing_rules",
+      "fidelity": "full",
+      "notes": [
+        "full: Disabled in StatSig: the flag is off in production and serves the default value."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice case_insensitive_match (rule “Same as default” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "rounding": "nearest",
+            "currency_display": "symbol"
+          },
+          "name": "Default"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": false,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [
+          {
+            "description": "Same as default",
             "clauses": [
               {
                 "contextKind": "user",

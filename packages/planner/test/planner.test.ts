@@ -182,6 +182,72 @@ describe('autotunes (PLAN §11)', () => {
   });
 });
 
+describe('dynamic configs (PLAN §10.1; edge cases 1.2, 10.1, 10.8)', () => {
+  const cuid = (id: string) => web.configs.find((c) => c.id === id)!.uid;
+  const owned = (key: string, type: 'gate' | 'config', extra: Partial<LdProjectState['flags'] extends ReadonlyMap<string, infer V> ? V : never> = {}) => ({
+    key,
+    tags: ['statsig-migrated', 'statsig-src-web'],
+    customProperties: { 'statsig.id': { value: [key] }, 'statsig.source': { value: ['web'] }, 'statsig.type': { value: [type] } },
+    kind: type === 'gate' ? 'boolean' : 'multivariate',
+    ...extra,
+  });
+
+  it('plans a JSON flag shell with the default first, then the environment targeting', () => {
+    const plan = planMigration(acceptAll(request([], { configs: [cuid('shipping_thresholds'), cuid('b2b_order_limits')] })));
+    expect(plan.errors).toEqual([]);
+    expect(plan.ready).toBe(true);
+    expect(plan.steps.map((s) => s.id)).toEqual(['context_kind:company', 'segment:test:enterprise_accounts', 'shell:b2b_order_limits', 'shell:shipping_thresholds', 'env:test:b2b_order_limits', 'env:test:shipping_thresholds']);
+    const shell = plan.steps.find((s) => s.id === 'shell:shipping_thresholds')!;
+    expect(shell.op === 'upsert_flag_shell' && shell.desired.variations.map((v) => v.name)).toEqual(['Default', 'UK', 'Canada']);
+    const env = plan.steps.find((s) => s.id === 'env:test:shipping_thresholds')!;
+    expect(env.op === 'update_flag_env' && env.variations.length).toBe(3);
+    expect(env.op === 'update_flag_env' && env.provenance.statsigType).toBe('config');
+    expect(plan.items.find((i) => i.entityId === 'shipping_thresholds')).toMatchObject({ kind: 'config', status: 'ready' });
+  });
+
+  it('1.2 / 10.8: a gate and a config with the same name cannot both become one LD key', () => {
+    const plan = planMigration(acceptAll(request(['maintenance_mode'], { configs: [cuid('maintenance_mode')] })));
+    expect(plan.items.find((i) => i.kind === 'gate' && i.entityId === 'maintenance_mode')).toMatchObject({ status: 'ready' });
+    expect(plan.items.find((i) => i.kind === 'config' && i.entityId === 'maintenance_mode')).toMatchObject({ status: 'error', reason: expect.stringMatching(/gate “maintenance_mode” also produces LD key/) });
+    expect(plan.steps.map((s) => s.id)).toEqual(['shell:maintenance_mode', 'env:test:maintenance_mode']);
+  });
+
+  it('refuses to turn a flag migrated from the gate of the same name into the config, and vice versa', () => {
+    const ld: LdProjectState = { ...EMPTY_LD, flags: new Map([['maintenance_mode', owned('maintenance_mode', 'gate')]]) };
+    const asConfig = planMigration(acceptAll(request([], { configs: [cuid('maintenance_mode')], ld })));
+    expect(asConfig.items[0]).toMatchObject({ status: 'error', reason: expect.stringMatching(/migrated from the StatSig gate of the same name/) });
+    const ld2: LdProjectState = { ...EMPTY_LD, flags: new Map([['maintenance_mode', owned('maintenance_mode', 'config')]]) };
+    const asGate = planMigration(acceptAll(request(['maintenance_mode'], { ld: ld2 })));
+    expect(asGate.items[0]).toMatchObject({ status: 'error', reason: expect.stringMatching(/migrated from the StatSig config of the same name/) });
+  });
+
+  it('10.1: appending a variation to a flag already migrated elsewhere is acknowledged first; variations are never removed', async () => {
+    const web2 = await acmeSnapshot('web', 2); // shipping_thresholds gains "Australia"
+    const before = planMigration(acceptAll(request([], { configs: [cuid('shipping_thresholds')] })));
+    const shell = before.steps.find((s) => s.id === 'shell:shipping_thresholds')!;
+    const variations = shell.op === 'upsert_flag_shell' ? shell.desired.variations : [];
+    const ld: LdProjectState = {
+      ...EMPTY_LD,
+      flags: new Map([['shipping_thresholds', owned('shipping_thresholds', 'config', { variations, customProperties: { ...owned('x', 'config').customProperties, 'statsig.id': { value: ['shipping_thresholds'] }, [syncPropertyKey('production')]: { value: ['fp', '5', NOW, 'd'] } } })]]),
+    };
+    const req = acceptAll(request([], { configs: [cuid('shipping_thresholds')], snapshots: [web2], ld }));
+    const blocked = planMigration({ ...req, resolutions: new Map([...req.resolutions].filter(([, r]) => r.type !== 'variation_change_affects_migrated_env')) });
+    const d = blocked.decisions.find((x) => x.type === 'variation_change_affects_migrated_env')!;
+    expect(d).toMatchObject({ severity: 'acknowledge', title: expect.stringMatching(/“Australia”.*production/) });
+    expect(blocked.items[0]).toMatchObject({ status: 'blocked' });
+
+    const acknowledged = planMigration(req);
+    expect(acknowledged.ready).toBe(true);
+    const next = acknowledged.steps.find((s) => s.id === 'shell:shipping_thresholds')!;
+    expect(next.op === 'upsert_flag_shell' && next.desired.variations.map((v) => v.name)).toEqual(['Default', 'UK', 'Canada', 'Australia']);
+
+    // Syncing production in the same plan means no other environment is affected: nothing to acknowledge.
+    const both = planMigration(acceptAll(request([], { configs: [cuid('shipping_thresholds')], snapshots: [web2], ld, ldEnvs: ['test', 'production'] })));
+    expect(both.decisions.map((x) => x.type)).not.toContain('variation_change_affects_migrated_env');
+    expect(both.ready).toBe(true);
+  });
+});
+
 describe('migrationStatus (from LD provenance)', () => {
   const fp = { statsigFingerprint: 'abc', decisionSetHash: 'd1' };
   const flag = (sync?: string[]) => ({

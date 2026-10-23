@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { CanonicalSnapshot, Condition, Gate } from '@sslm/canonical';
-import { caseFoldedPattern, mapAutotune, mapGate, mapSegment, type MapArgs, type Resolution } from '../src/index.ts';
+import type { CanonicalSnapshot, Condition, Config, Gate } from '@sslm/canonical';
+import { caseFoldedPattern, mapAutotune, mapConfig, mapGate, mapSegment, type MapArgs, type Resolution } from '../src/index.ts';
 import { acmeSnapshot, CAPS, NOW, profileFor, server } from './fixtures.ts';
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
@@ -318,6 +318,16 @@ describe('known edge cases (docs/KNOWN-EDGE-CASES.md)', () => {
   });
 
   describe('rules and rollouts', () => {
+    it('4.13: a Launched gate serves true to everyone, even when the API says isEnabled false with no rules', () => {
+      const r = mapGate(args('launched_dark_mode_v1'));
+      expect(r.env).toMatchObject({ on: true, fallthrough: { variation: 0 }, rules: [], targets: [] });
+      expect(r.fidelity.overall).toBe('full');
+      expect(r.fidelity.notes.some((n) => /Launched in StatSig/.test(n.message))).toBe(true);
+      // A launched gate with leftover rules ignores them too, and says so.
+      const f = mapGate(args('stale_promo_ribbon'));
+      expect(f.env).toMatchObject({ on: true, fallthrough: { variation: 0 }, rules: [] });
+      expect(f.fidelity.notes.some((n) => /1 rule is not evaluated/.test(n.message))).toBe(true);
+    });
     it('a 0% rule is an exclusion: it serves false and stops evaluation', () => {
       const r = mapGate(args('reviews_v2'));
       expect(r.env.rules[0]).toMatchObject({ description: 'Exclude load tests', variation: 1 });
@@ -665,5 +675,163 @@ describe('known edge cases (docs/KNOWN-EDGE-CASES.md)', () => {
       const changed = mapAutotune({ canonical: { snapshot: web }, entity: { ...web.autotunes.find((x) => x.id === 'hero_image_autotune')!, isStarted: true }, profile: profileFor(web, MAPPING), resolutions: new Map(), capabilities: CAPS, env: { statsig: 'production', ld: 'production' }, now: NOW });
       expect(changed.statsigFingerprint).not.toBe(a.statsigFingerprint);
     });
+  });
+});
+
+describe('dynamic configs → JSON flags (PLAN §10.1; edge cases 10.1–10.9)', () => {
+  function cargs(configId: string, over: Partial<MapArgs<Config>> = {}): MapArgs<Config> {
+    const entity = web.configs.find((c) => c.id === configId)!;
+    return { canonical: { snapshot: web }, entity, profile: profileFor(web, MAPPING), resolutions: new Map(), capabilities: CAPS, env: { statsig: 'production', ld: 'production' }, now: NOW, ...over };
+  }
+  const names = (r: ReturnType<typeof mapConfig>) => r.shell.variations.map((v) => v.name);
+
+  it('variation 0 is the default value; each distinct rule value is appended and named after its rule', () => {
+    const r = mapConfig(cargs('shipping_thresholds'));
+    expect(names(r)).toEqual(['Default', 'UK', 'Canada']);
+    expect(r.shell.variations[0]!.value).toEqual({ free_shipping_min: 50, currency: 'USD' });
+    expect(r.shell.defaults).toEqual({ onVariation: 0, offVariation: 0 });
+    expect(r.env.offVariation).toBe(0);
+    expect(r.env.fallthrough).toEqual({ variation: 0 });
+    expect(r.env.rules.map((x) => [x.description, x.variation])).toEqual([
+      ['UK', 1],
+      ['Canada', 2],
+    ]);
+    expect(r.shell.customProperties['statsig.type']!.value).toEqual(['config']);
+    // Fixed variations, no rollout: nothing to acknowledge (the remaining decisions are the condition ones gates raise too).
+    expect(types(r)).not.toContain('partial_rollout_rebucket');
+    expect(r.unresolved.every((d) => d.severity === 'choice')).toBe(true);
+  });
+
+  it('10.1: the variation list covers every environment, so the project-level shell does not depend on which environment migrates first', () => {
+    const prod = mapConfig(cargs('search_ranking_weights'));
+    const staging = mapConfig(cargs('search_ranking_weights', { env: { statsig: 'staging', ld: 'test' } }));
+    expect(names(prod)).toEqual(['Default', 'Staging mix']);
+    expect(names(staging)).toEqual(names(prod));
+    expect(prod.env.rules).toEqual([]);
+    expect(prod.env.fallthrough).toEqual({ variation: 0 });
+    expect(prod.fidelity.notes.some((n) => /doesn't apply in production/.test(n.message))).toBe(true);
+    // A public rule that matches everyone becomes the fallthrough.
+    expect(staging.env.fallthrough).toEqual({ variation: 1 });
+  });
+
+  it('10.2: a rule whose value equals the default adds no variation and serves the default', () => {
+    const r = mapConfig(cargs('legacy_pricing_rules'));
+    expect(names(r)).toEqual(['Default']);
+    expect(r.env.rules[0]).toMatchObject({ description: 'Same as default', variation: 0 });
+    // 10.6: disabled → off, serving the default.
+    expect(r.env.on).toBe(false);
+    expect(r.fidelity.notes.some((n) => /Disabled in StatSig/.test(n.message))).toBe(true);
+  });
+
+  it('10.3: variants become a rollout across their variations, weighted by their cumulative shares, with a re-bucketing acknowledgement', () => {
+    const r = mapConfig(cargs('homepage_hero'));
+    expect(names(r)).toEqual(['Default', 'Autumn', 'Minimal', 'Video']);
+    expect(r.env.fallthrough.rollout).toEqual({
+      contextKind: 'user',
+      variations: [
+        { variation: 1, weight: 50_000 },
+        { variation: 2, weight: 30_000 },
+        { variation: 3, weight: 20_000 },
+      ],
+    });
+    expect(types(r)).toEqual(['client_side_availability', 'partial_rollout_rebucket']);
+    expect(r.fidelity.overall).toBe('partial');
+  });
+
+  it('10.3: variants that do not add up to 100% leave the rest to the rule value, and a partial pass percentage to the default', () => {
+    const base = web.configs.find((c) => c.id === 'homepage_hero')!;
+    const rule = base.rules[0]!;
+    const entity: Config = { ...base, rules: [{ ...rule, passPercentage: 80, returnValue: { headline: 'Rule value' }, variants: [rule.variants![0]!, { ...rule.variants![1]!, passPercentage: 25 }] }] };
+    const r = mapConfig(cargs('homepage_hero', { entity }));
+    // The rule's own value is named after the rule, the variants after themselves.
+    expect(names(r)).toEqual(['Default', 'Everyone (variants)', 'Autumn', 'Minimal']);
+    const weights = Object.fromEntries(r.env.fallthrough.rollout!.variations.map((w) => [w.variation, w.weight]));
+    expect(weights).toEqual({ 2: 40_000, 3: 20_000, 1: 20_000, 0: 20_000 });
+    expect(Object.values(weights).reduce((a, b) => a + b, 0)).toBe(100_000);
+    expect(r.fidelity.notes.some((n) => /Variants cover 75%/.test(n.message))).toBe(true);
+  });
+
+  it('10.4: outside a partial rollout the default is served and evaluation stops; no later rule is reached', () => {
+    const r = mapConfig(cargs('api_rate_limits'));
+    expect(r.env.fallthrough.rollout).toEqual({
+      contextKind: 'user',
+      variations: [
+        { variation: 1, weight: 50_000 },
+        { variation: 0, weight: 50_000 },
+      ],
+    });
+    const perks = mapConfig(cargs('loyalty_checkout_perks'));
+    expect(perks.env.rules[0]).toMatchObject({ description: 'Accounts older than 30 days', rollout: { variations: [{ variation: 1, weight: 25_000 }, { variation: 0, weight: 75_000 }] } });
+    expect(perks.env.rules[0]!.clauses[0]).toMatchObject({ attribute: 'account_age_days', op: 'greaterThanOrEqual', values: [30], negate: false });
+    expect(perks.env.rules[1]).toMatchObject({ description: 'Gold tier', variation: 2 });
+    expect(types(perks)).toContain('partial_rollout_rebucket');
+  });
+
+  it('the re-bucketing acknowledgement shares its type and path with gates, so one policy covers both', () => {
+    const open = mapConfig(cargs('api_rate_limits'));
+    const d = open.unresolved.find((x) => x.type === 'partial_rollout_rebucket')!;
+    expect(d.id).toMatch(/^partial_rollout_rebucket:src-web\/config\/api_rate_limits:rule:.*:rollout$/);
+    const policy = profileFor(web, MAPPING);
+    policy.policies.partial_rollout_rebucket = 'skip';
+    const r = mapConfig(cargs('api_rate_limits', { profile: policy }));
+    expect(r.skipped).toMatch(/50% rollout/);
+    expect(r.env.on).toBe(false);
+  });
+
+  it('10.5: a JSON schema is a note only; 10.9: custom unit types roll out by their own context kind', () => {
+    const r = mapConfig(cargs('checkout_config'));
+    expect(r.fidelity.notes.some((n) => /not schema-validated/.test(n.message))).toBe(true);
+    expect(names(r)).toEqual(['Default', 'Staff', 'US']);
+    const b2b = mapConfig(cargs('b2b_order_limits'));
+    expect(b2b.dependencies).toEqual([
+      { kind: 'context_kind', key: 'company', entityId: 'companyID' },
+      { kind: 'segment', key: 'enterprise_accounts', entityId: 'enterprise_accounts' },
+    ]);
+    expect(b2b.env.rules[0]!.clauses[0]!.op).toBe('segmentMatch');
+  });
+
+  it('a config without rules serves the default everywhere; archived configs are skipped', () => {
+    const r = mapConfig(cargs('maintenance_mode'));
+    expect(names(r)).toEqual(['Default']);
+    expect(r.env).toMatchObject({ on: true, rules: [], fallthrough: { variation: 0 } });
+    const archived = mapConfig(cargs('maintenance_mode', { entity: { ...web.configs.find((c) => c.id === 'maintenance_mode')!, archived: true } }));
+    expect(archived.skipped).toBe('archived in StatSig');
+  });
+
+  it('overrides (spec sources) target the forced value; pass/fail overrides without a value can only serve the default', () => {
+    const base = web.configs.find((c) => c.id === 'shipping_thresholds')!;
+    const entity: Config = {
+      ...base,
+      overrides: [
+        { unitType: 'userID', ids: ['vip-1', 'vip-2'], value: { kind: 'value', returnValue: { free_shipping_min: 0, currency: 'USD' } }, environment: null },
+        { unitType: 'userID', ids: ['vip-1'], value: { kind: 'value', returnValue: { free_shipping_min: 40, currency: 'GBP' } }, environment: 'production' },
+        { unitType: 'userID', ids: ['blocked-1'], value: { kind: 'gate', pass: false }, environment: null },
+      ],
+    };
+    const r = mapConfig(cargs('shipping_thresholds', { entity }));
+    expect(names(r)).toEqual(['Default', 'UK', 'Canada', 'Override']);
+    // The environment-specific override wins for vip-1.
+    expect(r.env.targets).toEqual([
+      { contextKind: 'user', variation: 0, values: ['blocked-1'] },
+      { contextKind: 'user', variation: 1, values: ['vip-1'] },
+      { contextKind: 'user', variation: 3, values: ['vip-2'] },
+    ]);
+    expect(r.fidelity.notes.some((n) => /overridden to two values/.test(n.message))).toBe(true);
+  });
+
+  it('holdouts attached to a config are a partial-fidelity note (LD holdouts are not created yet)', () => {
+    const base = web.configs.find((c) => c.id === 'shipping_thresholds')!;
+    const r = mapConfig(cargs('shipping_thresholds', { entity: { ...base, holdoutIds: ['checkout_holdout'] } }));
+    expect(r.fidelity.overall).toBe('partial');
+    expect(r.fidelity.notes.some((n) => n.fidelity === 'partial' && /held out by “checkout_holdout”/.test(n.message))).toBe(true);
+  });
+
+  it('is deterministic and fingerprints the rules and the default value', () => {
+    const a = mapConfig(cargs('checkout_config'));
+    const b = mapConfig(cargs('checkout_config'));
+    expect(b).toEqual(a);
+    const base = web.configs.find((c) => c.id === 'checkout_config')!;
+    const changed = mapConfig(cargs('checkout_config', { entity: { ...base, defaultValue: { max_items: 51 } } }));
+    expect(changed.statsigFingerprint).not.toBe(a.statsigFingerprint);
   });
 });

@@ -3,8 +3,9 @@
 A browser-only app (static Vite SPA, no backend) that reads StatSig projects and compares them
 with one LaunchDarkly project. The spec is [PLAN.md](PLAN.md); project rules are in
 [CLAUDE.md](CLAUDE.md). Status: **M0 + M1** (foundations, source adapters, canonical model, demo
-dataset, LD connect + capability probe) **+ M3 for gates** (mapper with decisions, mapping profile,
-planner, dry run, journaled executor with LD provenance, undo). M0 spike #1 is still open:
+dataset, LD connect + capability probe) **+ M3 for gates and dynamic configs** (mapper with
+decisions, mapping profile, planner, dry run, journaled executor with LD provenance, undo; configs
+become JSON multivariate flags with append-only variations). M0 spike #1 is still open:
 [docs/TODO-m0-spike-1-statsig-cors.md](docs/TODO-m0-spike-1-statsig-cors.md).
 
 ## Run
@@ -19,6 +20,7 @@ pnpm build          # static site in apps/web/dist (strict CSP <meta>; vercel.js
 pnpm test:live      # read-only checks against real LD; needs LD_API_TOKEN in .env.local
 pnpm test:live:write # writes zz-live-* flags/segments to the demo LD project (statsig-migration), then undoes them
 pnpm fixtures:generate   # regenerate the committed demo dataset + sample spec files
+pnpm coverage:generate   # regenerate the coverage tables in docs/LIMITATIONS.md from packages/coverage
 ```
 
 ## Layout
@@ -32,6 +34,7 @@ pnpm fixtures:generate   # regenerate the committed demo dataset + sample spec f
 | `packages/ld-client` | LD REST client (read-only so far) + capability probe (PLAN §5.2). |
 | `packages/store` | Dexie/IndexedDB workspace store; refuses token-like fields. |
 | `packages/demo-fixtures` | "Acme Retail" dataset (PLAN §19), MSW mock of the Console API, config-spec generator, sample files. |
-| `packages/mapper` | Pure, deterministic StatSig → LD mapping (PLAN §8, §10): gates → boolean flags, segments → LD segments, every imperfect mapping a `DecisionPoint`. Golden files in `test/golden/`. |
+| `packages/mapper` | Pure, deterministic StatSig → LD mapping (PLAN §8, §10): gates → boolean flags, dynamic configs → JSON multivariate flags, segments → LD segments, every imperfect mapping a `DecisionPoint`. Golden files in `test/golden/`. |
+| `packages/coverage` | The coverage matrix (every StatSig construct → LD target → how completely it migrates). Drives the in-app **What migrates** page and the generated block in [docs/LIMITATIONS.md](docs/LIMITATIONS.md) (`pnpm coverage:generate`). |
 | `packages/planner` | Dependency closure (segments, context kinds, prerequisite gates), ownership guard (`key_collision`), ordering, provenance status. |
 | `packages/executor` | Runs a plan against LD: journaled steps, pre-images, dry run, resume, undo. |

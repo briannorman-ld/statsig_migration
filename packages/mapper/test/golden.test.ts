@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { CanonicalSnapshot } from '@sslm/canonical';
-import { mapAutotune, mapGate, mapSegment } from '../src/index.ts';
+import { mapAutotune, mapConfig, mapGate, mapSegment } from '../src/index.ts';
 import { acmeSnapshot, CAPS, NOW, profileFor, server } from './fixtures.ts';
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
@@ -26,6 +26,20 @@ function golden(snap: CanonicalSnapshot, statsig: string, ld: string) {
       notes: r.fidelity.notes.map((n) => `${n.fidelity}: ${n.message}${n.location ? ` [${n.location}]` : ''}`),
       decisions: r.unresolved.map((d) => `${d.severity} ${d.type} (${d.subject.location ?? d.subject.id}) → ${d.recommended ?? 'no default'}`),
       dependencies: r.dependencies.map((d) => `${d.kind}:${d.key}`),
+      env: r.skipped ? undefined : r.env,
+    };
+  });
+  const configs = snap.configs.map((c) => {
+    const r = mapConfig({ ...args, entity: c });
+    return {
+      config: c.id,
+      flagKey: r.flagKey,
+      ...(r.skipped ? { skipped: r.skipped } : {}),
+      fidelity: r.fidelity.overall,
+      notes: r.fidelity.notes.map((n) => `${n.fidelity}: ${n.message}${n.location ? ` [${n.location}]` : ''}`),
+      decisions: r.unresolved.map((d) => `${d.severity} ${d.type} (${d.subject.location ?? d.subject.id}) → ${d.recommended ?? 'no default'}`),
+      dependencies: r.dependencies.map((d) => `${d.kind}:${d.key}`),
+      variations: r.shell.variations,
       env: r.skipped ? undefined : r.env,
     };
   });
@@ -58,7 +72,7 @@ function golden(snap: CanonicalSnapshot, statsig: string, ld: string) {
       bandit: r.bandit ? { treatments: r.bandit.treatments.map((t) => `${t.name}${t.baseline ? ' (baseline)' : ''} ${t.allocationPercent}%`), metricKey: r.bandit.metricKey, randomizationUnit: r.bandit.randomizationUnit } : null,
     };
   });
-  return { gates, segments, autotunes };
+  return { gates, configs, segments, autotunes };
 }
 
 describe('mapper golden files', () => {

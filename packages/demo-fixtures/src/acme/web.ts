@@ -122,14 +122,23 @@ export function acmeWeb(): ProjectSeed {
       },
       {
         id: 'free_returns',
-        description: 'Launched to everyone; the staff rule left below the public rule can never match.',
+        description: 'A public 100% rule serves everyone; the staff rule left below it can never match (KNOWN-EDGE-CASES 4.3).',
         owner: P.bob,
         tags: ['checkout'],
-        status: 'Launched',
         rules: [
           { name: 'Everyone', conditions: [{ type: 'public' }] },
           { name: 'Staff (leftover)', conditions: [STAFF_EMAIL] },
         ],
+      },
+      {
+        id: 'launched_dark_mode_v1',
+        description: 'Launched gate as the Console API launch example returns it: status Launched, isEnabled false, no rules. Everyone passes (KNOWN-EDGE-CASES 4.13).',
+        owner: P.marco,
+        tags: ['growth'],
+        type: 'PERMANENT',
+        status: 'Launched',
+        isEnabled: false,
+        rules: [],
       },
       {
         id: 'checkout_targeting_gate',

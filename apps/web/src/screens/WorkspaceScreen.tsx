@@ -684,6 +684,7 @@ export function WorkspaceScreen({
                 label={KIND_LABEL[view.resource]}
                 sources={visible}
                 snapshots={snapshots ?? {}}
+                onOpenCoverage={(focus) => setView({ kind: "coverage", focus })}
               />
             ))}
           {viewingPast &&

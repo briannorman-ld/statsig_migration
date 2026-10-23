@@ -16,6 +16,10 @@ The full 10–15 minute script (PLAN §19.5) grows with each milestone. What can
    the fidelity, open decisions, and a per-environment status strip read from LD provenance
    (`test ● production ○`). Click a row for the rules diff: StatSig rules for that environment on
    the left, the generated LD targeting on the right, plus fidelity notes and the row's decisions.
+   **Dynamic configs** get the same explorer: `homepage_hero` (three variants → a 50/30/20 rollout
+   across JSON variations), `api_rate_limits` (a 50 % rule: the rest get the default, nothing falls
+   through) and `legacy_pricing_rules` (disabled; its rule value equals the default, so the flag has
+   one variation). `maintenance_mode` exists as a gate *and* a config: planning both is refused.
 5. **Decisions** (left nav): ~110 decisions grouped by type and by identical question, e.g.
    *Case-insensitive match — 26 decisions in 22 items*, or *Client-side availability — 51*.
    Resolve one group with one click, **Save as policy**, or **Use recommended for N choices**.
@@ -49,6 +53,12 @@ The full 10–15 minute script (PLAN §19.5) grows with each milestone. What can
    `packages/demo-fixtures/generated/acme-web/download_config_specs.v2.json`. Uploading the same
    file again is detected as a duplicate; `…snapshot-2.json` produces a diff.
 
-Not yet: dynamic configs, big segments and approval requests (M4); drift monitoring and waves
+10. **What migrates** (left nav, under Migration): the full coverage matrix with the demo inventory counted
+    against it, filterable by status. Experiments, layers, holdouts, metrics and param stores in the
+    resource lists carry the same per-item verdict (*running in StatSig*, *draft (planned)*, *no
+    equivalent*, …) with a "why?" link into the matrix. The same data is published as
+    [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+
+Not yet: big segments and approval requests (M4); drift monitoring and waves
 (M5); consolidation of identical gates across `acme-web` and `acme-mobile` (M8). Migrating the same
 gate name from both sources is refused for now.

@@ -37,7 +37,7 @@ Decision types referenced below are defined in `packages/mapper/src/types.ts` (`
 | # | Edge case | StatSig | LaunchDarkly | Handling | Demo example |
 |---|---|---|---|---|---|
 | 1.1 | Name characters | Names may contain spaces, capitals and `.` (`^[a-zA-Z0-9_\-. ]*$` in the Console OpenAPI). | Keys allow only letters, digits, `.`, `_`, `-`. | ⚙️ `sanitizeKey` replaces other runs with `_` and strips leading `._-`; 📝 note when the key differs. 🚧 Two StatSig names can sanitize to one key (`a b` vs `a_b`); only collisions with existing LD keys are checked today (`key_collision`). | `Holiday Banner 2026` → `Holiday_Banner_2026` |
-| 1.2 | Shared names across resource types | A gate, a config and an experiment may all be called `x`. | One key space per project. | 📅 `key_collision` at plan time once configs (M4) and experiments (M6) are mapped. | gate + config `maintenance_mode` |
+| 1.2 | Shared names across resource types | A gate, a config and an experiment may all be called `x`. | One key space per project. | ⚙️ Plan error when a gate and a config in one plan produce the same key, or when the LD flag was migrated from the other resource type (`statsig.type` in provenance). Experiments: 📅 M6. | gate + config `maintenance_mode` |
 | 1.3 | Names differing only by case | Distinct resources. | Distinct keys (keys are case-sensitive), but easy to confuse. | ⚙️ nothing to do; worth a UI hint. | — |
 | 1.4 | Tags | Any text, including symbols. | Letters, digits, `.`, `_`, `-`, ≤ 64 chars. | ⚙️ `sanitizeTag` (NFKD, lower-case, truncate); 📝 note per renamed tag. 🚧 Lower-casing can merge `Checkout` and `checkout`. | `★ Core` → `core` on `eu_cookie_banner` |
 | 1.5 | Owner → maintainer | Owner email, possibly of someone who left. | Maintainer must be an LD member. | 🚧 `maintainer_unknown` (PLAN §8.3) not implemented; the shell only carries `statsig.owner` as a custom property. | gates owned by `jordan.former@…` |
@@ -45,6 +45,7 @@ Decision types referenced below are defined in `packages/mapper/src/types.ts` (`
 | 1.7 | Target apps → SDK visibility | Client SDKs can evaluate every gate; target apps only scope keys. | Flags are sent to client / mobile SDKs only when `clientSideAvailability` allows it. | ✅ `client_side_availability` on every gate (recommended: both). | every gate; `storefront_url_banner` is client-only |
 | 1.8 | Provenance | — | Custom properties can't be in the same semantic patch as environment instructions (400); several writes to one flag within seconds return 429. | ⚙️ executor writes the shell and each environment separately and backs off. | every migration |
 | 1.9 | Review settings, release pipelines, safeguards, automated rollouts, metric lifts | Per-gate settings. | Approvals / release pipelines / guarded rollouts, configured differently. | ❌ Manual (PLAN §6). | `kill_switch_payments` (PERMANENT) |
+| 1.10 | Name and description length | Names 3–100 chars; descriptions ≤ 1000 chars (Console API). | Key/name/description limits are not documented; 5,000 flags per project by default. | ⚙️ nothing to do today; ❓ confirm LD accepts 100-char keys. | — |
 
 ## 2. Environments
 
@@ -84,6 +85,8 @@ Decision types referenced below are defined in `packages/mapper/src/types.ts` (`
 | 4.10 | Rule expansion | One rule with several OR-ish conditions (`not_array_contains_all`, `on`, inlined gates). | One LD rule per DNF term. | ✅ `rule_expansion` (blocking) above 10 LD rules. | `cross_sell_matrix` (4 × 3 = 12) |
 | 4.11 | Pass-percentage precision | Decimals allowed. | Weights in thousandths of a percent. | ⚙️ `Math.round(p × 1000)`: exact to 0.001 %. | — |
 | 4.12 | Unreachable duplicate rules | Allowed. | Allowed. | ⚙️ copied as is (only rules after a public 100 % rule are dropped). | — |
+| 4.13 | `status` vs `isEnabled` | **Launched**: rule evaluation is skipped and the gate returns `true` for everyone; **Disabled**: always `false`. The Console API can return a Launched gate with `isEnabled: false` and `rules: []` ([launch example](https://docs.statsig.com/api-reference/gates/launch-gate)). | On/off plus targeting. | ✅ Static: `Launched` → on, fallthrough `true`, rules ignored (📝 note when rules were present); `Disabled` → off, whatever `isEnabled` says. Before this fix a launched gate could land in LD **off**. ❓ Verify the exact Console shape with a real launched gate. | `launched_dark_mode_v1`, `stale_promo_ribbon` |
+| 4.14 | Scheduled (automated) rollouts | Per-rule `pendingAutomatedRollouts` steps in 15-minute increments; dynamic configs also have "Gradual" and "Switch" (time-range) schedules. | Progressive rollouts (one per flag, timed steps) and scheduled flag changes (Enterprise). | 🚧 The current pass percentage migrates; pending steps are not yet listed or recreated. | — |
 
 ## 5. Condition types
 
@@ -165,20 +168,32 @@ Decision types referenced below are defined in `packages/mapper/src/types.ts` (`
 | 9.11 | Deleting a segment a flag still targets | — | 409. | ⚙️ undo deletes flags before segments. | runs → Undo |
 | 9.12 | Same segment name in two sources with different rules | — | — | 📅 M8 `source_collision`. | `beta_testers` (web vs mobile) |
 | 9.13 | Percentage rule followed by more rules | Evaluated like a gate: the first matching rule decides, and users outside its pass percentage **fail** the segment. | A context outside a weighted segment rule's percentage **continues to the next segment rule** ([docs](https://launchdarkly.com/docs/home/flags/rule-based-segments)). | 📝 Exact for a single weighted rule, or when the weighted rule is last; otherwise a partial note (later rules can now match users the StatSig rule excluded). 🚧 Not yet raised by the segment mapper. | `churn_risk` (single rule: exact) |
+| 9.14 | ID-list size | Up to 10 M IDs per project; lists above 1,000 IDs are not in the config-spec init payload (separate `get_id_lists` sync). | List segments ≤ 15,000 targets; big segments via CSV import (40 MB, 1 M contexts per file). | ✅ `big_segment` above 15 k; 🚧 CSV import not built; the spec adapter already treats > 1,000-ID lists as hashed. | `fraud_blocklist` |
 
-## 10. Dynamic configs (M4; fixtures seeded)
+## 10. Dynamic configs (`packages/mapper/src/config.ts`)
+
+A config becomes a JSON multivariate flag: variation 0 is `defaultValue` (named *Default*; fallthrough
+and off variation), then every distinct rule, variant and override value in source order, deduplicated
+by value (stable key order) and named after its rule or variant. The list is built from **every** rule
+of the config, not just the environment being migrated, so the project-level shell is the same
+whichever environment goes first. Conditions, gate references, segments, context kinds, client-side
+availability and provenance (`statsig.type = config`) work exactly as for gates (§3–§8).
 
 | # | Edge case | StatSig | LaunchDarkly | Handling | Demo example |
 |---|---|---|---|---|---|
-| 10.1 | Values are per rule; variations are project-level | A new `returnValue` in one environment. | The variation list is shared by all environments. | 📅 append-only variations; `variation_change_affects_migrated_env` when a migrated environment is affected (PLAN §7). | `shipping_thresholds` gains `Australia` in snapshot 2 |
-| 10.2 | Rule value equal to the default | Allowed. | No new variation needed. | 📅 dedupe by value. | `legacy_pricing_rules` |
-| 10.3 | Rule variants (split within a rule) | Cumulative bucket split. | Rollout across variations (re-bucketed). | 📅 + re-bucket acknowledgement. | `homepage_hero` (50/30/20) |
-| 10.4 | Partial-rollout rule on a config | Users matching the rule but outside the percentage: default, or next rule? | — | ❓ verify against a real project (PLAN §10.2). | `api_rate_limits` (50 %) |
-| 10.5 | JSON schema | Validates rule values in the console. | No schema on JSON variations. | ❌ note only. | `checkout_config` |
-| 10.6 | Disabled config | Returns the default. | Off, serving the default variation. | 📅. | `legacy_pricing_rules` |
+| 10.1 | Values are per rule; variations are project-level | A new `returnValue` in one environment. | The variation list is shared by all environments. | ⚙️ append-only: the executor adds missing variations at the end and never removes or reorders one. ✅ `variation_change_affects_migrated_env` (acknowledge) when the flag is already synced to an environment outside the plan (PLAN §7). The planner needs the LD listing to carry `variations`; without it the executor still only appends. | `shipping_thresholds` gains `Australia` in snapshot 2 |
+| 10.2 | Rule value equal to the default | Allowed. | No new variation needed. | ⚙️ deduplicated by value; the rule serves variation 0 (it still ends evaluation, see 10.4). | `legacy_pricing_rules` |
+| 10.3 | Rule variants (split within a rule) | Cumulative bucket split of the rule's passing units. | Rollout across the variant variations, weight = passPercentage × share. | ⚙️ + ✅ `partial_rollout_rebucket` (acknowledge). Shares that don't add up to 100 % leave the rest to the rule's own value (📝 note); a pass percentage below 100 sends the rest to the default. | `homepage_hero` (50/30/20) |
+| 10.4 | Partial-rollout rule on a config | The **first** rule whose conditions match ends evaluation. Inside its pass percentage → its value (or variant); outside → `defaultValue`. No fall-through to later rules. | Rule serving a rollout `{value p %, default rest}`. | ⚙️ verified against the SDK evaluator (`Evaluator.ts` `_evalConfig`: `_evalPassPercent` false → `defaultValue`, never the next rule). 0 % rules serve the default. ✅ `partial_rollout_rebucket` as for gates (same decision id, so one policy covers both). | `api_rate_limits` (50 %), `loyalty_checkout_perks` (25 % then a second rule) |
+| 10.5 | JSON schema | Validates rule values in the console. | No schema on JSON variations. | 📝 note (full fidelity: serving is unaffected). | `checkout_config` |
+| 10.6 | Disabled config | Returns the default for everyone. | Off, serving the default variation. | ⚙️ + 📝 note. | `legacy_pricing_rules` |
 | 10.7 | Per-parameter reads | `getConfig("x").get("p", d)` falls back per key. | `jsonVariation` returns the whole value. | ❌ code-change note (PLAN §10.5); rule values are not merged with the default in StatSig either. | `checkout_params` param store |
-| 10.8 | Name shared with a gate | Separate namespaces. | One key space. | 📅 `key_collision` (1.2). | `maintenance_mode` |
-| 10.9 | Custom unit type configs | `idType: companyID`. | Rollouts by that context kind. | 📅 as for gates. | `b2b_order_limits` |
+| 10.8 | Name shared with a gate | Separate namespaces. | One key space. | ⚙️ plan error naming the other item (1.2); an LD flag migrated from the gate of the same name is refused for the config and vice versa. | `maintenance_mode` |
+| 10.9 | Custom unit type configs | `idType: companyID`. | Rollouts by that context kind. | ⚙️ as for gates (`unit_type_kind`). | `b2b_order_limits` |
+| 10.10 | Config overrides | The Console API has no overrides for dynamic configs; a config spec may carry `…override` rules with a forced `returnValue`. | Individual targets. | ⚙️ spec overrides with a value → targets on that value's variation (appended if new); 📝 a pass/fail override without a value can only target the default. | — (unit test only; the Console fixtures can't express one) |
+| 10.11 | Holdouts attached to a config | Held-out users get the default before the rules. | No holdout is created (PLAN §11). | 📝 partial note with the holdout's share; see 4.8 for the gate side. | — |
+| 10.12 | Numeric `custom_field` conditions | Coerces numeric strings. | Typed comparison. | 📝 as 6.2 (the gate handling applies). | `loyalty_checkout_perks` (`account_age_days gte 30`) |
+| 10.13 | Value size | Config values up to 100 KB. | String/JSON variations up to 32 KB each. | 🚧 Not checked before planning; LD rejects the flag at create time. | — |
 
 ## 11. Experiments, layers, holdouts, autotune (M6/M7; PLAN §11)
 
@@ -199,6 +214,9 @@ Decision types referenced below are defined in `packages/mapper/src/types.ts` (`
 | 11.13 | Autotune on a custom unit ID | `idType: companyID`. | Bandit randomized by the mapped context kind, which must be enabled as a randomization unit in the project's experimentation settings. | ⚙️ Static: `ensure_randomization_unit` step (PUT experimentation-settings, additive; undone with the run). | `b2b_pricing_autotune` |
 | 11.14 | Baseline arm | No control concept. | A bandit needs one `baseline` treatment. | 📝 First variant is the baseline. | every autotune |
 | 11.15 | Existing LD metric under the success event's key | — | Metric keys are project-wide. | ⚙️ Reused silently when it is a custom metric on the same event; ✅ `key_collision` otherwise. | — |
+| 11.16 | Experiment types | `experimentType`: `BASE`, `GEO`, `SWITCHBACK`, `PROMPT`, `SIDECAR` (no-code), `GRID_SEARCH`. | Unit-randomized experiments only; prompts belong to AgentControl. | 📅 Only `BASE` will be drafted; the others are listed as *no equivalent* on the coverage page. | — |
+| 11.17 | Holdout percentage range | API `passPercentage` 0–10 (default 5); UI docs say 1–50 %. | `holdoutamount` string percent. | 📅 Pass through whatever the API returns. | `global_holdout` 2 % |
+| 11.18 | Experiments enabled in non-production environments | `enabledNonProdEnvironments[]` decides where an experiment runs besides production. | Experiments are created per environment. | 📅 Draft only in the mapped environments the experiment is enabled in. | — |
 
 ## 12. Metrics
 

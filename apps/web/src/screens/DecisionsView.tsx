@@ -37,6 +37,7 @@ import {
   decisionLogCsv,
   decisionLogMarkdown,
   download,
+  mapConfigFor,
   mapGateFor,
   type DecisionInstance,
 } from "../lib/migration.ts";
@@ -491,14 +492,20 @@ function ItemSection({
   const gate =
     item.kind === "gate"
       ? snap?.gates.find((g) => g.uid === item.uid)
-      : undefined;
+      : item.kind === "config"
+        ? snap?.configs.find((c) => c.uid === item.uid)
+        : undefined;
   const preview = useMemo(() => {
     if (!snap || !gate) return null;
     const ldEnv = m.connected
       ? (m.profile.sources[item.sourceId]?.envMapping[env] ?? null)
       : null;
+    const target = { statsig: env, ld: ldEnv ?? env };
     return {
-      result: mapGateFor(snap, gate, { statsig: env, ld: ldEnv ?? env }, m),
+      result:
+        gate.kind === "config"
+          ? mapConfigFor(snap, gate, target, m)
+          : mapGateFor(snap, gate, target, m),
       ldEnv,
       res: resolveRulesForEnvironment(gate.rules, env),
       overrides: overridesForEnvironment(gate.overrides, env),
@@ -536,7 +543,10 @@ function ItemSection({
             <StatsigRules
               rules={preview.res.rules}
               overrides={preview.overrides}
-              enabled={(gate as Gate).enabled}
+              enabled={gate.enabled}
+              {...(gate.kind === "config"
+                ? { config: { defaultValue: gate.defaultValue } }
+                : {})}
             />
           </Card>
           <Card className="p-3">

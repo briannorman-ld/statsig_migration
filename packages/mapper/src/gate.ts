@@ -121,6 +121,16 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
 
   if (gate.archived) return finish(offEnv, 'archived in StatSig');
 
+  // KNOWN-EDGE-CASES 4.13: `status` wins over `isEnabled` and the rule list. A Launched gate skips
+  // rule evaluation and returns true for everyone; a Disabled gate returns false. The Console API
+  // can report a Launched gate with `isEnabled: false` and no rules.
+  if (gate.status === 'Launched') {
+    fidelity.push({ fidelity: 'full', message: `Launched in StatSig: everyone passes, so the flag is on in ${env.ld} and serves true to everyone${gate.rules.length ? ` (its ${gate.rules.length} rule${gate.rules.length === 1 ? ' is' : 's are'} not evaluated in StatSig and ${gate.rules.length === 1 ? 'is' : 'are'} not migrated)` : ''}.` });
+    if (gate.lifecycle?.type === 'STALE') fidelity.push({ fidelity: 'full', message: `StatSig marks this gate stale (${gate.lifecycle.typeReason ?? 'STALE'}). Consider hard-coding it instead of migrating.` });
+    return finish({ ldEnv: env.ld, statsigEnv: env.statsig, on: true, offVariation: FAIL, fallthrough: { variation: PASS }, rules: [], targets: [], prerequisites: [] });
+  }
+  const enabled = gate.enabled && gate.status !== 'Disabled';
+
   try {
     holdoutsAttached(ctx, gate, holdouts);
     const resolved = resolveRulesForEnvironment(gate.rules, env.statsig);
@@ -159,13 +169,13 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
 
     const targets = overrideTargets(ctx, overrides);
     for (const key of [...prerequisites].sort()) deps.set(`flag:${sanitizeKey(key)}`, { kind: 'flag', key: sanitizeKey(key), entityId: key });
-    if (!gate.enabled) fidelity.push({ fidelity: 'full', message: `Disabled in StatSig: the flag is off in ${env.ld} and serves false.` });
+    if (!enabled) fidelity.push({ fidelity: 'full', message: `Disabled in StatSig: the flag is off in ${env.ld} and serves false.` });
     if (gate.lifecycle?.type === 'STALE') fidelity.push({ fidelity: 'full', message: `StatSig marks this gate stale (${gate.lifecycle.typeReason ?? 'STALE'}). Consider hard-coding it instead of migrating.` });
 
     return finish({
       ldEnv: env.ld,
       statsigEnv: env.statsig,
-      on: gate.enabled,
+      on: enabled,
       offVariation: FAIL,
       fallthrough,
       rules: out,

@@ -671,6 +671,192 @@
       }
     }
   ],
+  "configs": [
+    {
+      "config": "app_theme",
+      "flagKey": "app_theme",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Your app must send “osName” (StatSig derived it from the user agent). [rule “Android” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice derived_attribute (rule “Android” › condition 1) → map",
+        "choice case_insensitive_match (rule “Android” › condition 1) → regex"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "primary": "#0055ff",
+            "radius": 8
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "primary": "#0044cc",
+            "radius": 12
+          },
+          "name": "Android"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [
+          {
+            "description": "Android",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "osName",
+                "op": "matches",
+                "values": [
+                  "^[aA][nN][dD][rR][oO][iI][dD]$"
+                ],
+                "negate": false
+              }
+            ],
+            "variation": 1
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "onboarding_steps",
+      "flagKey": "onboarding_steps",
+      "fidelity": "full",
+      "notes": [
+        "full: Rule “Dev short” doesn't apply in production (not enabled here)."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "steps": [
+              "welcome",
+              "notifications",
+              "location",
+              "done"
+            ]
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "steps": [
+              "welcome",
+              "done"
+            ]
+          },
+          "name": "Dev short"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "checkout_config",
+      "flagKey": "checkout_config",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "max_items": 30,
+            "express_enabled": true,
+            "payment_providers": [
+              "apple_pay",
+              "google_pay"
+            ]
+          },
+          "name": "Default"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "config": "api_endpoints",
+      "flagKey": "api_endpoints",
+      "fidelity": "full",
+      "notes": [
+        "full: Rule “Staging” doesn't apply in production (not enabled here).",
+        "full: Rule “Dev” doesn't apply in production (not enabled here)."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "variations": [
+        {
+          "value": {
+            "base_url": "https://api.acmeretail.example"
+          },
+          "name": "Default"
+        },
+        {
+          "value": {
+            "base_url": "https://staging-api.acmeretail.example"
+          },
+          "name": "Staging"
+        },
+        {
+          "value": {
+            "base_url": "https://dev-api.acmeretail.example"
+          },
+          "name": "Dev"
+        }
+      ],
+      "env": {
+        "ldEnv": "production",
+        "statsigEnv": "production",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 0
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      }
+    }
+  ],
   "segments": [
     {
       "segment": "beta_testers",
