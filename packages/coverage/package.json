@@ -1,0 +1,12 @@
+{
+  "name": "@sslm/coverage",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "What migrates: the StatSig → LaunchDarkly coverage matrix that drives the in-app 'What migrates' page and docs/LIMITATIONS.md.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "generate": "node --experimental-strip-types scripts/generate.ts"
+  },
+  "dependencies": { "@sslm/canonical": "workspace:*" }
+}

@@ -3,6 +3,7 @@ node_modules/
 dist/
 .vite/
 coverage/
+!packages/coverage/
 *.tsbuildinfo
 .vercel/
 .pnpm-store/
