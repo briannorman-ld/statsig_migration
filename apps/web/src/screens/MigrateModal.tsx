@@ -508,7 +508,7 @@ export function RunSummary({ run }: { run: RunRecord }) {
       {run.steps.some((s) => s.approvalRequired) &&
         " Some environments require approvals; approval requests arrive with M4."}
       {run.status === "stopped" &&
-        " The run stopped on an authentication or connection error. Fix it, then resume from Runs."}
+        " The run stopped on an authentication, rate-limit or connection error. Fix it (or give LaunchDarkly a minute), then resume from Runs."}
     </Callout>
   );
 }

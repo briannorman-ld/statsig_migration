@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { buildAcmeDataset } from '@sslm/demo-fixtures';
 import { countsByKind, effectiveTargeting } from '@sslm/canonical';
-import { CrawlAuthError, crawlConsoleProject, normalizeConsoleSnapshot } from '../src/index.ts';
+import { CrawlAuthError, crawlConsoleProject, normalizeConsoleSnapshot, CrawlTransientError } from '../src/index.ts';
 import { mockProject, server, testClient } from './msw-server.ts';
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
@@ -137,6 +137,16 @@ describe('Console API adapter against the simulated StatSig', () => {
     expect(issues.map((i) => [i.endpoint, i.index])).toEqual([['/gates', 0], ['/gates', 1]]);
     expect(snap.gates[0]!.rules).toEqual([]);
     expect(snap.warnings.filter((w) => w.code === 'schema_mismatch')).toHaveLength(2);
+  });
+
+  it('fails the crawl, rather than saving an empty list, when an endpoint stays rate-limited', async () => {
+    mockProject('web');
+    const { http, HttpResponse } = await import('msw');
+    server.use(http.get('https://demo-statsig.test/web/console/v1/gates', () => HttpResponse.json({ message: 'slow down' }, { status: 429 })));
+    const err = await crawlWeb({ maxAttempts: 2 }).catch((e) => e);
+    expect(err).toBeInstanceOf(CrawlTransientError);
+    expect(err.endpoint).toBe('/gates');
+    expect(err.message).toMatch(/rate-limited \/gates/);
   });
 
   it('degrades gracefully when an optional endpoint fails', async () => {

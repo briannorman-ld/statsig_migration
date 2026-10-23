@@ -143,7 +143,10 @@ export function FlagSideBySide({
   const [targetEnvs, setTargetEnvs] = useState<string[] | null>(null);
   const { ld } = m;
   const words = LABEL[kind];
-  const snaps = sources.map((s) => snapshots[s.id]!).filter(Boolean);
+  const snaps = useMemo(
+    () => sources.map((s) => snapshots[s.id]!).filter(Boolean),
+    [sources, snapshots],
+  );
   const matched = useMemo(() => matchAcrossSources(snaps, kind), [snaps, kind]);
   const aliasOf = (sourceId: string) =>
     sources.find((s) => s.id === sourceId)?.alias ?? sourceId;

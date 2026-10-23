@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { DEMO_WORKSPACE_ID, stopStaleDemoMock } from './lib/demo.ts';
 import { isLdTossEnabled, REVERSE_MIGRATION_HASH, useLdToss } from './lib/ldtoss.ts';
 import { ReverseMigrationScreen } from './screens/ReverseMigration.tsx';
 import { StartScreen } from './screens/StartScreen.tsx';
@@ -32,6 +33,11 @@ export function App() {
     const next = hashForRoute(r);
     if (window.location.hash !== next) window.history.pushState(null, '', next);
   };
+  // A leftover demo service worker shouldn't front a real workspace's API calls.
+  useEffect(() => {
+    const r = routeFromHash(window.location.hash);
+    if (!(r.screen === 'workspace' && r.workspaceId === DEMO_WORKSPACE_ID)) void stopStaleDemoMock();
+  }, []);
   useEffect(() => {
     const onChange = () => setRouteState(routeFromHash(window.location.hash));
     window.addEventListener('hashchange', onChange);

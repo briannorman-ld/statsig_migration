@@ -366,7 +366,7 @@ export class LdClient {
       const res = await this.request(path, opts);
       return { path, status: res.status, ok: true, body: stripSdkKeys(res.body) };
     } catch (e) {
-      if (e instanceof HttpError) return { path, status: e.status, ok: false, body: e.body };
+      if (e instanceof HttpError) return { path, status: e.status, ok: false, body: stripSdkKeys(e.body) };
       if (e instanceof UnreachableError) return { path, status: 'unreachable', ok: false };
       throw e;
     }

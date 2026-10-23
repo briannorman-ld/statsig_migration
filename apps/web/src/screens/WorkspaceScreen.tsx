@@ -220,7 +220,12 @@ export function WorkspaceScreen({
     () => (sources ?? []).filter((s) => !hidden.has(s.id) && snapshots?.[s.id]),
     [sources, snapshots, hidden],
   );
-  const visibleSnaps = visible.map((s) => snapshots![s.id]!);
+  // Memoized: every heavy memo below (envs, counts, decisions, the migration context) keys on this
+  // array, and rebuilding it per render made each click re-map the whole project.
+  const visibleSnaps = useMemo(
+    () => visible.map((s) => snapshots![s.id]!),
+    [visible, snapshots],
+  );
   const envs = useMemo(() => {
     const names = new Set<string>();
     for (const sn of visibleSnaps)

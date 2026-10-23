@@ -6,7 +6,12 @@ export interface RetryPolicy {
   maxAttempts: number;
   baseDelayMs: number;
   maxDelayMs: number;
-  /** HTTP statuses that are retried with backoff (429 always also shrinks the AIMD window). */
+  /**
+   * HTTP statuses that are retried with backoff (429 always also shrinks the AIMD window).
+   * Only idempotent requests (GET, PUT, DELETE) retry on these: a POST or PATCH that timed out or
+   * drew a 5xx may already have been applied, so those retry on 429 only (the server refused the
+   * request without processing it), and a PATCH or PUT also on a 409 concurrent-edit conflict.
+   */
   retryStatuses: number[];
   /**
    * Whether a fetch that throws (no readable status) is retried. In the browser, StatSig error
@@ -53,6 +58,29 @@ export type TransportEvent =
   /** The request is held back by our own rate budget (not by the server) for about `waitMs`. */
   | { type: 'paced'; url: string; waitMs: number }
   | { type: 'gave-up'; method: string; url: string; attempts: number; reason: string };
+
+/** Longest wait a Retry-After / X-Ratelimit-Reset header may ask for before we fall back to backoff. */
+const MAX_HINTED_DELAY_MS = 60_000;
+
+/**
+ * `Retry-After` (seconds or an HTTP date) or LaunchDarkly's `X-Ratelimit-Reset` (epoch ms), when
+ * the response exposes either. Undefined when absent or unparseable.
+ */
+export function retryAfterMs(headers: Headers, now: number = Date.now()): number | undefined {
+  const ra = headers.get('retry-after');
+  if (ra) {
+    const secs = Number(ra);
+    if (Number.isFinite(secs)) return Math.round(secs * 1000);
+    const at = Date.parse(ra);
+    if (Number.isFinite(at)) return at - now;
+  }
+  const reset = headers.get('x-ratelimit-reset');
+  if (reset) {
+    const at = Number(reset);
+    if (Number.isFinite(at) && at > 0) return at - now;
+  }
+  return undefined;
+}
 
 export interface TransportOptions {
   fetch?: typeof fetch;
@@ -132,6 +160,7 @@ export class Transport {
       }
       const elapsedMs = this.clock.now() - started;
 
+      const idempotent = req.method === 'GET' || req.method === 'PUT' || req.method === 'DELETE';
       if (outcome.kind === 'response') {
         const { status, body } = outcome;
         this.stats.requests++;
@@ -146,8 +175,12 @@ export class Transport {
           this.limiter.onThrottle();
           this.onEvent({ type: 'throttled', url: req.url, newLimit: this.limiter.limit });
         }
-        if (!this.retry.retryStatuses.includes(status) || attempt === this.retry.maxAttempts) {
-          if (attempt > 1 && this.retry.retryStatuses.includes(status)) {
+        const retryable =
+          status === 429 ||
+          (idempotent && this.retry.retryStatuses.includes(status)) ||
+          (status === 409 && (req.method === 'PATCH' || req.method === 'PUT'));
+        if (!retryable || attempt === this.retry.maxAttempts) {
+          if (attempt > 1 && retryable) {
             this.onEvent({ type: 'gave-up', method: req.method, url: req.url, attempts: attempt, reason: `HTTP ${status}` });
           }
           throw new HttpError(status, body, req.url);
@@ -157,14 +190,17 @@ export class Transport {
         if (outcome.aborted) throw outcome.error;
         this.stats.opaqueFailures++;
         lastCause = outcome.reason;
-        if (!this.retry.retryOpaqueFailures) throw new UnreachableError(req.url, attempt, lastCause);
+        if (!this.retry.retryOpaqueFailures || !idempotent) throw new UnreachableError(req.url, attempt, lastCause);
         // No status to read: assume we may have been throttled.
         this.limiter.onThrottle();
         this.onEvent({ type: 'throttled', url: req.url, newLimit: this.limiter.limit });
         if (attempt === this.retry.maxAttempts) break;
       }
 
-      const delayMs = this.backoff(attempt);
+      // Prefer the server's own hint when the browser is allowed to see it (LD exposes no
+      // CORS headers today, so this is usually the computed backoff).
+      const hinted = outcome.kind === 'response' ? outcome.retryAfterMs : undefined;
+      const delayMs = hinted !== undefined ? Math.min(Math.max(hinted, 0), MAX_HINTED_DELAY_MS) : this.backoff(attempt);
       this.onEvent({ type: 'retry', method: req.method, url: req.url, attempt, delayMs, reason: lastCause });
       await this.clock.sleep(delayMs, req.signal);
     }
@@ -207,7 +243,7 @@ export class Transport {
       } else {
         parsed = null;
       }
-      return { kind: 'response', status: res.status, body: parsed };
+      return { kind: 'response', status: res.status, body: parsed, retryAfterMs: retryAfterMs(res.headers) };
     } catch (error) {
       if (req.signal?.aborted) return { kind: 'failure', aborted: true, error, reason: 'aborted' };
       const reason =
@@ -227,7 +263,7 @@ export class Transport {
 }
 
 type Outcome =
-  | { kind: 'response'; status: number; body: unknown }
+  | { kind: 'response'; status: number; body: unknown; retryAfterMs?: number | undefined }
   | { kind: 'failure'; aborted: boolean; error: unknown; reason: string };
 
 /** Strip query strings from URLs in messages; defensive, as none of ours carry secrets. */

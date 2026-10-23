@@ -66,7 +66,7 @@ export function AutotunesSideBySide({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [targetEnvs, setTargetEnvs] = useState<string[] | null>(null);
   const { ld } = m;
-  const snaps = sources.map((s) => snapshots[s.id]!).filter(Boolean);
+  const snaps = useMemo(() => sources.map((s) => snapshots[s.id]!).filter(Boolean), [sources, snapshots]);
   const matched = useMemo(() => matchAcrossSources(snaps, 'autotune'), [snaps]);
   const aliasOf = (sourceId: string) => sources.find((s) => s.id === sourceId)?.alias ?? sourceId;
   const ldFlags = useMemo(() => new Map((ld.flags?.items ?? []).map((f) => [f.key, f])), [ld.flags]);

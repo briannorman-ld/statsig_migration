@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AimdLimiter, HttpError, ManualClock, RateBudget, Transport, UnreachableError, type TransportEvent } from '../src/index.ts';
+import { AimdLimiter, HttpError, ManualClock, RateBudget, retryAfterMs, Transport, UnreachableError, type TransportEvent } from '../src/index.ts';
 
 function jsonResponse(status: number, body: unknown = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -120,6 +120,56 @@ describe('Transport', () => {
     expect((await t.request({ method: 'GET', url: 'https://x.test/a' })).body).toBeNull();
     const t2 = new Transport({ clock: instantClock().clock, fetch: async () => new Response('hello', { status: 200 }) });
     expect((await t2.request({ method: 'GET', url: 'https://x.test/a' })).body).toBe('hello');
+  });
+});
+
+describe('Transport retry policy by method', () => {
+  it('does not retry a POST on 5xx or a timeout: it may already have been applied', async () => {
+    let calls = 0;
+    const t = new Transport({ clock: instantClock().clock, fetch: async () => (calls++, jsonResponse(502)) });
+    await expect(t.request({ method: 'POST', url: 'https://x.test/a', body: {} })).rejects.toBeInstanceOf(HttpError);
+    expect(calls).toBe(1);
+    let calls2 = 0;
+    const t2 = new Transport({
+      clock: instantClock().clock,
+      retry: { maxAttempts: 3, baseDelayMs: 1 },
+      fetch: async () => {
+        calls2++;
+        throw new TypeError('Failed to fetch');
+      },
+    });
+    await expect(t2.request({ method: 'POST', url: 'https://x.test/a', body: {} })).rejects.toBeInstanceOf(UnreachableError);
+    expect(calls2).toBe(1);
+  });
+
+  it('retries a POST on 429 (refused, not processed) and a PATCH on 409 (concurrent edit)', async () => {
+    const posts = [429, 201];
+    const t = new Transport({ clock: instantClock().clock, retry: { baseDelayMs: 1 }, fetch: async () => jsonResponse(posts.shift()!) });
+    expect((await t.request({ method: 'POST', url: 'https://x.test/a', body: {} })).attempts).toBe(2);
+    const patches = [409, 200];
+    const t2 = new Transport({ clock: instantClock().clock, retry: { baseDelayMs: 1 }, fetch: async () => jsonResponse(patches.shift()!) });
+    expect((await t2.request({ method: 'PATCH', url: 'https://x.test/a', body: {} })).attempts).toBe(2);
+    // A GET still retries 5xx as before.
+    const gets = [503, 200];
+    const t3 = new Transport({ clock: instantClock().clock, retry: { baseDelayMs: 1 }, fetch: async () => jsonResponse(gets.shift()!) });
+    expect((await t3.request({ method: 'GET', url: 'https://x.test/a' })).attempts).toBe(2);
+  });
+
+  it('waits as long as Retry-After or X-Ratelimit-Reset asks, when the response exposes them', async () => {
+    const { clock, delays } = instantClock();
+    const responses = [
+      new Response('{}', { status: 429, headers: { 'Retry-After': '7' } }),
+      new Response('{}', { status: 429, headers: { 'X-Ratelimit-Reset': String(Date.now() + 2500) } }),
+      jsonResponse(200),
+    ];
+    const t = new Transport({ clock, retry: { baseDelayMs: 100 }, fetch: async () => responses.shift()! });
+    await t.request({ method: 'GET', url: 'https://x.test/a' });
+    expect(delays[0]).toBe(7000);
+    expect(delays[1]).toBeGreaterThan(2000);
+    expect(delays[1]).toBeLessThanOrEqual(2500);
+    // Absurd hints are capped; an absent hint falls back to backoff.
+    expect(retryAfterMs(new Headers({ 'Retry-After': 'garbage' }))).toBeUndefined();
+    expect(retryAfterMs(new Headers())).toBeUndefined();
   });
 });
 

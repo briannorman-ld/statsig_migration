@@ -17,7 +17,7 @@ export interface ParsedSpec {
 
 export class SpecRejectedError extends Error {
   constructor(
-    readonly reason: 'protobuf' | 'client_initialize_response' | 'no_updates' | 'not_a_spec' | 'unsupported_compression' | 'invalid_json',
+    readonly reason: 'protobuf' | 'client_initialize_response' | 'no_updates' | 'not_a_spec' | 'unsupported_compression' | 'invalid_json' | 'too_large',
     message: string,
   ) {
     super(message);
@@ -30,7 +30,19 @@ export const FETCH_INSTRUCTIONS =
   'curl -o spec.json "https://api.statsigcdn.com/v2/download_config_specs/<CLIENT_KEY>.json" ' +
   '(use a client key with only the "Allow Download Config Specs" scope, covering all environments and target apps).';
 
+/**
+ * Upper bound on a spec, compressed or not (256 MiB). Real specs run to tens of MB at most; the
+ * bound stops a mis-picked file or a gzip bomb from exhausting the worker, and is well under the
+ * engine's maximum string length that JSON.parse would hit anyway.
+ */
+export const MAX_SPEC_BYTES = 256 * 1024 * 1024;
+
+function tooLarge(what: string): SpecRejectedError {
+  return new SpecRejectedError('too_large', `${what} is larger than ${MAX_SPEC_BYTES / 1024 / 1024} MB, which is bigger than any config spec. Check that this is the download_config_specs file.`);
+}
+
 export async function parseSpecBytes(bytes: Uint8Array, filename = ''): Promise<ParsedSpec> {
+  if (bytes.byteLength > MAX_SPEC_BYTES) throw tooLarge('The file');
   const lower = filename.toLowerCase();
   if (/\.pb(\.br|\.gz)?$/.test(lower)) {
     throw new SpecRejectedError('protobuf', `This looks like the protobuf form of the config spec, which can't be read. ${FETCH_INSTRUCTIONS}`);
@@ -105,6 +117,25 @@ async function decompress(bytes: Uint8Array, format: 'gzip' | 'brotli'): Promise
     // TODO(M1 follow-up): bundle a WASM brotli decoder (PLAN §3.2) for browsers without native brotli.
     throw new SpecRejectedError('unsupported_compression', `This browser can't decompress ${format}. Decompress the file first (e.g. \`brotli -d spec.json.br\`) and upload the JSON.`);
   }
-  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(ds);
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+  // Read in chunks so the decompressed size is bounded before it is all in memory.
+  const reader = new Blob([bytes as BlobPart]).stream().pipeThrough(ds).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_SPEC_BYTES) {
+      await reader.cancel();
+      throw tooLarge('The decompressed file');
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.byteLength;
+  }
+  return out;
 }

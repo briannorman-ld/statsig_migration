@@ -83,9 +83,13 @@ export interface ExecutorOptions {
   now?: () => Date;
 }
 
-/** Systemic failures stop the whole run instead of failing every remaining step (PLAN §9 step 6). */
+/**
+ * Systemic failures stop the whole run instead of failing every remaining step (PLAN §9 step 6).
+ * A 429 that survived the transport's retries means LD is still throttling us: pressing on would
+ * burn a minute of backoff per step against the same limit, so stop and let the user resume.
+ */
 function isSystemic(e: unknown): boolean {
-  return e instanceof LdAuthError || (e instanceof LdWriteError && (e.status === 403 || e.status === 'unreachable'));
+  return e instanceof LdAuthError || (e instanceof LdWriteError && (e.status === 403 || e.status === 429 || e.status === 'unreachable'));
 }
 
 export function stepLabel(s: PlanStep): string {

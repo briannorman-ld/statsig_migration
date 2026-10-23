@@ -138,7 +138,10 @@ export async function crawlConsoleProject(
     throw e;
   }
 
-  // Optional endpoints: a failure becomes a warning, not a failed crawl.
+  // Optional endpoints: a 403 (key lacks the scope) or 404 (not on this plan) becomes a warning,
+  // not a failed crawl. A 429 or 5xx that outlived the transport's retries, or a connection
+  // failure (in a browser, a CORS-masked 429 looks exactly like one), is transient: saving an
+  // empty list as this sync's truth would show "0 gates", so the crawl fails and can be rerun.
   const optional = async <T>(endpoint: string, fallback: T, run: () => Promise<T>): Promise<T> => {
     try {
       const out = await run();
@@ -146,6 +149,7 @@ export async function crawlConsoleProject(
       return out;
     } catch (e) {
       if (signal?.aborted) throw e;
+      if (isTransient(e)) throw new CrawlTransientError(endpoint, e);
       skipped.push({ endpoint, reason: describe(e) });
       tick(endpoint);
       return fallback;
@@ -236,6 +240,25 @@ const EMPTY_JOBS = {
   teams: [],
   overrides: null,
 };
+
+function isTransient(e: unknown): boolean {
+  return (e instanceof HttpError && (e.status === 429 || e.status >= 500)) || e instanceof StatsigUnreachableError;
+}
+
+/** A StatSig endpoint was throttled or unreachable after retries; the sync must be rerun, not saved. */
+export class CrawlTransientError extends Error {
+  constructor(
+    readonly endpoint: string,
+    override readonly cause: unknown,
+  ) {
+    super(
+      cause instanceof HttpError && cause.status === 429
+        ? `StatSig rate-limited ${endpoint} even after retries. Wait a minute and sync again; nothing from this attempt was saved.`
+        : `StatSig ${endpoint} failed (${describe(cause)}) after retries. Sync again in a moment; nothing from this attempt was saved.`,
+    );
+    this.name = 'CrawlTransientError';
+  }
+}
 
 function describe(e: unknown): string {
   if (e instanceof HttpError) return `HTTP ${e.status}`;

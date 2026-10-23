@@ -140,6 +140,14 @@ describe('Executor', () => {
     expect(out.steps[2]!.error).toMatch(/bad clause/);
   });
 
+  it('stops the whole run on a 429 that outlived the retries, instead of throttling step after step', async () => {
+    const ld = fakeLd({ createFlag: async () => Promise.reject(new LdWriteError(429, '/flags/p', { message: 'Rate limit exceeded' })) });
+    const { ex, run } = setup(ld.client, [shell('a'), shell('b')]);
+    const out = await ex.run(run);
+    expect(out.status).toBe('stopped');
+    expect(out.steps.map((s) => s.status)).toEqual(['failed', 'pending']);
+  });
+
   it('stops the whole run on a 401', async () => {
     const ld = fakeLd({ createFlag: async () => Promise.reject(new LdAuthError(401, '/flags/p')) });
     const { ex, run } = setup(ld.client, [shell('a'), shell('b')]);

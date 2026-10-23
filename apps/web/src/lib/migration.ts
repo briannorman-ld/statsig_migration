@@ -139,21 +139,46 @@ export interface MappingInputs {
   now: string;
 }
 
+/*
+ * Mapping memo. The explorers, the Decisions view, the readiness line and collectDecisions all map
+ * the same entities with the same inputs, and React re-renders on every click, so without this the
+ * whole project was re-mapped (0.06 ms per gate per environment: half a second on a real project)
+ * for each selection, filter keystroke or nav change. Results are keyed on the identity of the
+ * inputs (a new MigrationContext after a decision or profile change) and of the snapshot (a new
+ * object after a sync), then by entity and environment, and are treated as immutable by callers.
+ */
+const mapMemo = new WeakMap<MappingInputs, WeakMap<CanonicalSnapshot, Map<string, unknown>>>();
+
+function memoized<T>(i: MappingInputs, snapshot: CanonicalSnapshot, key: string, compute: () => T): T {
+  let bySnapshot = mapMemo.get(i);
+  if (!bySnapshot) mapMemo.set(i, (bySnapshot = new WeakMap()));
+  let byKey = bySnapshot.get(snapshot);
+  if (!byKey) bySnapshot.set(snapshot, (byKey = new Map()));
+  if (byKey.has(key)) return byKey.get(key) as T;
+  const value = compute();
+  byKey.set(key, value);
+  return value;
+}
+
+const memoKey = (kind: string, uid: string, env: EnvTarget) => `${kind}|${uid}|${env.statsig}|${env.ld}`;
+
 export function mapGateFor(
   snapshot: CanonicalSnapshot,
   gate: Gate,
   env: EnvTarget,
   i: MappingInputs,
 ): GateMapResult {
-  return mapGate({
-    canonical: { snapshot, idLists: i.idLists },
-    entity: gate,
-    profile: i.profile,
-    resolutions: i.resolutions,
-    capabilities: i.capabilities,
-    env,
-    now: i.now,
-  });
+  return memoized(i, snapshot, memoKey("gate", gate.uid, env), () =>
+    mapGate({
+      canonical: { snapshot, idLists: i.idLists },
+      entity: gate,
+      profile: i.profile,
+      resolutions: i.resolutions,
+      capabilities: i.capabilities,
+      env,
+      now: i.now,
+    }),
+  );
 }
 
 export function mapSegmentFor(
@@ -162,23 +187,29 @@ export function mapSegmentFor(
   env: EnvTarget,
   i: MappingInputs,
 ): SegmentMapResult {
-  return mapSegment({
-    canonical: { snapshot, idLists: i.idLists },
-    entity: segment,
-    profile: i.profile,
-    resolutions: i.resolutions,
-    capabilities: i.capabilities,
-    env,
-    now: i.now,
-  });
+  return memoized(i, snapshot, memoKey("segment", segment.uid, env), () =>
+    mapSegment({
+      canonical: { snapshot, idLists: i.idLists },
+      entity: segment,
+      profile: i.profile,
+      resolutions: i.resolutions,
+      capabilities: i.capabilities,
+      env,
+      now: i.now,
+    }),
+  );
 }
 
 export function mapConfigFor(snapshot: CanonicalSnapshot, config: Config, env: EnvTarget, i: MappingInputs): ConfigMapResult {
-  return mapConfig({ canonical: { snapshot, idLists: i.idLists }, entity: config, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now });
+  return memoized(i, snapshot, memoKey("config", config.uid, env), () =>
+    mapConfig({ canonical: { snapshot, idLists: i.idLists }, entity: config, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now }),
+  );
 }
 
 export function mapAutotuneFor(snapshot: CanonicalSnapshot, autotune: Autotune, env: EnvTarget, i: MappingInputs): AutotuneMapResult {
-  return mapAutotune({ canonical: { snapshot, idLists: i.idLists }, entity: autotune, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now });
+  return memoized(i, snapshot, memoKey("autotune", autotune.uid, env), () =>
+    mapAutotune({ canonical: { snapshot, idLists: i.idLists }, entity: autotune, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now }),
+  );
 }
 
 export interface DecisionInstance {

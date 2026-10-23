@@ -27,6 +27,22 @@ export function appRoot(): string {
   return new URL(import.meta.env.BASE_URL, location.origin).href.replace(/\/+$/, '');
 }
 
+/**
+ * The demo's service worker is registered at the app root and persists across reloads, so after
+ * a demo it would still sit in front of every fetch, including real StatSig and LD calls (it
+ * passes them through, but it needn't see them). Unregister it when the page loads anywhere but
+ * the demo; the demo registers it again on its next start.
+ */
+export async function stopStaleDemoMock(): Promise<void> {
+  if (started || !('serviceWorker' in navigator)) return;
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(regs.filter((r) => /mockServiceWorker\.js$/.test(r.active?.scriptURL ?? r.waiting?.scriptURL ?? r.installing?.scriptURL ?? '')).map((r) => r.unregister()));
+  } catch {
+    // Private mode or a blocked API: nothing to clean up.
+  }
+}
+
 let started: Promise<void> | undefined;
 let demoSnapshot = 1;
 

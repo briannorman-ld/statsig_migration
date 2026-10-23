@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ENTITY_KINDS, type EntityKind } from '@sslm/canonical';
+import { MAX_SPEC_BYTES } from '@sslm/adapters';
 import { STATSIG_CONSOLE_BASE_URL } from '@sslm/statsig-client';
 import { appendLog, describeProgress, describeTransportEvent, SyncActivity, type SyncLogEntry } from '../components/SyncActivity.tsx';
 import { Button, Callout, Card, Input, Label, Spinner } from '../components/ui.tsx';
@@ -128,7 +129,23 @@ export function AddSource({ workspaceId, onDone }: { workspaceId: string; onDone
         ) : (
           <div>
             <Label htmlFor="src-file">Config spec file (.json, .json.gz)</Label>
-            <input id="src-file" type="file" accept=".json,.gz,.br,application/json" onChange={(e) => setFile(e.target.files?.[0])} className="text-sm" />
+            <input
+              id="src-file"
+              type="file"
+              accept=".json,.gz,.br,application/json"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                // Checked here as well as in the parser, so a wrong file is refused before it is read at all.
+                if (f && f.size > MAX_SPEC_BYTES) {
+                  setFile(undefined);
+                  setError(`“${f.name}” is ${(f.size / 1024 / 1024).toFixed(0)} MB; config specs are far smaller than ${MAX_SPEC_BYTES / 1024 / 1024} MB. Check that this is the download_config_specs file.`);
+                  return;
+                }
+                setError(undefined);
+                setFile(f);
+              }}
+              className="text-sm"
+            />
             <p className="mt-1.5 text-xs text-fg-muted">
               Fetch with <code>curl -o spec.json "https://api.statsigcdn.com/v2/download_config_specs/&lt;CLIENT_KEY&gt;.json"</code> using a client key that has only the
               “Allow Download Config Specs” scope and covers all environments and target apps. The file stays in this browser.
