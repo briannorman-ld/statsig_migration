@@ -231,10 +231,25 @@ function attributeCondition(ctx: ConditionContext, c: Condition, loc: Loc, conte
   const clause = (o: LdOperator, values: unknown[], negate = false): LdClause => ({ contextKind, attribute, op: o, values, negate });
   const one = (o: LdOperator, values: unknown[], negate = false): Dnf => [[clause(o, values, negate)]];
 
+  // Equality operators: StatSig compares loosely (6.2, 6.5, 6.10); each group holds the forms of one target.
+  const typed = () => typedTargets(ctx, c, loc, op!, targets, attribute);
+  // Numeric operators: StatSig's Number() coercion accepts numeric strings; LD's operators don't (6.6).
+  const numeric = (o: LdOperator): Dnf => {
+    numericContract(ctx, attribute);
+    return one(o, targets.map(Number));
+  };
+  // Version operators: StatSig pads, truncates and strips suffixes; LD needs three-part semver (6.7).
+  const semver = (o: LdOperator, negate = false): Dnf => {
+    const v = versionTargets(ctx, c, loc, op!, targets);
+    return 'dnf' in v ? v.dnf : one(o, v.values, negate);
+  };
+
   let out: Dnf;
   switch (op) {
     case 'any':
     case 'none':
+      out = caseInsensitive(ctx, c, loc, op, unique(typed().flat()), contextKind, attribute);
+      break;
     case 'str_contains_any':
     case 'str_contains_none':
     case 'str_starts_with_any':
@@ -242,49 +257,49 @@ function attributeCondition(ctx: ConditionContext, c: Condition, loc: Loc, conte
       out = caseInsensitive(ctx, c, loc, op, targets, contextKind, attribute);
       break;
     case 'any_case_sensitive':
-      out = one('in', targets.map(String));
+      out = one('in', unique(typed().flat()));
       break;
     case 'none_case_sensitive':
-      out = one('in', targets.map(String), true);
+      out = one('in', unique(typed().flat()), true);
       break;
     case 'str_matches':
       out = regex(ctx, c, loc, targets.map(String), contextKind, attribute);
       break;
     case 'gt':
-      out = one('greaterThan', targets.map(Number));
+      out = numeric('greaterThan');
       break;
     case 'gte':
-      out = one('greaterThanOrEqual', targets.map(Number));
+      out = numeric('greaterThanOrEqual');
       break;
     case 'lt':
-      out = one('lessThan', targets.map(Number));
+      out = numeric('lessThan');
       break;
     case 'lte':
-      out = one('lessThanOrEqual', targets.map(Number));
+      out = numeric('lessThanOrEqual');
       break;
     case 'eq':
     case 'neq':
       if (c.targetValue === null || c.targetValue === undefined) return nullCheck(ctx, c, loc, op === 'eq' ? 'is_null' : 'is_not_null', contextKind, attribute);
-      out = one('in', targets, op === 'neq');
+      out = one('in', unique(typed().flat()), op === 'neq');
       break;
     case 'version_gt':
-      out = one('semVerGreaterThan', targets.map(String));
+      out = semver('semVerGreaterThan');
       break;
     case 'version_lt':
-      out = one('semVerLessThan', targets.map(String));
+      out = semver('semVerLessThan');
       break;
     case 'version_eq':
-      out = one('semVerEqual', targets.map(String));
+      out = semver('semVerEqual');
       break;
     case 'version_neq':
-      out = one('semVerEqual', targets.map(String), true);
+      out = semver('semVerEqual', true);
       break;
     // PLAN §10.3 pitfall: >= is "not less than", <= is "not greater than".
     case 'version_gte':
-      out = one('semVerLessThan', targets.map(String), true);
+      out = semver('semVerLessThan', true);
       break;
     case 'version_lte':
-      out = one('semVerGreaterThan', targets.map(String), true);
+      out = semver('semVerGreaterThan', true);
       break;
     case 'before':
       out = one('before', targets.map(toTimestamp));
@@ -300,17 +315,17 @@ function attributeCondition(ctx: ConditionContext, c: Condition, loc: Loc, conte
       break;
     }
     case 'array_contains_any':
-      out = one('in', targets);
+      out = one('in', unique(typed().flat()));
       break;
     case 'array_contains_none':
-      out = one('in', targets, true);
+      out = one('in', unique(typed().flat()), true);
       break;
     case 'array_contains_all':
-      out = [targets.map((t) => clause('in', [t]))];
+      out = [typed().map((forms) => clause('in', forms))];
       break;
     case 'not_array_contains_all':
       // De Morgan: "not (has a and has b)" = "lacks a" or "lacks b" → one LD rule per value.
-      out = targets.map((t) => [clause('in', [t], true)]);
+      out = typed().map((forms) => [clause('in', forms, true)]);
       if (out.length > 1) note(ctx, loc, 'full', `not_array_contains_all expands into ${out.length} LD rules (one per value).`);
       break;
     case 'is_null':
@@ -351,10 +366,13 @@ function attributeCondition(ctx: ConditionContext, c: Condition, loc: Loc, conte
 
 function caseInsensitive(ctx: ConditionContext, c: Condition, loc: Loc, op: string, targets: unknown[], contextKind: string, attribute: string): Dnf {
   const spec = CASE_INSENSITIVE[op]!;
-  const values = targets.map(String);
+  // `any` / `none` keep the typed values `typedTargets` settled on; the string operators stringify.
+  const typed = op === 'any' || op === 'none';
+  const values = unique(targets.map(String));
+  const keep = typed ? targets : values;
   const clause = (o: LdOperator, vs: unknown[]): Dnf => [[{ contextKind, attribute, op: o, values: vs, negate: spec.negate }]];
   // Values with no cased letters (IPs, numbers) compare the same either way.
-  if (values.every((v) => v.toLowerCase() === v.toUpperCase())) return clause(spec.op, values);
+  if (values.every((v) => v.toLowerCase() === v.toUpperCase())) return clause(spec.op, keep);
 
   const choice = ctx.decisions.choose(
     {
@@ -381,10 +399,155 @@ function caseInsensitive(ctx: ConditionContext, c: Condition, loc: Loc, op: stri
   if (choice === 'regex') return clause('matches', values.map((v) => caseFoldedPattern(v, spec.anchor)));
   if (choice === 'variants') {
     note(ctx, loc, 'partial', `Case-insensitive “${op}” approximated with lower/upper variants.`);
-    return clause(spec.op, unique(values.flatMap((v) => [v, v.toLowerCase(), v.toUpperCase()])));
+    return clause(spec.op, unique(keep.flatMap((v) => (typeof v === 'string' ? [v, v.toLowerCase(), v.toUpperCase()] : [v]))));
   }
   note(ctx, loc, 'partial', `Case-insensitive “${op}” migrated as case-sensitive.`);
-  return clause(spec.op, values);
+  return clause(spec.op, keep);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Value typing and version formats (edge cases 6.2, 6.5, 6.6, 6.7, 6.10)
+// ---------------------------------------------------------------------------------------------
+
+const INTEGER = /^-?\d+$/;
+const DIGITS = /^\d+$/;
+const isArrayOp = (op: string) => op.startsWith('array_contains_') || op === 'not_array_contains_all';
+
+/**
+ * StatSig's equality operators are loosely typed: `any`, `none` and the `*_case_sensitive` variants
+ * compare `String()` of both sides, `eq`/`neq` use `==`, and the array operators also try
+ * `parseInt(target)` (EvaluatorUtils `stringCompare`, `arrayHasValue`). LD's `in` compares typed
+ * JSON values, so `"2"` ≠ `2`. When a target is a number or boolean (or, for array operators, an
+ * integer string), a `value_type` decision says which forms to emit. Returns one group of forms
+ * per target, in target order, so `*_all` operators can keep one clause per target.
+ */
+function typedTargets(ctx: ConditionContext, c: Condition, loc: Loc, op: string, targets: unknown[], attribute: string): unknown[][] {
+  const arrayOp = isArrayOp(op);
+  const loose = (t: unknown) => typeof t === 'number' || typeof t === 'boolean' || (arrayOp && typeof t === 'string' && INTEGER.test(t));
+  const asGiven = targets.map((t) => [t]);
+  const looseTargets = targets.filter(loose);
+  if (looseTargets.length === 0) return asGiven;
+
+  const other = (t: unknown): unknown => (typeof t === 'string' ? Number(t) : String(t));
+  const both = targets.map((t) => (loose(t) ? unique([t, other(t)]) : [t]));
+  // `any` on 2 matches 2 and "2"; an array operator with the *number* 2 matches only numbers
+  // (`Set.has(2) || Set.has(parseInt(2))`), while the string "2" matches both.
+  const exact: 'both' | 'number' = arrayOp && looseTargets.every((t) => typeof t !== 'string') ? 'number' : 'both';
+  const ex = looseTargets[0]!;
+  const exStr = JSON.stringify(String(ex));
+  const exNum = typeof ex === 'string' ? Number(ex) : ex;
+  const show = (groups: unknown[][]) => groups.flat().map((v) => JSON.stringify(v)).join(', ');
+
+  const choice = ctx.decisions.choose(
+    {
+      type: 'value_type',
+      severity: 'choice',
+      subject: subjectAt(ctx, loc),
+      path: path(ctx, loc),
+      title: `Typed values: ${op} on ${looseTargets.map((t) => JSON.stringify(t)).join(', ')}`,
+      explanation:
+        exact === 'both'
+          ? `StatSig's “${op}” compares loosely: the target ${JSON.stringify(ex)} matches “${attribute}” sent as ${String(exNum)} and as ${exStr}. LD's “in” compares typed JSON values, so ${exStr} and ${String(exNum)} are different values.`
+          : `StatSig's “${op}” with the number ${String(ex)} matches only a number in the “${attribute}” array (strings don't match). LD's “in” compares typed JSON values too, so the values can stay as they are; choose “both” if your app may send strings.`,
+      sourceFragment: c.raw,
+      fingerprintOf: { op, targets, attribute },
+      options: [
+        { key: 'both', label: 'Match the number and the string', explanation: `Emit both forms of each value (${show(both)}), so the attribute matches whichever way your app sends it.`, resultingFidelity: exact === 'both' ? 'full' : 'partial' },
+        { key: 'number', label: 'Keep the values as typed', explanation: `Numbers stay numbers and strings stay strings (${show(asGiven)}). An attribute sent as ${exStr} won't match a number target.`, resultingFidelity: exact === 'number' ? 'full' : 'partial' },
+        { key: 'string', label: 'Compare as strings', explanation: `Stringify every value (${show(targets.map((t) => [String(t)]))}). Your app must send “${attribute}” as a string.`, resultingFidelity: 'partial' },
+        SKIP,
+      ],
+      recommended: exact,
+    },
+    exact,
+  );
+  applyCommon(choice, loc);
+  if (choice === 'both') {
+    if (exact !== 'both') note(ctx, loc, 'partial', `“${attribute}” matches both numbers and strings in LD; StatSig's ${op} matched numbers only.`);
+    return both;
+  }
+  if (choice === 'number') {
+    if (exact !== 'number') note(ctx, loc, 'partial', `“${attribute}” must be sent with the types in the clause (StatSig's ${op} also matched ${exStr}).`);
+    return asGiven;
+  }
+  note(ctx, loc, 'partial', `Values compared as strings: “${attribute}” must be sent as a string (StatSig's ${op} also matched ${String(exNum)}).`);
+  return targets.map((t) => [String(t)]);
+}
+
+/** 6.6: `Number()` in StatSig accepts "25"; LD's numeric operators need a number. One note per attribute. */
+function numericContract(ctx: ConditionContext, attribute: string): void {
+  const message = `“${attribute}” must be sent as a number: StatSig's numeric operators coerced numeric strings, LD's don't.`;
+  if (!ctx.fidelity.some((n) => n.message === message)) ctx.fidelity.push({ fidelity: 'full', message });
+}
+
+/**
+ * 6.7: StatSig (`versionCompare`) strips everything from the first `-`, splits on `.`, pads missing
+ * parts with 0 and compares any number of parts. LD's semVer operators need valid semver: a
+ * four-part version never matches, and a prerelease sorts below its release. Missing parts are
+ * padded (exact, with a note); extra parts and suffixes raise `version_format`.
+ */
+function versionTargets(ctx: ConditionContext, c: Condition, loc: Loc, op: string, targets: unknown[]): { values: string[] } | { dnf: Dnf } {
+  const raw = targets.map(String);
+  const padded: string[] = [];
+  const lossy: { from: string; to: string; why: string }[] = [];
+  const values = raw.map((v) => {
+    const hyphen = v.indexOf('-');
+    const core = hyphen >= 0 ? v.slice(0, hyphen) : v;
+    const parts = core.split('.');
+    // Not a version StatSig can compare either (NaN part): leave it alone.
+    if (core.length === 0 || !parts.every((p) => DIGITS.test(p))) return v;
+    const three = parts.slice(0, 3).map((p) => String(Number(p)));
+    while (three.length < 3) three.push('0');
+    const to = three.join('.');
+    const why = [parts.length > 3 ? `has ${parts.length} parts` : '', hyphen >= 0 ? `has the suffix “${v.slice(hyphen)}”` : ''].filter(Boolean).join(' and ');
+    if (why) lossy.push({ from: v, to, why });
+    else if (to !== v) padded.push(`“${v}” → “${to}”`);
+    return to;
+  });
+  if (padded.length) note(ctx, loc, 'full', `Version ${padded.join(', ')} for LD semver (StatSig pads missing parts with 0 and ignores leading zeros, so this is exact).`);
+  if (lossy.length === 0) return { values };
+
+  const list = lossy.map((l) => `“${l.from}” ${l.why}`).join('; ');
+  const truncated = lossy.map((l) => `“${l.to}”`).join(', ');
+  const hasParts = lossy.some((l) => l.why.includes('parts'));
+  const hasSuffix = lossy.some((l) => l.why.includes('suffix'));
+  const choice = ctx.decisions.choose(
+    {
+      type: 'version_format',
+      severity: 'choice',
+      subject: subjectAt(ctx, loc),
+      path: path(ctx, loc),
+      title: `Version ${lossy.map((l) => `“${l.from}”`).join(', ')} isn't semver`,
+      explanation: `${list.charAt(0).toUpperCase()}${list.slice(1)}. StatSig compares any number of dot-separated parts and ignores everything after “-”. LD's semVer operators need valid semver: a four-part version never matches at all, and a prerelease like 5.3.0-beta sorts below 5.3.0.`,
+      sourceFragment: c.raw,
+      fingerprintOf: { op, targets: raw },
+      options: [
+        {
+          key: 'truncate',
+          label: `Compare against ${truncated}`,
+          explanation: [
+            hasParts ? 'Drop the fourth and later parts: versions that differ only there compare equal in LD, and your app must send a three-part version or the clause never matches.' : '',
+            hasSuffix ? 'Drop the suffix: StatSig ignored it on both sides, but LD sorts a prerelease attribute value (5.3.0-beta) below 5.3.0, so prerelease builds fall on the other side of the comparison.' : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
+          resultingFidelity: 'partial',
+        },
+        DROP_CONDITION,
+        DROP_RULE,
+        SKIP,
+      ],
+      recommended: 'truncate',
+    },
+    'truncate',
+  );
+  const common = applyCommon(choice, loc);
+  if (common) {
+    note(ctx, loc, 'partial', choice === 'drop_condition' ? `Non-semver version condition dropped (the rule matches more users).` : `Rule with a non-semver version condition dropped.`);
+    return { dnf: common };
+  }
+  note(ctx, loc, 'partial', `Version ${lossy.map((l) => `“${l.from}” → “${l.to}”`).join(', ')}: ${hasParts ? 'the app must send three-part versions; versions differing only after the third part compare equal' : 'prerelease builds sort below the release in LD'}.`);
+  return { values };
 }
 
 /** `[pP][rR][oO]`: a pattern every regex engine treats as case-insensitive for these letters. */

@@ -50,6 +50,9 @@ importers:
       '@sslm/canonical':
         specifier: workspace:*
         version: link:../../packages/canonical
+      '@sslm/coverage':
+        specifier: workspace:*
+        version: link:../../packages/coverage
       '@sslm/demo-fixtures':
         specifier: workspace:*
         version: link:../../packages/demo-fixtures
@@ -129,6 +132,12 @@ importers:
         version: link:../demo-fixtures
 
   packages/canonical: {}
+
+  packages/coverage:
+    dependencies:
+      '@sslm/canonical':
+        specifier: workspace:*
+        version: link:../canonical
 
   packages/demo-fixtures:
     dependencies:

@@ -184,8 +184,10 @@
       "notes": [
         "partial: Your app must send “osName” (StatSig derived it from the user agent). [rule “iOS 13+” › condition 1]",
         "partial: Your app must send “osVersion” (StatSig derived it from the user agent). [rule “iOS 13+” › condition 2]",
+        "full: Version “13.0” → “13.0.0” for LD semver (StatSig pads missing parts with 0 and ignores leading zeros, so this is exact). [rule “iOS 13+” › condition 2]",
         "partial: Your app must send “osName” (StatSig derived it from the user agent). [rule “Android 10+” › condition 1]",
-        "partial: Your app must send “osVersion” (StatSig derived it from the user agent). [rule “Android 10+” › condition 2]"
+        "partial: Your app must send “osVersion” (StatSig derived it from the user agent). [rule “Android 10+” › condition 2]",
+        "full: Version “10” → “10.0.0” for LD semver (StatSig pads missing parts with 0 and ignores leading zeros, so this is exact). [rule “Android 10+” › condition 2]"
       ],
       "decisions": [
         "choice client_side_availability (flag settings) → both",
@@ -223,7 +225,7 @@
                 "attribute": "osVersion",
                 "op": "semVerLessThan",
                 "values": [
-                  "13.0"
+                  "13.0.0"
                 ],
                 "negate": true
               }
@@ -247,7 +249,7 @@
                 "attribute": "osVersion",
                 "op": "semVerLessThan",
                 "values": [
-                  "10"
+                  "10.0.0"
                 ],
                 "negate": true
               }
@@ -420,10 +422,13 @@
     {
       "gate": "android_min_version",
       "flagKey": "android_min_version",
-      "fidelity": "full",
-      "notes": [],
+      "fidelity": "partial",
+      "notes": [
+        "partial: Version “5.2.0.100” → “5.2.0”: the app must send three-part versions; versions differing only after the third part compare equal. [rule “Build 5.2.0.100+” › condition 1]"
+      ],
       "decisions": [
-        "choice client_side_availability (flag settings) → both"
+        "choice client_side_availability (flag settings) → both",
+        "choice version_format (rule “Build 5.2.0.100+” › condition 1) → truncate"
       ],
       "dependencies": [],
       "env": {
@@ -443,7 +448,7 @@
                 "attribute": "appVersion",
                 "op": "semVerLessThan",
                 "values": [
-                  "5.2.0.100"
+                  "5.2.0"
                 ],
                 "negate": true
               }
@@ -458,10 +463,13 @@
     {
       "gate": "beta_channel_features",
       "flagKey": "beta_channel_features",
-      "fidelity": "full",
-      "notes": [],
+      "fidelity": "partial",
+      "notes": [
+        "partial: Version “5.3.0-beta” → “5.3.0”: prerelease builds sort below the release in LD. [rule “Beta builds 5.3+” › condition 1]"
+      ],
       "decisions": [
-        "choice client_side_availability (flag settings) → both"
+        "choice client_side_availability (flag settings) → both",
+        "choice version_format (rule “Beta builds 5.3+” › condition 1) → truncate"
       ],
       "dependencies": [],
       "env": {
@@ -481,7 +489,7 @@
                 "attribute": "appVersion",
                 "op": "semVerLessThan",
                 "values": [
-                  "5.3.0-beta"
+                  "5.3.0"
                 ],
                 "negate": true
               }

@@ -4,15 +4,17 @@
  * this module wires them to the store, the LD session and the StatSig source.
  */
 import { useSyncExternalStore } from "react";
-import type { Autotune, CanonicalSnapshot, Gate, Segment } from "@sslm/canonical";
+import type { Autotune, CanonicalSnapshot, Config, Gate, Segment } from "@sslm/canonical";
 import { Executor, newRun, type RunRecord } from "@sslm/executor";
 import type { CapabilityMatrix, LdFlagSummary } from "@sslm/ld-client";
 import {
   mapAutotune,
+  mapConfig,
   mapGate,
   mapSegment,
   reconcileProfile,
   type AutotuneMapResult,
+  type ConfigMapResult,
   type DecisionPoint,
   type EnvTarget,
   type GateMapResult,
@@ -82,6 +84,7 @@ export function ldFlagState(f: LdFlagSummary): LdFlagState {
       {}) as LdFlagState["customProperties"],
     kind: f.kind ?? null,
     archived: f.archived ?? null,
+    ...(f.variations ? { variations: f.variations.map((v) => ({ value: v.value, name: v.name ?? null })) } : {}),
   };
 }
 
@@ -170,6 +173,10 @@ export function mapSegmentFor(
   });
 }
 
+export function mapConfigFor(snapshot: CanonicalSnapshot, config: Config, env: EnvTarget, i: MappingInputs): ConfigMapResult {
+  return mapConfig({ canonical: { snapshot, idLists: i.idLists }, entity: config, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now });
+}
+
 export function mapAutotuneFor(snapshot: CanonicalSnapshot, autotune: Autotune, env: EnvTarget, i: MappingInputs): AutotuneMapResult {
   return mapAutotune({ canonical: { snapshot, idLists: i.idLists }, entity: autotune, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now });
 }
@@ -184,7 +191,7 @@ export interface DecisionInstance {
 }
 
 /**
- * Every decision across the workspace: all live gates, segments and autotunes, in every mapped environment.
+ * Every decision across the workspace: all live gates, configs, segments and autotunes, in every mapped environment.
  * Open ones come with the environments they apply to; resolved ones with their answer (decision log).
  */
 export function collectDecisions(
@@ -215,6 +222,7 @@ export function collectDecisions(
     for (const env of envTargets(profile, snap, connected)) {
       const results = [
         ...snap.gates.filter((g) => !g.archived).map((g) => mapGateFor(snap, g, env, i)),
+        ...snap.configs.filter((c) => !c.archived).map((c) => mapConfigFor(snap, c, env, i)),
         ...snap.segments.filter((s) => !s.archived).map((s) => mapSegmentFor(snap, s, env, i)),
         ...snap.autotunes.filter((a) => !a.archived).map((a) => mapAutotuneFor(snap, a, env, i)),
       ];
@@ -305,12 +313,15 @@ export async function fetchDeferredIdListsReport(workspaceId: string, sources: S
 /** What the user ticked to migrate: entity uids by kind. */
 export interface MigrationSelection {
   gates: string[];
+  configs?: string[];
   autotunes: string[];
 }
 
 export function describeSelection(sel: MigrationSelection): string {
+  const configs = sel.configs ?? [];
   const parts = [
     sel.gates.length ? `${sel.gates.length} gate${sel.gates.length === 1 ? "" : "s"}` : "",
+    configs.length ? `${configs.length} dynamic config${configs.length === 1 ? "" : "s"}` : "",
     sel.autotunes.length ? `${sel.autotunes.length} autotune${sel.autotunes.length === 1 ? "" : "s"}` : "",
   ].filter(Boolean);
   return parts.join(" and ") || "nothing";
@@ -319,6 +330,7 @@ export function describeSelection(sel: MigrationSelection): string {
 export function buildPlan(input: { selection: MigrationSelection; ldEnvs: string[]; snapshots: CanonicalSnapshot[]; ld: LdSession } & MappingInputs): Plan {
   return planMigration({
     gates: input.selection.gates,
+    configs: input.selection.configs ?? [],
     autotunes: input.selection.autotunes,
     ldEnvs: input.ldEnvs,
     snapshots: input.snapshots,

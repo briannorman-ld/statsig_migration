@@ -4,10 +4,11 @@ import {
   overridesForEnvironment,
   resolveRulesForEnvironment,
   type CanonicalSnapshot,
+  type Config,
   type Gate,
 } from "@sslm/canonical";
 import { LD_INSTANCES } from "@sslm/ld-client";
-import type { DecisionType, GateMapResult } from "@sslm/mapper";
+import type { ConfigMapResult, DecisionType, GateMapResult } from "@sslm/mapper";
 import { migrationStatus, type MigrationStatus } from "@sslm/planner";
 import type { SourceRecord } from "@sslm/store";
 import {
@@ -33,7 +34,7 @@ import {
   Input,
   Select,
 } from "../components/ui.tsx";
-import { ldFlagState, mapGateFor } from "../lib/migration.ts";
+import { ldFlagState, mapConfigFor, mapGateFor, type MappingInputs } from "../lib/migration.ts";
 import type { MigrationContext } from "../lib/useMigration.ts";
 import type { ExplorerNav } from "./AutotunesSideBySide.tsx";
 
@@ -73,21 +74,45 @@ export const STATUS: Record<
 type StatusFilter =
   "all" | "open" | "blocking" | "not_migrated" | "in_sync" | "changed";
 
+/** The two StatSig resources that become plain LD flags: gates (boolean) and dynamic configs (JSON). */
+export type FlagKind = "gate" | "config";
+type FlagEntity = Gate | Config;
+type FlagMapResult = GateMapResult | ConfigMapResult;
+
+const LABEL: Record<FlagKind, { title: string; one: string; many: string }> = {
+  gate: { title: "Gates", one: "gate", many: "gates" },
+  config: { title: "Dynamic configs", one: "config", many: "configs" },
+};
+
+function mapFlagFor(
+  snap: CanonicalSnapshot,
+  entity: FlagEntity,
+  env: { statsig: string; ld: string },
+  i: MappingInputs,
+): FlagMapResult {
+  return entity.kind === "config"
+    ? mapConfigFor(snap, entity, env, i)
+    : mapGateFor(snap, entity, env, i);
+}
+
 interface Row {
   sourceId: string;
-  gate: Gate;
+  gate: FlagEntity;
   shared: number;
   ldEnv: string | null;
-  result: GateMapResult;
+  result: FlagMapResult;
   /** Per LD environment, for the status strip. */
   strip: { ldEnv: string; status: MigrationStatus }[];
 }
 
 /**
- * Side-by-side gates (PLAN §9): StatSig on the left, LD on the right, with the per-environment
- * status strip read from LD provenance, fidelity and open decisions, and the Migrate action.
+ * Side-by-side gates and dynamic configs (PLAN §9): StatSig on the left, LD on the right, with the
+ * per-environment status strip read from LD provenance, fidelity and open decisions, and the
+ * Migrate action. Gates become boolean flags; configs become JSON flags whose variations are the
+ * default value plus every distinct rule value (PLAN §10.1).
  */
-export function GatesSideBySide({
+export function FlagSideBySide({
+  kind,
   sources,
   snapshots,
   env,
@@ -97,11 +122,12 @@ export function GatesSideBySide({
   nav,
   readOnly = false,
 }: {
+  kind: FlagKind;
   sources: SourceRecord[];
   snapshots: Record<string, CanonicalSnapshot | undefined>;
   env: string;
   m: MigrationContext;
-  onMigrate: (gateUids: string[], ldEnvs: string[]) => void;
+  onMigrate: (uids: string[], ldEnvs: string[]) => void;
   onOpenMapping: () => void;
   /** Where the readiness line sends people to fix a missing precondition. */
   nav?: ExplorerNav;
@@ -116,8 +142,9 @@ export function GatesSideBySide({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [targetEnvs, setTargetEnvs] = useState<string[] | null>(null);
   const { ld } = m;
+  const words = LABEL[kind];
   const snaps = sources.map((s) => snapshots[s.id]!).filter(Boolean);
-  const matched = useMemo(() => matchAcrossSources(snaps, "gate"), [snaps]);
+  const matched = useMemo(() => matchAcrossSources(snaps, kind), [snaps, kind]);
   const aliasOf = (sourceId: string) =>
     sources.find((s) => s.id === sourceId)?.alias ?? sourceId;
   const ldFlags = useMemo(
@@ -133,10 +160,10 @@ export function GatesSideBySide({
     () =>
       matched.flatMap((mr) =>
         Object.entries(mr.bySource).map(([sourceId, e]) => {
-          const gate = e as Gate;
+          const gate = e as FlagEntity;
           const snap = snapshots[sourceId]!;
           const ldEnv = ldEnvOf(sourceId, env);
-          const result = mapGateFor(
+          const result = mapFlagFor(
             snap,
             gate,
             { statsig: env, ld: ldEnv ?? env },
@@ -155,7 +182,7 @@ export function GatesSideBySide({
                 const r =
                   se === env
                     ? result
-                    : mapGateFor(snap, gate, { statsig: se, ld: le.key }, m);
+                    : mapFlagFor(snap, gate, { statsig: se, ld: le.key }, m);
                 const f = ldFlags.get(r.flagKey);
                 return {
                   ldEnv: le.key,
@@ -179,7 +206,7 @@ export function GatesSideBySide({
     [matched, snapshots, env, m, ldFlags],
   );
 
-  // Open decision types across all gates, with how many gates raise each: the "decision" filter.
+  // Open decision types across all items, with how many items raise each: the "decision" filter.
   const decisionTypes = useMemo(() => {
     const counts = new Map<DecisionType, number>();
     for (const r of rows)
@@ -188,7 +215,7 @@ export function GatesSideBySide({
     return [...counts.entries()].sort((a, b) => b[1] - a[1]);
   }, [rows]);
 
-  // Once every gate's decision of the filtered type is answered, the filter has nothing to show: fall back to all.
+  // Once every item's decision of the filtered type is answered, the filter has nothing to show: fall back to all.
   useEffect(() => {
     if (
       decisionType !== "all" &&
@@ -228,7 +255,7 @@ export function GatesSideBySide({
   );
   const pager = usePager(visible);
 
-  // Bulk answers for the selection: the open decisions of the selected gates, rolled up by type.
+  // Bulk answers for the selection: the open decisions of the selected items, rolled up by type.
   const selectedRows = useMemo(
     () => rows.filter((r) => selected.has(r.gate.uid)),
     [rows, selected],
@@ -281,7 +308,7 @@ export function GatesSideBySide({
     env,
     mappedHere,
     hasSnapshot: snaps.length > 0,
-    kindLabel: "gates",
+    kindLabel: words.many,
     selected: selected.size,
     blockingSelected: blockingIn(selectedRows),
     blockingAll: blockingIn(visible),
@@ -298,7 +325,7 @@ export function GatesSideBySide({
     <div className="pb-20">
       <div className="mb-3 flex flex-wrap items-center gap-3">
         <h2 className="font-display text-xl font-semibold tracking-tight">
-          Gates
+          {words.title}
         </h2>
         <Badge>{visible.length}</Badge>
         <span className="text-sm text-fg-muted">
@@ -330,7 +357,7 @@ export function GatesSideBySide({
                 setDecisionType(e.target.value as DecisionType | "all")
               }
               aria-label="Filter by open decision"
-              title="Only gates with this decision still open"
+              title={`Only ${words.many} with this decision still open`}
             >
               <option value="all">Any decision</option>
               {decisionTypes.map(([t, n]) => (
@@ -353,7 +380,7 @@ export function GatesSideBySide({
             value={q}
             onChange={(e) => setQ(e.target.value)}
             className="w-48"
-            aria-label="Filter gates"
+            aria-label={`Filter ${words.many}`}
           />
           {!readOnly && (
             <MigrateButton
@@ -361,7 +388,7 @@ export function GatesSideBySide({
               onClick={migrate}
               label={
                 selected.size
-                  ? `Migrate ${selected.size.toLocaleString()} gate${selected.size === 1 ? "" : "s"}…`
+                  ? `Migrate ${selected.size.toLocaleString()} ${selected.size === 1 ? words.one : words.many}…`
                   : "Migrate…"
               }
             />
@@ -380,8 +407,8 @@ export function GatesSideBySide({
       {decisionType !== "all" && selected.size === 0 && !readOnly && (
         <div className="mb-3">
           <Callout tone="blue">
-            Showing the {visible.length.toLocaleString()} gate
-            {visible.length === 1 ? "" : "s"} with an open{" "}
+            Showing the {visible.length.toLocaleString()}{" "}
+            {visible.length === 1 ? words.one : words.many} with an open{" "}
             <b>{TYPE_LABEL[decisionType] ?? decisionType}</b> decision. Tick
             “Select all” to answer it for every one of them at once.
           </Callout>
@@ -399,7 +426,7 @@ export function GatesSideBySide({
           </Callout>
         </div>
       )}
-      <PagerBar pager={pager} label="gates" className="mb-2" />
+      <PagerBar pager={pager} label={words.many} className="mb-2" />
       <Card className="overflow-hidden">
         <table className="w-full table-fixed text-sm">
           <thead className="bg-surface-2 text-left text-xs font-semibold tracking-wide text-fg-muted uppercase">
@@ -409,7 +436,7 @@ export function GatesSideBySide({
                   <input
                     type="checkbox"
                     aria-label="Select all"
-                    title={`Select all ${selectable.length.toLocaleString()} matching gates`}
+                    title={`Select all ${selectable.length.toLocaleString()} matching ${words.many}`}
                     checked={allSelected}
                     onChange={() =>
                       setSelected(
@@ -489,6 +516,14 @@ export function GatesSideBySide({
                         {gate.idType !== "userID" && (
                           <Badge tone="blue">{gate.idType}</Badge>
                         )}
+                        {gate.kind === "config" && gate.schema && (
+                          <Badge
+                            tone="slate"
+                            title="Rule values are schema-validated in StatSig; LD JSON variations are not"
+                          >
+                            schema
+                          </Badge>
+                        )}
                       </div>
                       {gate.description && (
                         <div className="mt-0.5 truncate text-xs text-fg-muted">
@@ -505,6 +540,14 @@ export function GatesSideBySide({
                         {res.rules.length} rule
                         {res.rules.length === 1 ? "" : "s"}
                       </div>
+                      {gate.kind === "config" && (
+                        <div
+                          title="Distinct values besides the default: each becomes an LD variation"
+                        >
+                          {r.shell.variations.length - 1} value
+                          {r.shell.variations.length === 2 ? "" : "s"} + default
+                        </div>
+                      )}
                       {res.dropped.length > 0 && (
                         <div className="text-fg-subtle">
                           {res.dropped.length} not here
@@ -573,15 +616,15 @@ export function GatesSideBySide({
           </tbody>
         </table>
       </Card>
-      <PagerBar pager={pager} label="gates" className="mt-2" />
+      <PagerBar pager={pager} label={words.many} className="mt-2" />
 
       {selected.size > 0 && !readOnly && (
         <div className="fixed right-0 bottom-0 left-72 z-40 border-t border-line bg-surface/95 px-5 py-3 shadow-raised backdrop-blur">
           <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
             <div className="flex items-center gap-3 pt-1">
               <span className="text-sm font-medium">
-                {selected.size.toLocaleString()} gate
-                {selected.size === 1 ? "" : "s"} selected
+                {selected.size.toLocaleString()}{" "}
+                {selected.size === 1 ? words.one : words.many} selected
               </span>
               <button
                 className="text-sm text-fg-muted hover:text-fg"
@@ -594,7 +637,7 @@ export function GatesSideBySide({
             {bulk.rows.length > 0 ? (
               <div className="min-w-0 flex-1">
                 <div className="mb-1.5 text-xs font-semibold tracking-wide text-fg-muted uppercase">
-                  Decide for the selected gates
+                  Decide for the selected {words.many}
                 </div>
                 <div className="flex flex-wrap gap-x-5 gap-y-2">
                   {bulk.rows.map((r) => (
@@ -606,8 +649,8 @@ export function GatesSideBySide({
                         {TYPE_LABEL[r.type] ?? r.type}
                         <span className="ml-1 text-xs text-fg-muted tabular-nums">
                           {r.open.toLocaleString()} in{" "}
-                          {r.openItems.toLocaleString()} gate
-                          {r.openItems === 1 ? "" : "s"}
+                          {r.openItems.toLocaleString()}{" "}
+                          {r.openItems === 1 ? words.one : words.many}
                         </span>
                       </span>
                       <Select
@@ -616,7 +659,7 @@ export function GatesSideBySide({
                           e.target.value &&
                           decideSelected(r.type, e.target.value)
                         }
-                        aria-label={`Decide ${TYPE_LABEL[r.type] ?? r.type} for the selected gates`}
+                        aria-label={`Decide ${TYPE_LABEL[r.type] ?? r.type} for the selected ${words.many}`}
                         className="max-w-xs py-1 text-xs"
                       >
                         <option value="">Choose an answer…</option>
@@ -635,7 +678,7 @@ export function GatesSideBySide({
               </div>
             ) : (
               <span className="pt-1 text-sm text-fg-muted">
-                No open decisions on the selected gates.
+                No open decisions on the selected {words.many}.
               </span>
             )}
 
@@ -739,7 +782,7 @@ function Detail({
   m: MigrationContext;
   env: string;
   res: ReturnType<typeof resolveRulesForEnvironment>;
-  overrides: Gate["overrides"];
+  overrides: FlagEntity["overrides"];
   flagUrl?: string;
   readOnly?: boolean;
 }) {
@@ -756,6 +799,9 @@ function Detail({
             rules={res.rules}
             overrides={overrides}
             enabled={row.gate.enabled}
+            {...(row.gate.kind === "config"
+              ? { config: { defaultValue: row.gate.defaultValue } }
+              : {})}
           />
         </Card>
         <Card className="p-3">

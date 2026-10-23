@@ -615,8 +615,12 @@ function shellPatch(flag: LdFlag, d: Extract<PlanStep, { op: 'upsert_flag_shell'
     const cur = flag.customProperties?.[k];
     if (!cur || JSON.stringify(cur.value ?? []) !== JSON.stringify(v.value)) ops.push({ op: 'add', path: `/customProperties/${pointer(k)}`, value: v });
   }
+  // PLAN §7: variations are append-only. New values are added at the end; nothing is removed or reordered.
   const missing = d.variations.filter((v) => !flag.variations.some((x) => JSON.stringify(x.value) === JSON.stringify(v.value)));
-  if (missing.length) throw new Error(`Flag “${flag.key}” lacks variation${missing.length === 1 ? '' : 's'} ${missing.map((m) => JSON.stringify(m.value)).join(', ')}.`);
+  if (missing.length) {
+    if (flag.kind === 'boolean' || d.variations.every((v) => typeof v.value === 'boolean')) throw new Error(`Flag “${flag.key}” lacks variation${missing.length === 1 ? '' : 's'} ${missing.map((m) => JSON.stringify(m.value)).join(', ')}.`);
+    for (const v of missing) ops.push({ op: 'add', path: '/variations/-', value: { value: v.value, name: v.name } });
+  }
   return ops;
 }
 

@@ -48,7 +48,7 @@ describe('planMigration', () => {
     const blocked = planMigration(request(['new_checkout_flow']));
     expect(blocked.ready).toBe(false);
     expect(blocked.steps).toEqual([]);
-    expect(blocked.decisions.map((d) => d.type).sort()).toEqual(['case_insensitive_match', 'case_insensitive_match', 'case_insensitive_match', 'client_side_availability', 'partial_rollout_rebucket']);
+    expect(blocked.decisions.map((d) => d.type).sort()).toEqual(['case_insensitive_match', 'case_insensitive_match', 'case_insensitive_match', 'client_side_availability', 'holdout_attached', 'partial_rollout_rebucket']);
 
     const plan = planMigration(acceptAll(request(['new_checkout_flow'])));
     expect(plan.ready).toBe(true);

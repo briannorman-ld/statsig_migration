@@ -2,7 +2,7 @@
  * Feature gate → boolean LD flag (PLAN §10). Pure and deterministic: the same inputs always give
  * the same flag, decisions and fingerprints. `now` is an input because `time` conditions depend on it.
  */
-import { fingerprint, overridesForEnvironment, resolveRulesForEnvironment, targetingFingerprint, type CanonicalSnapshot, type Condition, type Gate } from '@sslm/canonical';
+import { fingerprint, overridesForEnvironment, resolveRulesForEnvironment, targetingFingerprint, type CanonicalSnapshot, type Condition, type Gate, type Holdout } from '@sslm/canonical';
 import { ALWAYS, andDnf, MAX_EXPANSION, NEVER, resolveKind, SkipItem, translateCondition, unique, type ConditionContext, type Dnf, type Loc } from './conditions.ts';
 import { DecisionCollector, DROP_CONDITION, DROP_RULE, SKIP } from './decisions.ts';
 import { sanitizeKey, sanitizeTag } from './profile.ts';
@@ -98,6 +98,9 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
   const shell = flagShell(ctx, gate, snapshot.source.alias, flagKey);
   const offEnv: DesiredFlagEnv = { ldEnv: env.ld, statsigEnv: env.statsig, on: false, offVariation: FAIL, fallthrough: { variation: FAIL }, rules: [], targets: [], prerequisites: [] };
   const inline: InlineState = { env, stack: [], inlined: new Map(), cache: new Map() };
+  // Edge case 4.8: the holdouts' shares are part of what the flag depends on in StatSig.
+  const holdouts = attachedHoldouts(snapshot, gate);
+  const holdoutFingerprint = holdouts.map((h) => ({ id: h.id, passPercentage: h.passPercentage, enabled: h.enabled, archived: h.archived }));
 
   const finish = (desired: DesiredFlagEnv, skipped?: string): GateMapResult => ({
     uid: gate.uid,
@@ -111,7 +114,7 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
     applied: decisions.applied,
     stale: decisions.stale,
     dependencies: [...deps.values()].sort((a, b) => `${a.kind}:${a.key}`.localeCompare(`${b.kind}:${b.key}`)),
-    statsigFingerprint: fingerprint({ self: targetingFingerprint(gate, env.statsig), inlined: [...inline.inlined.entries()].sort() }),
+    statsigFingerprint: fingerprint({ self: targetingFingerprint(gate, env.statsig), inlined: [...inline.inlined.entries()].sort(), ...(holdoutFingerprint.length ? { holdouts: holdoutFingerprint } : {}) }),
     decisionSetHash: decisions.setHash(),
     ...(skipped ? { skipped } : {}),
   });
@@ -119,6 +122,7 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
   if (gate.archived) return finish(offEnv, 'archived in StatSig');
 
   try {
+    holdoutsAttached(ctx, gate, holdouts);
     const resolved = resolveRulesForEnvironment(gate.rules, env.statsig);
     for (const d of resolved.dropped) {
       const r = gate.rules.find((x) => x.id === d.ruleId);
@@ -201,7 +205,55 @@ function serveFor(ctx: ConditionContext, gate: Gate, ruleId: string, ruleName: s
   return { rollout: { contextKind: resolveKind(ctx, idType || gate.idType), variations: [{ variation: PASS, weight }, { variation: FAIL, weight: 100_000 - weight }] } };
 }
 
-function expansion(ctx: ConditionContext, ruleId: string, ruleName: string, size: number): Dnf {
+/** The gate's `holdoutIds` resolved against the snapshot, in id order; ids the snapshot lacks are left out. */
+function attachedHoldouts(snapshot: CanonicalSnapshot, gate: Gate): Holdout[] {
+  return [...gate.holdoutIds].sort().flatMap((id) => snapshot.holdouts.filter((h) => h.id === id).slice(0, 1));
+}
+
+/**
+ * Edge case 4.8: a StatSig holdout forces `false` for its share of users before the rules run.
+ * LD has nothing equivalent on a flag (LD holdouts are separate populations, PLAN §11), so each
+ * active holdout is a `holdout_attached` acknowledgement; "skip" keeps the gate in StatSig.
+ */
+function holdoutsAttached(ctx: ConditionContext, gate: Gate, holdouts: Holdout[]): void {
+  for (const id of [...gate.holdoutIds].sort()) {
+    const h = holdouts.find((x) => x.id === id);
+    if (!h) {
+      ctx.fidelity.push({ fidelity: 'partial', message: `Holdout “${id}” is attached but isn't in this StatSig snapshot: its share of users (held out in StatSig) will get the feature in LD.`, location: `holdout “${id}”` });
+      continue;
+    }
+    const name = h.name || h.id;
+    const pct = h.passPercentage;
+    if (h.archived || !h.enabled || pct <= 0) {
+      ctx.fidelity.push({ fidelity: 'full', message: `Holdout “${name}” is ${h.archived ? 'archived' : !h.enabled ? 'disabled' : 'at 0%'} in StatSig, so it holds nobody out; nothing to carry over.`, location: `holdout “${name}”` });
+      continue;
+    }
+    const unit = h.idType || gate.idType;
+    const scope = h.targetingGateId ? ` among users who pass “${h.targetingGateId}”` : '';
+    const choice = ctx.decisions.choose(
+      {
+        type: 'holdout_attached',
+        severity: 'acknowledge',
+        subject: { ...ctx.subject, location: `holdout “${name}”` },
+        path: `holdout:${h.id}`,
+        title: `Holdout “${name}” holds ${pct}% of users out of this gate`,
+        explanation: `StatSig evaluates the ${h.isGlobal ? 'global ' : ''}holdout before the rules: ${pct}% of ${unit}s${scope} get false whatever the rules say. LD has no holdout on a single flag (LD holdouts are separate populations), so the migrated flag has no held-out share.`,
+        sourceFragment: { holdoutId: h.id, passPercentage: pct, isGlobal: h.isGlobal, idType: h.idType, targetingGateId: h.targetingGateId },
+        fingerprintOf: { holdoutId: h.id, passPercentage: pct },
+        options: [
+          { key: 'acknowledge', label: 'Migrate without the holdout', explanation: `${pct}% of users held out in StatSig will get the feature in LD once the flag serves it to them.`, resultingFidelity: 'partial' },
+          { key: 'skip', label: 'Keep the gate in StatSig until the holdout ends', explanation: `Skip this item for now. End or remove the holdout in StatSig, then migrate the gate without it.`, resultingFidelity: 'skipped' },
+        ],
+        recommended: 'acknowledge',
+      },
+      'acknowledge',
+    );
+    if (choice === 'skip') throw new SkipItem(`holdout “${name}” (${pct}%) is still attached in StatSig`);
+    ctx.fidelity.push({ fidelity: 'partial', message: `Holdout “${name}” (${pct}%) is not carried over: users it holds out in StatSig get the feature in LD.`, location: `holdout “${name}”` });
+  }
+}
+
+export function expansion(ctx: ConditionContext, ruleId: string, ruleName: string, size: number): Dnf {
   const choice = ctx.decisions.choose(
     {
       type: 'rule_expansion',
@@ -219,7 +271,7 @@ function expansion(ctx: ConditionContext, ruleId: string, ruleName: string, size
   return NEVER;
 }
 
-interface GateRefOpts {
+export interface GateRefOpts {
   ids: string[];
   negate: boolean;
   c: Condition;
@@ -229,7 +281,7 @@ interface GateRefOpts {
   prerequisites: Set<string>;
 }
 
-function gateReference(ctx: ConditionContext, state: InlineState, o: GateRefOpts): Dnf {
+export function gateReference(ctx: ConditionContext, state: InlineState, o: GateRefOpts): Dnf {
   const results = o.ids.map((id) => ({ id, r: inlineGate(ctx, state, id, o.negate) }));
   const failed = results.filter((x) => !x.r.ok);
   if (failed.length === 0) {
@@ -281,7 +333,7 @@ function gateReference(ctx: ConditionContext, state: InlineState, o: GateRefOpts
 }
 
 /** The gate every rule requires via a single `passes_gate`, if there is one. */
-function commonPassesGate(ruleConditions: Condition[][]): string | null {
+export function commonPassesGate(ruleConditions: Condition[][]): string | null {
   if (ruleConditions.length === 0) return null;
   let common: string | null = null;
   for (const conds of ruleConditions) {

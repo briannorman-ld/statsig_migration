@@ -266,6 +266,20 @@ export function acmeWeb(): ProjectSeed {
         ],
       },
       {
+        id: 'pwa_offline_mode',
+        description: 'Offline mode for PWA shell 1.2+. Two-part version target: StatSig pads it to 1.2.0; LD semver wants three parts (exact after padding).',
+        owner: P.marco,
+        tags: ['growth'],
+        rules: [{ name: 'Shell 1.2+', conditions: [{ type: 'app_version', operator: 'version_gte', targetValue: '1.2' }] }],
+      },
+      {
+        id: 'pos_firmware_sync',
+        description: 'In-store POS sync for firmware 2.1.0.450+. Four-part build version: StatSig compares all four parts; LD semver never matches a four-part string.',
+        owner: P.marco,
+        tags: ['platform'],
+        rules: [{ name: 'Firmware 2.1.0.450+', conditions: [{ type: 'custom_field', field: 'firmware_version', operator: 'version_gte', targetValue: '2.1.0.450' }] }],
+      },
+      {
         id: 'eu_cookie_banner',
         description: 'Cookie consent banner in the EU (country derived from IP). Tagged “★ Core”, which LD tags cannot spell.',
         owner: P.alice,
@@ -486,6 +500,13 @@ export function acmeWeb(): ProjectSeed {
           { name: 'Not full-house', conditions: [{ type: 'custom_field', field: 'interests', operator: 'not_array_contains_all', targetValue: ['fashion', 'home', 'garden'] }] },
         ],
       },
+      {
+        id: 'clearance_category_badge',
+        description: 'Clearance badge for category IDs 12 and 48. Numeric array targets: StatSig matches only numbers in the array; LD `in` is typed too, but apps often send IDs as strings.',
+        owner: P.priya,
+        tags: ['search'],
+        rules: [{ name: 'Clearance categories', conditions: [{ type: 'custom_field', field: 'category_ids', operator: 'array_contains_any', targetValue: [12, 48] }] }],
+      },
       // --- MANUAL condition types --------------------------------------------------------------
       {
         id: 'storefront_url_banner',
@@ -645,6 +666,17 @@ export function acmeWeb(): ProjectSeed {
         tags: ['platform'],
         defaultValue: { message: 'We will be back shortly.', eta_minutes: 30 },
         rules: [],
+      },
+      {
+        id: 'loyalty_checkout_perks',
+        description: 'Checkout perks by account age: a numeric custom_field condition (gte) and a rule after a 25% rollout, which the first matching rule still ends (10.4).',
+        owner: P.marco,
+        tags: ['checkout', 'growth'],
+        defaultValue: { free_gift_wrap: false, priority_support: false },
+        rules: [
+          { name: 'Accounts older than 30 days', conditions: [{ type: 'custom_field', field: 'account_age_days', operator: 'gte', targetValue: 30 }], passPercentage: 25, returnValue: { free_gift_wrap: true, priority_support: false } },
+          { name: 'Gold tier', conditions: [{ type: 'custom_field', field: 'tier', operator: 'any', targetValue: ['gold'] }], returnValue: { free_gift_wrap: true, priority_support: true } },
+        ],
       },
       {
         id: 'legacy_pricing_rules',

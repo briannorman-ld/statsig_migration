@@ -343,16 +343,122 @@ describe('known edge cases (docs/KNOWN-EDGE-CASES.md)', () => {
       expect(types(r)).toContain('unit_type_kind');
     });
 
-    it('gate holdouts are not carried over (known gap: no note yet)', () => {
+    it('4.8: an attached holdout is an acknowledgement with its share, and a partial note', () => {
+      const gate = web.gates.find((g) => g.id === 'new_checkout_flow')!;
+      expect(gate.holdoutIds).toEqual(['checkout_holdout']);
       const r = mapGate(args('new_checkout_flow'));
-      expect(web.gates.find((g) => g.id === 'new_checkout_flow')!.holdoutIds).toEqual(['checkout_holdout']);
-      expect(r.fidelity.notes.some((n) => /holdout/i.test(n.message))).toBe(false);
+      const d = r.unresolved.find((x) => x.type === 'holdout_attached')!;
+      expect(d.severity).toBe('acknowledge');
+      expect(d.id).toBe(`holdout_attached:${gate.uid}:holdout:checkout_holdout`);
+      expect(d.title).toMatch(/5% of users/);
+      expect(d.options.map((o) => o.key)).toEqual(['acknowledge', 'skip']);
+      expect(r.fidelity.overall).toBe('partial');
+      expect(r.fidelity.notes.some((n) => n.fidelity === 'partial' && /Holdout “checkout_holdout” \(5%\) is not carried over/.test(n.message))).toBe(true);
+      // The flag itself is unchanged: the holdout has no LD equivalent on a flag.
+      expect(r.env.rules.map((x) => x.description)).toEqual(['Acme staff', 'Beta testers']);
+    });
+
+    it('4.8: "skip" keeps the gate in StatSig until the holdout ends; the holdout share feeds the fingerprint', () => {
+      const gate = web.gates.find((g) => g.id === 'new_checkout_flow')!;
+      const id = `holdout_attached:${gate.uid}:holdout:checkout_holdout`;
+      const base = mapGate(args('new_checkout_flow'));
+      const fp = base.unresolved.find((x) => x.id === id)!.fingerprint;
+      const resolutions = new Map<string, Resolution>([[id, { id, type: 'holdout_attached', optionKey: 'skip', scope: 'resource', fingerprint: fp, decidedAt: NOW }]]);
+      const skipped = mapGate(args('new_checkout_flow', { resolutions }));
+      expect(skipped.skipped).toMatch(/holdout “checkout_holdout” \(5%\)/);
+
+      const changed: CanonicalSnapshot = { ...web, holdouts: web.holdouts.map((h) => (h.id === 'checkout_holdout' ? { ...h, passPercentage: 10 } : h)) };
+      const r = mapGate(args('new_checkout_flow', { canonical: { snapshot: changed }, resolutions }));
+      expect(r.statsigFingerprint).not.toBe(base.statsigFingerprint);
+      expect(r.stale.map((s) => s.decision.id)).toEqual([id]); // the 5% answer no longer applies to a 10% holdout
+    });
+
+    it('4.8: a holdout id the snapshot lacks is a partial note; a disabled holdout holds nobody out', () => {
+      const gate = web.gates.find((g) => g.id === 'new_checkout_flow')!;
+      const missing = mapGate(args('new_checkout_flow', { entity: { ...gate, holdoutIds: ['gone_holdout'] } }));
+      expect(types(missing)).not.toContain('holdout_attached');
+      expect(missing.fidelity.notes.some((n) => n.fidelity === 'partial' && /“gone_holdout” is attached but isn't in this StatSig snapshot/.test(n.message))).toBe(true);
+
+      const disabled: CanonicalSnapshot = { ...web, holdouts: web.holdouts.map((h) => (h.id === 'checkout_holdout' ? { ...h, enabled: false } : h)) };
+      const r = mapGate(args('new_checkout_flow', { canonical: { snapshot: disabled } }));
+      expect(types(r)).not.toContain('holdout_attached');
+      expect(r.fidelity.notes.some((n) => n.fidelity === 'full' && /is disabled in StatSig/.test(n.message))).toBe(true);
     });
   });
 
   describe('operators', () => {
-    it('numeric `any` targets become strings (known gap: LD `in` is type-strict)', () => {
-      expect(clause(mapGate(args('loyalty_tier_perks')))).toMatchObject({ op: 'in', values: ['2', '3'] });
+    /** Resolutions answering every unresolved decision of `type` on `r` with `optionKey`. */
+    const decide = (r: ReturnType<typeof mapGate>, type: string, optionKey: string): Map<string, Resolution> =>
+      new Map(r.unresolved.filter((d) => d.type === type).map((d) => [d.id, { id: d.id, type: d.type, optionKey, scope: 'resource' as const, fingerprint: d.fingerprint, decidedAt: NOW }]));
+
+    it('6.2: numeric `any` targets raise value_type; "both" (recommended) emits the number and the string', () => {
+      const r = mapGate(args('loyalty_tier_perks'));
+      const d = r.unresolved.find((x) => x.type === 'value_type')!;
+      expect(d.severity).toBe('choice');
+      expect(d.recommended).toBe('both');
+      expect(d.options.map((o) => `${o.key}:${o.resultingFidelity}`)).toEqual(['both:full', 'number:partial', 'string:partial', 'skip:skipped']);
+      expect(clause(r)).toMatchObject({ op: 'in', values: [2, '2', 3, '3'], negate: false });
+      expect(r.fidelity.overall).toBe('full');
+      // No case decision: numbers have no cased letters.
+      expect(types(r)).not.toContain('case_insensitive_match');
+
+      expect(clause(mapGate(args('loyalty_tier_perks', { resolutions: decide(r, 'value_type', 'number') })))).toMatchObject({ values: [2, 3] });
+      const asStrings = mapGate(args('loyalty_tier_perks', { resolutions: decide(r, 'value_type', 'string') }));
+      expect(clause(asStrings)).toMatchObject({ values: ['2', '3'] });
+      expect(asStrings.fidelity.notes.some((n) => n.fidelity === 'partial' && /must be sent as a string/.test(n.message))).toBe(true);
+      expect(mapGate(args('loyalty_tier_perks', { resolutions: decide(r, 'value_type', 'skip') })).skipped).toBeDefined();
+    });
+
+    it('6.5 / 6.2: eq, neq and the case-sensitive variants on numbers or booleans raise value_type; string targets do not', () => {
+      const r = mapGate(
+        args('gift_card_upsell', {
+          entity: withConditions([
+            { operator: 'eq', targetValue: 5 },
+            { operator: 'neq', targetValue: 'trial' },
+            { field: 'opted_in', operator: 'any_case_sensitive', targetValue: [true] },
+            { operator: 'none_case_sensitive', targetValue: ['free'] },
+          ]),
+        }),
+      );
+      expect(r.unresolved.filter((d) => d.type === 'value_type').map((d) => d.subject.location)).toEqual(['rule “Low balance” › condition 1', 'rule “Low balance” › condition 3']);
+      const cs = r.env.rules[0]!.clauses;
+      expect(cs[0]).toMatchObject({ op: 'in', values: [5, '5'], negate: false });
+      expect(cs[1]).toMatchObject({ op: 'in', values: ['trial'], negate: true });
+      expect(cs[2]).toMatchObject({ op: 'in', values: [true, 'true'] });
+      expect(cs[3]).toMatchObject({ op: 'in', values: ['free'], negate: true });
+    });
+
+    it('6.6: numeric operators note that the app must send a number (once per attribute)', () => {
+      const r = mapGate(args('gift_card_upsell'));
+      expect(types(r)).toEqual(['client_side_availability']);
+      const notes = r.fidelity.notes.filter((n) => /must be sent as a number/.test(n.message));
+      expect(notes.map((n) => n.fidelity)).toEqual(['full', 'full']);
+      expect(notes.map((n) => n.message)).toEqual([expect.stringContaining('“gift_card_balance”'), expect.stringContaining('“loyalty_points”')]);
+      expect(r.fidelity.overall).toBe('full');
+    });
+
+    it('6.10: array operators with number targets match numbers only in StatSig, so "number" is exact; integer strings match both', () => {
+      const r = mapGate(args('clearance_category_badge'));
+      const d = r.unresolved.find((x) => x.type === 'value_type')!;
+      expect(d.recommended).toBe('number');
+      expect(d.options.map((o) => `${o.key}:${o.resultingFidelity}`)).toEqual(['both:partial', 'number:full', 'string:partial', 'skip:skipped']);
+      expect(clause(r)).toMatchObject({ op: 'in', values: [12, 48] });
+      const both = mapGate(args('clearance_category_badge', { resolutions: decide(r, 'value_type', 'both') }));
+      expect(clause(both)).toMatchObject({ values: [12, '12', 48, '48'] });
+      expect(both.fidelity.overall).toBe('partial');
+
+      // array_contains_all keeps one clause per target, each accepting both forms.
+      const all = mapGate(args('gift_card_upsell', { entity: withConditions([{ field: 'category_ids', operator: 'array_contains_all', targetValue: ['12', 48] }]) }));
+      expect(all.unresolved.find((x) => x.type === 'value_type')!.recommended).toBe('both');
+      expect(all.env.rules[0]!.clauses.map((c) => c.values)).toEqual([
+        ['12', 12],
+        [48, '48'],
+      ]);
+      // not_array_contains_all: one rule per target, each clause negated over both forms.
+      const notAll = mapGate(args('gift_card_upsell', { entity: withConditions([{ field: 'category_ids', operator: 'not_array_contains_all', targetValue: ['1', '2'] }]) }));
+      expect(notAll.env.rules.map((x) => x.clauses[0])).toEqual([expect.objectContaining({ values: ['1', 1], negate: true }), expect.objectContaining({ values: ['2', 2], negate: true })]);
+      // Plain string arrays need no decision.
+      expect(types(mapGate(args('wishlist_sharing')))).toEqual(['client_side_availability']);
     });
 
     it('encoded_any has no equivalent anywhere and is a blocking decision', () => {
@@ -382,10 +488,43 @@ describe('known edge cases (docs/KNOWN-EDGE-CASES.md)', () => {
       expect(r.unresolved.filter((d) => d.type === 'negated_missing_attribute')).toHaveLength(1);
     });
 
-    it('4-part and prerelease versions pass through unchanged (known gap: not valid LD semver)', () => {
-      const r = mapGate(args('gift_card_upsell', { entity: withConditions([{ type: 'app_version', operator: 'version_gte', targetValue: '5.2.0.100' }]) }));
-      expect(clause(r)).toMatchObject({ attribute: 'appVersion', op: 'semVerLessThan', values: ['5.2.0.100'], negate: true });
-      expect(r.unresolved.map((d) => d.type)).not.toContain('unsupported_condition');
+    it('6.7: a two-part version is padded to semver with a note (exact: StatSig pads too)', () => {
+      const r = mapGate(args('pwa_offline_mode'));
+      expect(clause(r)).toMatchObject({ attribute: 'appVersion', op: 'semVerLessThan', values: ['1.2.0'], negate: true });
+      expect(types(r)).toEqual(['client_side_availability']);
+      expect(r.fidelity.overall).toBe('full');
+      expect(r.fidelity.notes.map((n) => n.message)).toEqual([expect.stringContaining('“1.2” → “1.2.0”')]);
+      // Three-part targets are untouched and silent.
+      expect(mapGate(args('windows_download_cta')).fidelity.notes.some((n) => /semver/i.test(n.message))).toBe(false);
+    });
+
+    it('6.7: a four-part version raises version_format; "truncate" (recommended) compares against three parts', () => {
+      const r = mapGate(args('pos_firmware_sync'));
+      const d = r.unresolved.find((x) => x.type === 'version_format')!;
+      expect(d.severity).toBe('choice');
+      expect(d.title).toBe('Version “2.1.0.450” isn\'t semver');
+      expect(d.options.map((o) => o.key)).toEqual(['truncate', 'drop_condition', 'drop_rule', 'skip']);
+      expect(clause(r)).toMatchObject({ attribute: 'firmware_version', op: 'semVerLessThan', values: ['2.1.0'], negate: true });
+      expect(r.fidelity.overall).toBe('partial');
+      expect(r.fidelity.notes.some((n) => /“2\.1\.0\.450” → “2\.1\.0”/.test(n.message) && /three-part/.test(n.message))).toBe(true);
+
+      // Dropping the only condition leaves a rule that matches everyone: it becomes the fallthrough.
+      const dropped = mapGate(args('pos_firmware_sync', { resolutions: decide(r, 'version_format', 'drop_condition') }));
+      expect(dropped.env).toMatchObject({ rules: [], fallthrough: { variation: 0 } });
+      expect(mapGate(args('pos_firmware_sync', { resolutions: decide(r, 'version_format', 'drop_rule') })).env).toMatchObject({ rules: [], fallthrough: { variation: 1 } });
+      expect(mapGate(args('pos_firmware_sync', { resolutions: decide(r, 'version_format', 'skip') })).skipped).toBeDefined();
+    });
+
+    it('6.7: a prerelease suffix raises version_format too; StatSig strips it, LD sorts it below the release', () => {
+      const r = mapGate(args('gift_card_upsell', { entity: withConditions([{ type: 'app_version', operator: 'version_gte', targetValue: '5.3.0-beta' }]) }));
+      const d = r.unresolved.find((x) => x.type === 'version_format')!;
+      expect(d.explanation).toMatch(/has the suffix “-beta”/);
+      expect(clause(r)).toMatchObject({ op: 'semVerLessThan', values: ['5.3.0'], negate: true });
+      expect(r.fidelity.notes.some((n) => /prerelease builds sort below the release/.test(n.message))).toBe(true);
+      // A single-part target is only padded; a non-numeric one is left alone (StatSig can't compare it either).
+      const odd = mapGate(args('gift_card_upsell', { entity: withConditions([{ type: 'app_version', operator: 'version_eq', targetValue: ['7', 'latest'] }]) }));
+      expect(clause(odd)).toMatchObject({ op: 'semVerEqual', values: ['7.0.0', 'latest'] });
+      expect(types(odd)).not.toContain('version_format');
     });
   });
 

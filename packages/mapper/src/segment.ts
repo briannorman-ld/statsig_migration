@@ -121,6 +121,15 @@ export function mapSegment(args: MapArgs<Segment>): SegmentMapResult {
         );
         if (choice === 'skip') throw new SkipItem(`waiting for the ${r.passPercentage}% rule “${r.name}”`);
         weight = Math.round(r.passPercentage * 1000);
+        // KNOWN-EDGE-CASES 9.13: StatSig stops at the first matching rule (users outside the percentage
+        // fail the segment); LD lets them continue to the next segment rule.
+        const later = rules.slice(rules.indexOf(r) + 1).filter((x) => x.passPercentage > 0).length;
+        if (later > 0)
+          ctx.fidelity.push({
+            fidelity: 'partial',
+            message: `Users matching “${r.name}” but outside its ${r.passPercentage}% fail the segment in StatSig; in LD they go on to the ${later} later rule${later === 1 ? '' : 's'} and may match there.`,
+            location: `rule “${r.name}”`,
+          });
       }
       for (const [k, term] of dnf.entries()) {
         // LD segment rules need a clause; "everyone of this kind" is a match-anything key regex.

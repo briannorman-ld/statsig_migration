@@ -1,19 +1,21 @@
 /**
- * The planner (PLAN §9 "Migrate flow" step 2, §10.4, §11): selected gates and autotunes × LD
- * environments → dependency closure (segments, context kinds, prerequisite gates, metrics,
- * randomization units), collision checks against what's already in LD, and an ordered list of
- * idempotent steps. Pure: LD state is an input.
+ * The planner (PLAN §9 "Migrate flow" step 2, §10.4, §11): selected gates, dynamic configs and
+ * autotunes × LD environments → dependency closure (segments, context kinds, prerequisite gates,
+ * metrics, randomization units), collision checks against what's already in LD, and an ordered
+ * list of idempotent steps. Pure: LD state is an input.
  */
-import type { Autotune, CanonicalSnapshot, Gate } from '@sslm/canonical';
+import { stableStringify, type Autotune, type CanonicalSnapshot, type Config, type Gate } from '@sslm/canonical';
 import {
   decisionPoint,
   lookupResolution,
   mapAutotune,
+  mapConfig,
   mapGate,
   mapSegment,
   sourceTag,
   TAG_MIGRATED,
   type AutotuneMapResult,
+  type ConfigMapResult,
   type DecisionPoint,
   type DesiredBandit,
   type DesiredFlagEnv,
@@ -36,6 +38,8 @@ export interface LdFlagState {
   customProperties: Record<string, { name?: string | null; value?: string[] | null }>;
   kind?: string | null;
   archived?: boolean | null;
+  /** The flag's variations, when the LD read included them (append-only guard, PLAN §7). */
+  variations?: { value: unknown; name?: string | null }[] | null;
 }
 
 export interface LdSegmentState {
@@ -78,6 +82,8 @@ export interface LdProjectState {
 export interface PlanRequest {
   /** Gate uids to migrate. */
   gates: string[];
+  /** Dynamic config uids to migrate (JSON multivariate flags, PLAN §10.1). */
+  configs?: string[];
   /** Autotune uids to migrate (PLAN §11: flag + metric + drafted bandit). */
   autotunes?: string[];
   ldEnvs: string[];
@@ -92,7 +98,7 @@ export interface PlanRequest {
 
 export interface Provenance {
   sourceAlias: string;
-  statsigType: 'gate' | 'autotune';
+  statsigType: 'gate' | 'config' | 'autotune';
   statsigId: string;
   statsigVersion?: number;
   statsigFingerprint: string;
@@ -123,7 +129,7 @@ export type ItemStatus = 'ready' | 'blocked' | 'skipped' | 'error';
 
 export interface PlanItem {
   uid: string;
-  kind: 'gate' | 'segment' | 'autotune' | 'metric';
+  kind: 'gate' | 'config' | 'segment' | 'autotune' | 'metric';
   entityId: string;
   sourceId: string;
   ldKey: string;
@@ -303,11 +309,12 @@ export function planMigration(req: PlanRequest): Plan {
     item.exists = !!ldFlag;
     let adopt = false;
     const other = shellOwner.get(r.flagKey);
-    if (other && other !== gate.uid) return finishItem(item, 'error', `two StatSig sources both produce LD key “${r.flagKey}” (consolidation arrives in M8; migrate one source at a time)`);
+    if (other && other !== gate.uid) return finishItem(item, 'error', `${describeOwner(other)} also produces LD key “${r.flagKey}” (${other.includes('/config/') ? 'StatSig keeps gates and configs in separate namespaces, LD has one key space' : 'consolidation arrives in M8; migrate one source at a time'})`);
     shellOwner.set(r.flagKey, gate.uid);
     if (ldFlag) {
       const owner = flagOwner(ldFlag);
       if (owner && (owner.id !== gate.id || owner.source !== snapshot.source.alias)) return finishItem(item, 'error', `LD flag “${r.flagKey}” was migrated from ${owner.source}/${owner.id}; consolidation arrives in M8`);
+      if (owner && owner.type && owner.type !== 'gate') return finishItem(item, 'error', `LD flag “${r.flagKey}” was migrated from the StatSig ${owner.type} of the same name (gates and configs share one LD key space)`);
       if (ldFlag.kind && ldFlag.kind !== 'boolean') return finishItem(item, 'error', `LD flag “${r.flagKey}” exists and is not a boolean flag`);
       if (!owner) {
         const c = collision(item, { sourceId: gate.source.sourceId, kind: 'gate', uid: gate.uid, id: gate.id }, r.flagKey, 'flag', 'flag key');
@@ -355,6 +362,121 @@ export function planMigration(req: PlanRequest): Plan {
       provenance: { sourceAlias: snapshot.source.alias, statsigType: 'gate', statsigId: gate.id, ...(gate.version !== undefined ? { statsigVersion: gate.version } : {}), statsigFingerprint: r.statsigFingerprint, decisionSetHash: r.decisionSetHash },
     });
     return { ok: true, stepId };
+  };
+
+  /**
+   * PLAN §7 "variations are append-only": a flag the app owns keeps every variation it has; new
+   * values are appended by the executor. Appending to a flag whose other environments are already
+   * migrated is a project-level change those environments see, so it is acknowledged first.
+   */
+  const variationGuard = (item: PlanItem, subject: DecisionPoint['subject'], ldFlag: LdFlagState, desired: DesiredFlagShell, ldEnv: string): 'ok' | 'skip' | 'open' => {
+    if (!ldFlag.variations) return 'ok';
+    const have = new Set(ldFlag.variations.map((v) => stableStringify(v.value)));
+    const added = desired.variations.filter((v) => !have.has(stableStringify(v.value)));
+    if (added.length === 0) return 'ok';
+    const migratedElsewhere = Object.keys(ldFlag.customProperties)
+      .filter((k) => k.startsWith('statsig.sync.') && (ldFlag.customProperties[k]?.value?.length ?? 0) > 0)
+      .map((k) => k.slice('statsig.sync.'.length))
+      .filter((e) => e !== ldEnv && !req.ldEnvs.includes(e));
+    if (migratedElsewhere.length === 0) return 'ok';
+    const dp = decisionPoint({
+      type: 'variation_change_affects_migrated_env',
+      severity: 'acknowledge',
+      subject: { ...subject, location: 'variations' },
+      path: `variations:${desired.key}:${added.map((v) => stableStringify(v.value)).join('|')}`,
+      title: `New value${added.length === 1 ? '' : 's'} ${added.map((v) => `“${v.name}”`).join(', ')} for a flag already migrated to ${migratedElsewhere.join(', ')}`,
+      explanation: `LD variations are project-level. Appending ${added.length === 1 ? 'this variation' : 'these variations'} to “${desired.key}” is visible in ${migratedElsewhere.join(', ')}, where nothing serves ${added.length === 1 ? 'it' : 'them'} until that environment is synced again. Existing variations are never removed or reordered.`,
+      sourceFragment: { key: desired.key, added: added.map((v) => v.value), migratedEnvironments: migratedElsewhere },
+      fingerprintOf: { added: added.map((v) => v.value), migratedElsewhere },
+      options: [
+        { key: 'acknowledge', label: 'Append the new variations', explanation: 'The flag gains the new values; other environments keep serving what they serve today.', resultingFidelity: 'full' },
+        { key: 'skip', label: 'Skip this item', explanation: 'Leave the LD flag unchanged for now.', resultingFidelity: 'skipped' },
+      ],
+      recommended: 'acknowledge',
+    });
+    const l = lookupResolution(dp, req.resolutions, req.profile);
+    if (l.status === 'resolved') return l.optionKey === 'acknowledge' ? 'ok' : 'skip';
+    addDecisions(item, [dp], l.stale ? [{ decision: dp, previous: l.stale }] : []);
+    return 'open';
+  };
+
+  const planConfig = (config: Config, ldEnv: string): void => {
+    const itemKey = `${config.uid}|${ldEnv}`;
+    if (items.has(itemKey)) return;
+    const snapshot = snapshotOf.get(config.source.sourceId)!;
+    const statsigEnv = envFor(config.source.sourceId, ldEnv);
+    const item: PlanItem = { uid: config.uid, kind: 'config', entityId: config.id, sourceId: config.source.sourceId, ldKey: config.id, ldEnv, status: 'ready', dependency: false, requiredBy: [], decisions: [], exists: false };
+    items.set(itemKey, item);
+    if (!statsigEnv) return void finishItem(item, 'error', `no StatSig environment of ${snapshot.source.alias} is mapped to LD “${ldEnv}”`);
+    item.statsigEnv = statsigEnv;
+
+    const r: ConfigMapResult = mapConfig({ canonical: { snapshot, idLists: req.idLists }, entity: config, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
+    item.ldKey = r.flagKey;
+    item.fidelity = r.fidelity;
+    addDecisions(item, r.unresolved, r.stale);
+    if (r.skipped) return void finishItem(item, 'skipped', r.skipped);
+
+    // Ownership guard (PLAN §15), the gate ↔ config key space (KNOWN-EDGE-CASES 1.2 / 10.8) and consolidation collisions (§12, M8).
+    const ldFlag = req.ld.flags.get(r.flagKey);
+    item.exists = !!ldFlag;
+    let adopt = false;
+    const other = shellOwner.get(r.flagKey);
+    if (other && other !== config.uid) return void finishItem(item, 'error', `${describeOwner(other)} also produces LD key “${r.flagKey}”: StatSig keeps gates and configs in separate namespaces, LD has one key space. Rename one in StatSig or migrate one at a time.`);
+    shellOwner.set(r.flagKey, config.uid);
+    if (ldFlag) {
+      const owner = flagOwner(ldFlag);
+      if (owner && (owner.id !== config.id || owner.source !== snapshot.source.alias)) return void finishItem(item, 'error', `LD flag “${r.flagKey}” was migrated from ${owner.source}/${owner.id}; consolidation arrives in M8`);
+      if (owner && owner.type && owner.type !== 'config') return void finishItem(item, 'error', `LD flag “${r.flagKey}” was migrated from the StatSig ${owner.type} of the same name (gates and configs share one LD key space)`);
+      if (ldFlag.kind && ldFlag.kind !== 'multivariate') return void finishItem(item, 'error', `LD flag “${r.flagKey}” exists and is not a multivariate (JSON) flag`);
+      if (!owner) {
+        const c = collision(item, { sourceId: config.source.sourceId, kind: 'config', uid: config.uid, id: config.id }, r.flagKey, 'flag', 'flag key');
+        if (c === 'skip') return void finishItem(item, 'skipped', `LD flag “${r.flagKey}” exists and was not adopted`);
+        if (c === 'open') return void finishItem(item, 'blocked', `LD flag “${r.flagKey}” already exists`);
+        adopt = true;
+      } else {
+        const g = variationGuard(item, { sourceId: config.source.sourceId, kind: 'config', uid: config.uid, id: config.id }, ldFlag, r.shell, ldEnv);
+        if (g === 'skip') return void finishItem(item, 'skipped', `new variations for “${r.flagKey}” were not appended`);
+        if (g === 'open') return void finishItem(item, 'blocked', `new variations affect environments already migrated`);
+      }
+    }
+
+    // Dependencies in the same environment.
+    const depSteps: string[] = ensureKinds(r.dependencies);
+    const depProblems: string[] = [];
+    for (const d of r.dependencies) {
+      if (d.kind === 'segment') {
+        const s = planSegment(snapshot, d.entityId ?? d.key, statsigEnv, ldEnv, config.uid);
+        if (s.ok && s.stepId) depSteps.push(s.stepId);
+        else depProblems.push(s.reason ?? `segment ${d.key}`);
+      } else if (d.kind === 'flag') {
+        const ref = snapshot.gates.find((g) => g.id === d.entityId);
+        if (!ref) {
+          depProblems.push(`prerequisite gate “${d.entityId}” not found`);
+          continue;
+        }
+        const p = planGate(ref, ldEnv, config.uid, [config.uid]);
+        if (p.ok && p.stepId) depSteps.push(p.stepId);
+        else depProblems.push(`prerequisite ${p.reason ?? d.key}`);
+      }
+    }
+
+    if (r.unresolved.length) return void finishItem(item, 'blocked', `${r.unresolved.length} open decision${r.unresolved.length === 1 ? '' : 's'}`);
+    if (depProblems.length) return void finishItem(item, 'blocked', `depends on: ${depProblems.join('; ')}`);
+
+    const shellId = `shell:${r.flagKey}`;
+    if (!steps.has(shellId)) steps.set(shellId, { id: shellId, deps: [], op: 'upsert_flag_shell', key: r.flagKey, exists: !!ldFlag, adopt, desired: r.shell });
+    const stepId = `env:${ldEnv}:${r.flagKey}`;
+    steps.set(stepId, {
+      id: stepId,
+      deps: [shellId, ...depSteps],
+      op: 'update_flag_env',
+      key: r.flagKey,
+      ldEnv,
+      statsigEnv,
+      variations: r.shell.variations.map((v) => v.value),
+      desired: r.env,
+      provenance: { sourceAlias: snapshot.source.alias, statsigType: 'config', statsigId: config.id, ...(config.version !== undefined ? { statsigVersion: config.version } : {}), statsigFingerprint: r.statsigFingerprint, decisionSetHash: r.decisionSetHash },
+    });
   };
 
   // Metrics are project-level, like flag shells: one step per key, shared across environments.
@@ -433,7 +555,7 @@ export function planMigration(req: PlanRequest): Plan {
     let adopt = false;
     const other = shellOwner.get(r.flagKey);
     if (other && other !== a.uid) {
-      finishItem(item, 'error', `two StatSig items both produce LD key “${r.flagKey}” (consolidation arrives in M8; migrate one source at a time)`);
+      finishItem(item, 'error', `${describeOwner(other)} also produces LD key “${r.flagKey}” (consolidation arrives in M8; migrate one source at a time)`);
       return;
     }
     shellOwner.set(r.flagKey, a.uid);
@@ -498,7 +620,13 @@ export function planMigration(req: PlanRequest): Plan {
     }
   };
 
+  const configsByUid = new Map(req.snapshots.flatMap((s) => s.configs.map((c) => [c.uid, c] as const)));
   const autotunesByUid = new Map(req.snapshots.flatMap((s) => s.autotunes.map((a) => [a.uid, a] as const)));
+  /** "gate new_checkout_flow" for an error about the other item owning a key: uids are `<sourceId>/<kind>/<id>`. */
+  const describeOwner = (uid: string): string => {
+    const [, kind, ...rest] = uid.split('/');
+    return `${kind ?? 'item'} “${rest.join('/') || uid}”`;
+  };
   for (const ldEnv of req.ldEnvs) {
     for (const uid of req.gates) {
       const gate = gatesByUid.get(uid);
@@ -507,6 +635,14 @@ export function planMigration(req: PlanRequest): Plan {
         continue;
       }
       planGate(gate, ldEnv, null, []);
+    }
+    for (const uid of req.configs ?? []) {
+      const config = configsByUid.get(uid);
+      if (!config) {
+        errors.push(`Dynamic config ${uid} is not in the current snapshots.`);
+        continue;
+      }
+      planConfig(config, ldEnv);
     }
     for (const uid of req.autotunes ?? []) {
       const a = autotunesByUid.get(uid);
@@ -586,11 +722,12 @@ export function topoSort(steps: PlanStep[], errors: string[]): PlanStep[] {
   return out;
 }
 
-export function flagOwner(f: LdFlagState): { id: string; source: string } | null {
+export function flagOwner(f: LdFlagState): { id: string; source: string; type?: string } | null {
   if (!f.tags.includes(TAG_MIGRATED)) return null;
   const id = f.customProperties['statsig.id']?.value?.[0];
   const source = f.customProperties['statsig.source']?.value?.[0];
-  return id && source ? { id, source } : null;
+  const type = f.customProperties['statsig.type']?.value?.[0];
+  return id && source ? { id, source, ...(type ? { type } : {}) } : null;
 }
 
 /** Segments, metrics and experiments have no custom properties: ownership is the pair of tags. */

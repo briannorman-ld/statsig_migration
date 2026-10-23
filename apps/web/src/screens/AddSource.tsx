@@ -81,7 +81,10 @@ export function AddSource({ workspaceId, onDone }: { workspaceId: string; onDone
             <div>
               <Label htmlFor="src-key">Console API key (read-only)</Label>
               <Input id="src-key" type="password" autoComplete="off" spellCheck={false} placeholder="console-…" value={key} onChange={(e) => setKey(e.target.value)} />
-              <p className="mt-1.5 text-xs text-fg-muted">Kept in memory only and sent only to statsigapi.net.</p>
+              <p className="mt-1.5 text-xs text-fg-muted">
+                Kept in memory only and sent only to statsigapi.net. A Console API key belongs to <b>one StatSig project</b> (StatSig has no API that lists an
+                organization’s projects), so add one source per project; several sources consolidate into this workspace’s single LaunchDarkly project.
+              </p>
             </div>
             <fieldset>
               <legend className="mb-1.5 text-xs font-semibold tracking-wide text-fg-muted uppercase">Resources to read</legend>

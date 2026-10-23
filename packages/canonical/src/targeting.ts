@@ -1,5 +1,5 @@
 import { overridesForEnvironment, resolveRulesForEnvironment, toArray } from './environment.ts';
-import { fingerprint } from './hash.ts';
+import { fingerprint, stableStringify } from './hash.ts';
 import type { Condition, Config, Gate, Override, Rule, Segment } from './model.ts';
 
 /** Operators whose target is a set of values (order-insensitive). */
@@ -108,7 +108,7 @@ export function normalizeCondition(c: Condition): NormalizedCondition {
 function normalizeOverrides(overrides: Override[]): EffectiveTargeting['overrides'] {
   const groups = new Map<string, { unitType: string; value: string; ids: Set<string> }>();
   for (const o of overrides) {
-    const value = o.value.kind === 'gate' ? (o.value.pass ? 'pass' : 'fail') : `group:${o.value.groupName ?? o.value.groupId}`;
+    const value = o.value.kind === 'gate' ? (o.value.pass ? 'pass' : 'fail') : o.value.kind === 'value' ? `value:${stableStringify(o.value.returnValue)}` : `group:${o.value.groupName ?? o.value.groupId}`;
     const unitType = o.unitType.toLowerCase();
     const key = `${unitType}|${value}`;
     const g = groups.get(key) ?? { unitType, value, ids: new Set<string>() };

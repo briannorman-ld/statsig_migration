@@ -172,6 +172,9 @@ export interface DesiredBandit {
 // ---------------------------------------------------------------------------------------------
 
 export type DecisionType =
+  | 'holdout_attached'
+  | 'value_type'
+  | 'version_format'
   | 'case_insensitive_match'
   | 'negated_missing_attribute'
   | 'partial_rollout_rebucket'
@@ -192,7 +195,8 @@ export type DecisionType =
   | 'rule_expansion'
   | 'autotune_running'
   | 'missing_metric'
-  | 'duplicate_variant_value';
+  | 'duplicate_variant_value'
+  | 'variation_change_affects_migrated_env';
 
 /**
  * - blocking: no safe default; the item can't migrate until resolved.

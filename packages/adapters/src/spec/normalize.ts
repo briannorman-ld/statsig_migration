@@ -239,7 +239,7 @@ export function normalizeSpec(parsed: ParsedSpec, opts: NormalizeSpecOptions): C
       continue;
     }
     if (entity !== 'dynamic_config') warn({ code: 'unknown_entity', path, message: `Unknown config entity "${entity}"; treated as a dynamic config.` });
-    const { overrides, rest } = splitOverrides(s.rules, idType, conv, path);
+    const { overrides, rest } = splitOverrides(s.rules, idType, conv, path, 'config');
     const holdoutIds: string[] = [];
     const plain: DcsRule[] = [];
     for (const r of rest) {
@@ -310,7 +310,7 @@ type ToRule = (r: DcsRule, idType: string, path: string, returnValue: unknown) =
  * passPercentage (100 = pass, 0 = fail); unit type from the ID condition; environment from an
  * `environment_field` condition, or from the `<pass|fail>:<env>:…` rule ID.
  */
-function splitOverrides(rules: DcsRule[], idType: string, conv: Conv, path: string): { overrides: Override[]; rest: DcsRule[] } {
+function splitOverrides(rules: DcsRule[], idType: string, conv: Conv, path: string, entity: 'gate' | 'config' = 'gate'): { overrides: Override[]; rest: DcsRule[] } {
   const overrides: Override[] = [];
   const rest: DcsRule[] = [];
   for (const [ri, r] of rules.entries()) {
@@ -326,7 +326,12 @@ function splitOverrides(rules: DcsRule[], idType: string, conv: Conv, path: stri
     const envFromId = idParts.length >= 3 && (idParts[0] === 'pass' || idParts[0] === 'fail') && idParts[1] !== 'all' ? idParts[1]! : null;
     const environment = envCond ? String(toArr(envCond.targetValue)[0]) : envFromId;
     const ids = toArr(idCond?.targetValue).map(String);
-    const value: Override['value'] = r.groupName ? { kind: 'group', groupName: r.groupName } : { kind: 'gate', pass: r.passPercentage >= 100 };
+    // A config's override rule carries the forced value in `returnValue` (a passing gate override carries `true`).
+    const value: Override['value'] = r.groupName
+      ? { kind: 'group', groupName: r.groupName }
+      : entity === 'config' && r.passPercentage >= 100 && r.returnValue !== undefined && r.returnValue !== true
+        ? { kind: 'value', returnValue: r.returnValue }
+        : { kind: 'gate', pass: r.passPercentage >= 100 };
     overrides.push({ unitType, ids, value, environment });
   }
   return { overrides, rest };

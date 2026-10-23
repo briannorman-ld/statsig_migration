@@ -228,8 +228,8 @@ export interface Override {
   /** `userID` or a custom unit type. */
   unitType: string;
   ids: string[];
-  /** Gates: pass/fail. Experiments: the forced group. */
-  value: { kind: 'gate'; pass: boolean } | { kind: 'group'; groupId?: string; groupName?: string };
+  /** Gates: pass/fail. Experiments: the forced group. Configs (spec sources only): the forced value. */
+  value: { kind: 'gate'; pass: boolean } | { kind: 'group'; groupId?: string; groupName?: string } | { kind: 'value'; returnValue: unknown };
   /** `null` = all environments. */
   environment: string | null;
 }

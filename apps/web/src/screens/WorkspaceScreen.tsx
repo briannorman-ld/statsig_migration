@@ -28,6 +28,7 @@ import {
 import { describeScope, KIND_LABEL } from "../lib/kinds.ts";
 import { timeAgo } from "../lib/time.ts";
 import { useLdSession } from "../lib/ld.ts";
+import { openReverseMigration, useLdToss } from "../lib/ldtoss.ts";
 import { secrets } from "../lib/secrets.ts";
 import {
   collectDecisions,
@@ -41,9 +42,10 @@ import { useMigration } from "../lib/useMigration.ts";
 import { AddSource } from "./AddSource.tsx";
 import { AutotunesSideBySide } from "./AutotunesSideBySide.tsx";
 import { ConnectionsView } from "./ConnectionsView.tsx";
+import { CoverageView } from "./CoverageView.tsx";
 import { DecisionsView } from "./DecisionsView.tsx";
 import { EntityList } from "./EntityList.tsx";
-import { GatesSideBySide } from "./GatesSideBySide.tsx";
+import { FlagSideBySide } from "./GatesSideBySide.tsx";
 import { LdPanel } from "./LdPanel.tsx";
 import { MappingView } from "./MappingView.tsx";
 import { MigrateModal } from "./MigrateModal.tsx";
@@ -60,7 +62,8 @@ export type View =
   | { kind: "decisions" }
   | { kind: "mapping" }
   | { kind: "runs" }
-  | { kind: "snapshots"; sourceId?: string };
+  | { kind: "snapshots"; sourceId?: string }
+  | { kind: "coverage"; focus?: string };
 
 interface SyncState {
   running: boolean;
@@ -131,6 +134,7 @@ export function WorkspaceScreen({
   const [sync, setSync] = useState<Record<string, SyncState>>({});
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const ld = useLdSession(workspaceId);
+  const toss = useLdToss();
   const autoSynced = useRef(new Set<string>());
   const [migrate, setMigrate] = useState<{
     selection: MigrationSelection;
@@ -436,6 +440,14 @@ export function WorkspaceScreen({
                       </span>
                     ) : sn ? (
                       <>
+                        {sn.projectName && (
+                          <span
+                            className="block truncate"
+                            title={`StatSig project “${sn.projectName}” (one Console key reads one project)`}
+                          >
+                            project {sn.projectName}
+                          </span>
+                        )}
                         synced {timeAgo(sn.takenAt)}
                         {sn.isWarehouseNative ? " · Warehouse Native" : ""}
                       </>
@@ -533,6 +545,18 @@ export function WorkspaceScreen({
               <span className="text-fg-muted tabular-nums">{runs.length}</span>
             ) : null}
           </NavItem>
+          <NavItem
+            active={view.kind === "coverage"}
+            onClick={() => setView({ kind: "coverage" })}
+          >
+            <span>What migrates</span>
+          </NavItem>
+          {toss && (
+            <NavItem active={false} onClick={openReverseMigration}>
+              <span>Migrate to StatSig</span>
+              <Badge tone="violet">beta</Badge>
+            </NavItem>
+          )}
 
           <SectionTitle>Workspace</SectionTitle>
           <NavItem
@@ -565,8 +589,15 @@ export function WorkspaceScreen({
             {viewingPast && <Badge tone="amber">past</Badge>}
           </NavItem>
           <p className="mt-6 px-2 text-xs text-fg-subtle">
-            Gates, their segments and autotunes (as drafted bandits) migrate now.
-            Configs, big segments and approvals arrive in M4.
+            Gates, dynamic configs, segments and autotunes (as drafted bandits)
+            migrate now.{" "}
+            <button
+              type="button"
+              className="text-link hover:underline"
+              onClick={() => setView({ kind: "coverage" })}
+            >
+              See what else migrates, and what doesn’t.
+            </button>
           </p>
         </nav>
 
@@ -606,16 +637,23 @@ export function WorkspaceScreen({
             )}
           {view.kind === "resource" &&
             visible.length > 0 &&
-            (view.resource === "gate" ? (
+            (view.resource === "gate" || view.resource === "config" ? (
               m && (
-                <GatesSideBySide
+                <FlagSideBySide
+                  kind={view.resource}
                   sources={visible}
                   snapshots={snapshots ?? {}}
                   env={env}
                   m={m}
                   readOnly={viewingPast}
-                  onMigrate={(gates, ldEnvs) =>
-                    setMigrate({ selection: { gates, autotunes: [] }, ldEnvs })
+                  onMigrate={(uids, ldEnvs) =>
+                    setMigrate({
+                      selection:
+                        view.resource === "config"
+                          ? { gates: [], configs: uids, autotunes: [] }
+                          : { gates: uids, autotunes: [] },
+                      ldEnvs,
+                    })
                   }
                   onOpenMapping={() => setView({ kind: "mapping" })}
                   nav={explorerNav}
@@ -717,6 +755,16 @@ export function WorkspaceScreen({
           )}
           {view.kind === "ld" && (
             <LdPanel workspaceId={workspaceId} workspace={workspace} />
+          )}
+          {view.kind === "coverage" && (
+            <CoverageView
+              sources={sources ?? []}
+              snapshots={snapshots ?? {}}
+              focus={view.focus}
+              onOpenResource={(resource) =>
+                setView({ kind: "resource", resource })
+              }
+            />
           )}
           {view.kind === "warnings" && (
             <WarningsView

@@ -93,6 +93,8 @@ export const FlagSummarySchema = z.looseObject({
   temporary: optBool,
   customProperties: z.record(z.string(), z.looseObject({ name: optStr, value: z.array(z.string()).nullish() })).nullish(),
   environments: z.record(z.string(), z.looseObject({ on: optBool, _environmentName: optStr, lastModified: optNum, version: optNum })).nullish(),
+  /** Present when the listing isn't a summary (the planner's append-only guard uses it when available). */
+  variations: z.array(z.looseObject({ _id: optStr, value: z.unknown(), name: optStr })).nullish(),
   _version: optNum,
 });
 export const FlagsSchema = z.looseObject({ items: z.array(FlagSummarySchema), totalCount: optNum });

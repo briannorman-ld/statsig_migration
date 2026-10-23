@@ -6,6 +6,9 @@ export const SEVERITY_TONE: Record<Severity, 'red' | 'amber' | 'blue'> = { block
 export const FIDELITY_TONE: Record<Fidelity, 'green' | 'amber' | 'violet' | 'slate'> = { full: 'green', partial: 'amber', manual: 'violet', skipped: 'slate' };
 
 export const TYPE_LABEL: Record<string, string> = {
+  holdout_attached: 'Holdout attached in StatSig',
+  value_type: 'Typed values (number vs string)',
+  version_format: 'Version is not semver',
   case_insensitive_match: 'Case-insensitive match',
   negated_missing_attribute: 'Missing attribute on a negative operator',
   partial_rollout_rebucket: 'Partial rollout re-bucketing',
@@ -27,6 +30,7 @@ export const TYPE_LABEL: Record<string, string> = {
   autotune_running: 'Autotune running in StatSig',
   missing_metric: 'No success event for the bandit',
   duplicate_variant_value: 'Variants with identical values',
+  variation_change_affects_migrated_env: 'New variation on a migrated flag',
 };
 
 /**

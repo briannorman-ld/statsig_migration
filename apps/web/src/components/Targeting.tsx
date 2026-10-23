@@ -2,14 +2,20 @@ import type { Condition, Override, Rule } from '@sslm/canonical';
 import type { DesiredFlagEnv, LdClause, VariationOrRollout } from '@sslm/mapper';
 import { Badge } from './ui.tsx';
 
-/** StatSig rules after environment filtering, in plain language (left side of the rules diff, PLAN §9). */
-export function StatsigRules({ rules, overrides, enabled }: { rules: Rule[]; overrides: Override[]; enabled: boolean }) {
+/**
+ * StatSig rules after environment filtering, in plain language (left side of the rules diff, PLAN §9).
+ * With `config`, rules show the value they return (first matching rule wins; outside its pass
+ * percentage the default is served, KNOWN-EDGE-CASES 10.4) instead of pass / fail.
+ */
+export function StatsigRules({ rules, overrides, enabled, config }: { rules: Rule[]; overrides: Override[]; enabled: boolean; config?: { defaultValue: unknown } }) {
+  const fallback = config ? <Value v={config.defaultValue} /> : 'fail';
   return (
     <div className="space-y-1.5 text-xs">
-      {!enabled && <Badge tone="red">gate disabled: everyone fails</Badge>}
+      {!enabled && <Badge tone="red">{config ? 'config disabled: everyone gets the default' : 'gate disabled: everyone fails'}</Badge>}
       {overrides.map((o, i) => (
         <Line key={`o${i}`} label="override">
-          {o.ids.length} {o.unitType} ID{o.ids.length === 1 ? '' : 's'} → <b>{o.value.kind === 'gate' ? (o.value.pass ? 'pass' : 'fail') : o.value.groupName}</b>
+          {o.ids.length} {o.unitType} ID{o.ids.length === 1 ? '' : 's'} →{' '}
+          <b>{o.value.kind === 'gate' ? (config ? (o.value.pass ? 'pass (no value)' : fallback) : o.value.pass ? 'pass' : 'fail') : o.value.kind === 'value' ? <Value v={o.value.returnValue} /> : o.value.groupName}</b>
           {o.environment && <span className="text-fg-subtle"> ({o.environment} only)</span>}
         </Line>
       ))}
@@ -22,13 +28,65 @@ export function StatsigRules({ rules, overrides, enabled }: { rules: Rule[]; ove
             </span>
           ))}
           <span className="text-fg-subtle"> → </span>
-          <b>{r.passPercentage === 100 ? 'pass' : r.passPercentage === 0 ? 'fail' : `${r.passPercentage}% pass`}</b>
+          {config ? <ConfigServe r={r} fallback={fallback} /> : <b>{r.passPercentage === 100 ? 'pass' : r.passPercentage === 0 ? 'fail' : `${r.passPercentage}% pass`}</b>}
         </Line>
       ))}
       <Line label="otherwise">
-        <b>fail</b>
+        <b>{fallback}</b>
       </Line>
     </div>
+  );
+}
+
+/** What a matching config rule returns: its value, a variant split, or a share of its value against the default. */
+function ConfigServe({ r, fallback }: { r: Rule; fallback: React.ReactNode }) {
+  if (r.variants?.length) {
+    const covered = r.variants.reduce((n, v) => n + v.passPercentage, 0);
+    return (
+      <b>
+        {r.variants.map((v, i) => (
+          <span key={i}>
+            {i > 0 && <span className="font-normal text-fg-subtle"> / </span>}
+            {v.passPercentage}% <Value v={v.returnValue} name={v.name} />
+          </span>
+        ))}
+        {covered < 100 && (
+          <span>
+            <span className="font-normal text-fg-subtle"> / </span>
+            {100 - covered}% <Value v={r.returnValue} />
+          </span>
+        )}
+        {r.passPercentage < 100 && <span className="font-normal text-fg-subtle"> (of the {r.passPercentage}% passing; others: {fallback})</span>}
+      </b>
+    );
+  }
+  if (r.passPercentage >= 100) return <b><Value v={r.returnValue} /></b>;
+  if (r.passPercentage <= 0) return <b>{fallback}</b>;
+  return (
+    <b>
+      {r.passPercentage}% <Value v={r.returnValue} /> <span className="font-normal text-fg-subtle">/ {100 - r.passPercentage}%</span> {fallback}
+    </b>
+  );
+}
+
+/** A flag / config value: booleans and primitives as text, JSON compact and trimmed (full value on hover). */
+export function Value({ v, name }: { v: unknown; name?: string }) {
+  if (v === null || typeof v !== 'object') {
+    const text = v === undefined ? '' : String(v);
+    return name && name !== text ? (
+      <span title={text}>
+        {name} <span className="font-normal text-fg-muted">({text})</span>
+      </span>
+    ) : (
+      <span>{text}</span>
+    );
+  }
+  const json = JSON.stringify(v);
+  return (
+    <span title={json}>
+      {name && <span>{name} </span>}
+      <code className={name ? 'font-normal text-fg-muted' : 'text-fg'}>{trim(json, 80)}</code>
+    </span>
   );
 }
 
@@ -45,11 +103,22 @@ function Cond({ c }: { c: Condition }) {
 
 /** Generated LD configuration for one environment (right side of the rules diff). */
 export function LdTargeting({ env, variations }: { env: DesiredFlagEnv; variations: { value: unknown; name: string }[] }) {
-  const v = (i: number | undefined) => String(variations[i ?? 0]?.value);
+  const boolean = variations.every((x) => typeof x.value === 'boolean');
+  const v = (i: number | undefined) => {
+    const x = variations[i ?? 0];
+    if (!x) return <span>?</span>;
+    return boolean ? <span>{String(x.value)}</span> : <Value v={x.value} name={x.name} />;
+  };
   const serve = (s: VariationOrRollout) =>
     s.rollout ? (
       <b>
-        {s.rollout.variations.map((w) => `${w.weight / 1000}% ${v(w.variation)}`).join(' / ')} <span className="font-normal text-fg-subtle">by {s.rollout.contextKind}</span>
+        {s.rollout.variations.map((w, i) => (
+          <span key={i}>
+            {i > 0 && <span className="font-normal text-fg-subtle"> / </span>}
+            {w.weight / 1000}% {v(w.variation)}
+          </span>
+        ))}{' '}
+        <span className="font-normal text-fg-subtle">by {s.rollout.contextKind}</span>
       </b>
     ) : (
       <b>{v(s.variation)}</b>
@@ -59,6 +128,16 @@ export function LdTargeting({ env, variations }: { env: DesiredFlagEnv; variatio
       <Line label="targeting">
         <Badge tone={env.on ? 'green' : 'slate'}>{env.on ? 'on' : 'off'}</Badge> <span className="text-fg-subtle">off serves</span> <b>{v(env.offVariation)}</b>
       </Line>
+      {!boolean && (
+        <Line label="variations">
+          {variations.map((x, i) => (
+            <span key={i}>
+              {i > 0 && <span className="text-fg-subtle"> · </span>}
+              <Value v={x.value} name={x.name} />
+            </span>
+          ))}
+        </Line>
+      )}
       {env.prerequisites.map((p) => (
         <Line key={p.key} label="prerequisite">
           <code>{p.key}</code> is <b>{String(p.variation === 0)}</b>
@@ -118,6 +197,6 @@ function Line({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function trim(s: string): string {
-  return s.length > 120 ? `${s.slice(0, 117)}…` : s;
+function trim(s: string, max = 120): string {
+  return s.length > max ? `${s.slice(0, max - 3)}…` : s;
 }

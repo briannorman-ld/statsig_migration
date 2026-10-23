@@ -13,6 +13,7 @@
     "@launchpad-ui/tokens": "0.19.0",
     "@sslm/adapters": "workspace:*",
     "@sslm/canonical": "workspace:*",
+    "@sslm/coverage": "workspace:*",
     "@sslm/demo-fixtures": "workspace:*",
     "@sslm/executor": "workspace:*",
     "@sslm/http": "workspace:*",

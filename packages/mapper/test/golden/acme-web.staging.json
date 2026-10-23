@@ -5,11 +5,13 @@
       "flagKey": "new_checkout_flow",
       "fidelity": "partial",
       "notes": [
+        "partial: Holdout “checkout_holdout” (5%) is not carried over: users it holds out in StatSig get the feature in LD. [holdout “checkout_holdout”]",
         "partial: 20% rollout re-buckets users (StatSig and LD hash differently). [rule “Public 20%”]",
         "partial: 1 ID is overridden both to pass and to fail; the environment-specific (or first) override wins."
       ],
       "decisions": [
         "choice client_side_availability (flag settings) → both",
+        "acknowledge holdout_attached (holdout “checkout_holdout”) → acknowledge",
         "choice case_insensitive_match (rule “Acme staff” › condition 1) → regex",
         "acknowledge partial_rollout_rebucket (rule “Public 20%”) → acknowledge"
       ],
@@ -757,7 +759,8 @@
       "fidelity": "partial",
       "notes": [
         "partial: Your app must send “browserName” (StatSig derived it from the user agent). [rule “Old Safari” › condition 1]",
-        "partial: Your app must send “browserVersion” (StatSig derived it from the user agent). [rule “Old Safari” › condition 2]"
+        "partial: Your app must send “browserVersion” (StatSig derived it from the user agent). [rule “Old Safari” › condition 2]",
+        "full: Version “15.0” → “15.0.0” for LD semver (StatSig pads missing parts with 0 and ignores leading zeros, so this is exact). [rule “Old Safari” › condition 2]"
       ],
       "decisions": [
         "choice client_side_availability (flag settings) → both",
@@ -792,7 +795,7 @@
                 "attribute": "browserVersion",
                 "op": "semVerLessThan",
                 "values": [
-                  "15.0"
+                  "15.0.0"
                 ],
                 "negate": false
               }
@@ -846,6 +849,87 @@
                 "op": "semVerLessThan",
                 "values": [
                   "10.0.0"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "pwa_offline_mode",
+      "flagKey": "pwa_offline_mode",
+      "fidelity": "full",
+      "notes": [
+        "full: Version “1.2” → “1.2.0” for LD semver (StatSig pads missing parts with 0 and ignores leading zeros, so this is exact). [rule “Shell 1.2+” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Shell 1.2+",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "appVersion",
+                "op": "semVerLessThan",
+                "values": [
+                  "1.2.0"
+                ],
+                "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "pos_firmware_sync",
+      "flagKey": "pos_firmware_sync",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Version “2.1.0.450” → “2.1.0”: the app must send three-part versions; versions differing only after the third part compare equal. [rule “Firmware 2.1.0.450+” › condition 1]"
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice version_format (rule “Firmware 2.1.0.450+” › condition 1) → truncate"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Firmware 2.1.0.450+",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "firmware_version",
+                "op": "semVerLessThan",
+                "values": [
+                  "2.1.0"
                 ],
                 "negate": true
               }
@@ -1434,7 +1518,10 @@
       "gate": "gift_card_upsell",
       "flagKey": "gift_card_upsell",
       "fidelity": "full",
-      "notes": [],
+      "notes": [
+        "full: “gift_card_balance” must be sent as a number: StatSig's numeric operators coerced numeric strings, LD's don't.",
+        "full: “loyalty_points” must be sent as a number: StatSig's numeric operators coerced numeric strings, LD's don't."
+      ],
       "decisions": [
         "choice client_side_availability (flag settings) → both"
       ],
@@ -1507,7 +1594,8 @@
       "fidelity": "full",
       "notes": [],
       "decisions": [
-        "choice client_side_availability (flag settings) → both"
+        "choice client_side_availability (flag settings) → both",
+        "choice value_type (rule “Tier 2+” › condition 1) → both"
       ],
       "dependencies": [],
       "env": {
@@ -1527,7 +1615,9 @@
                 "attribute": "loyalty_tier",
                 "op": "in",
                 "values": [
+                  2,
                   "2",
+                  3,
                   "3"
                 ],
                 "negate": false
@@ -1878,6 +1968,46 @@
                   "garden"
                 ],
                 "negate": true
+              }
+            ],
+            "variation": 0
+          }
+        ],
+        "targets": [],
+        "prerequisites": []
+      }
+    },
+    {
+      "gate": "clearance_category_badge",
+      "flagKey": "clearance_category_badge",
+      "fidelity": "full",
+      "notes": [],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both",
+        "choice value_type (rule “Clearance categories” › condition 1) → number"
+      ],
+      "dependencies": [],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 1,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [
+          {
+            "description": "Clearance categories",
+            "clauses": [
+              {
+                "contextKind": "user",
+                "attribute": "category_ids",
+                "op": "in",
+                "values": [
+                  12,
+                  48
+                ],
+                "negate": false
               }
             ],
             "variation": 0
