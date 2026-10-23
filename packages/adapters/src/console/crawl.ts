@@ -101,7 +101,7 @@ export interface CrawlOptions {
   onProgress?: (p: CrawlProgress) => void;
   /**
    * ID lists up to this many IDs are fetched during the crawl. Larger lists (e.g. a 20k fraud
-   * blocklist) are fetched on demand later, when a big-segment migration needs them (M4).
+   * blocklist) are fetched on request later (Source warnings), when a big-segment migration needs them.
    */
   eagerIdListMax?: number;
 }

@@ -59,6 +59,12 @@ The full 10–15 minute script (PLAN §19.5) grows with each milestone. What can
     equivalent*, …) with a "why?" link into the matrix. The same data is published as
     [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
-Not yet: big segments and approval requests (M4); drift monitoring and waves
-(M5); consolidation of identical gates across `acme-web` and `acme-mobile` (M8). Migrating the same
-gate name from both sources is refused for now.
+M4 in the demo: `fraud_blocklist` (20k IDs) loads from Source warnings and migrates as a big
+segment; the spec-only `wholesale_partners` list reconciles against
+`generated/acme-web/wholesale_partners.raw-ids.csv` (99.6 % coverage → a `hashed_id_list`
+acknowledgement); `black_friday_2027` offers an LD scheduled change. The demo LD project has no
+approval-required environment, so the approval-request fallback only shows in the Runs page when
+LD answers a write with 405.
+
+Not yet: drift monitoring and waves (M5); consolidation of identical gates across `acme-web` and
+`acme-mobile` (M8). Migrating the same gate name from both sources is refused for now.

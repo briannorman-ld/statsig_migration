@@ -96,6 +96,22 @@ export interface DesiredFlagEnv {
   rules: DesiredRule[];
   targets: DesiredTarget[];
   prerequisites: DesiredPrerequisite[];
+  /**
+   * LD scheduled changes (Enterprise) that flip the targeting when a StatSig `time` condition
+   * crosses its timestamp (PLAN §5.1, §8.3 `time_condition` "schedule"). Each one carries the whole
+   * targeting as of that moment, so the flag converges on the same state however it gets there.
+   * Present only when at least one time condition chose to be scheduled.
+   */
+  scheduledChanges?: DesiredScheduledChange[];
+}
+
+/** The environment's targeting as of `executionDate`, applied by an LD scheduled change. */
+export interface DesiredScheduledChange {
+  /** ISO 8601 instant at which LD applies the change. */
+  executionDate: string;
+  /** Why, e.g. `Time condition after 2027-11-26T00:00:00Z in rule "Black Friday"`. */
+  description: string;
+  state: Pick<DesiredFlagEnv, 'on' | 'offVariation' | 'fallthrough' | 'rules' | 'targets' | 'prerequisites'>;
 }
 
 export interface DesiredSegmentRule {
@@ -106,7 +122,7 @@ export interface DesiredSegmentRule {
   rolloutContextKind?: string;
 }
 
-/** A standard (not big) LD segment in one environment. Segments are per environment in LD. */
+/** An LD segment in one environment. Segments are per environment in LD. */
 export interface DesiredSegment {
   key: string;
   ldEnv: string;
@@ -115,10 +131,16 @@ export interface DesiredSegment {
   description: string;
   tags: string[];
   rules: DesiredSegmentRule[];
-  /** Included `user` keys. */
+  /** Included `user` keys (standard segments only). */
   included: string[];
-  /** Included keys for other context kinds. */
+  /** Included keys for other context kinds (standard segments only). */
   includedContexts: { contextKind: string; values: string[] }[];
+  /**
+   * Set for a big segment (LD `unbounded: true`, Enterprise): a list above LD's 15,000-ID limit for
+   * standard segments. Membership is written with a CSV import in `replace` mode, never with
+   * `included`, and `rules` stay empty (big segments have no rules).
+   */
+  unbounded?: { contextKind: string; ids: string[] };
 }
 
 /** An LD custom conversion metric (POST /metrics/{projectKey}; PLAN §11 "the success event becomes a metric"). */
@@ -299,6 +321,10 @@ export type CapabilityState = 'available' | 'not_permitted' | 'unavailable' | 'u
 export interface MapperCapabilities {
   prerequisites: CapabilityState;
   contextKinds: CapabilityState;
+  /** Big (unbounded) segments with CSV import; Enterprise. `unknown` until the first write. */
+  bigSegments?: CapabilityState;
+  /** Scheduled flag changes; Enterprise. `unknown` until the first write. */
+  scheduledChanges?: CapabilityState;
   /** Context kind keys that already exist in the LD project. */
   existingContextKinds: string[];
 }
@@ -308,8 +334,26 @@ export interface EnvTarget {
   ld: string;
 }
 
-/** Plaintext ID lists fetched on demand for segments the snapshot deferred (PLAN §4.1). */
+/**
+ * Plaintext ID lists by segment uid: fetched on demand for segments the snapshot deferred (PLAN
+ * §4.1), or uploaded as a raw-ID CSV and reconciled against a spec's hashed list (PLAN §4.2).
+ */
 export type IdLists = Record<string, string[]>;
+
+/**
+ * Result of reconciling a raw-ID upload with the hashed list StatSig ships in `get_id_lists`
+ * (PLAN §4.2 step 3), by segment uid. `missing` hashes have no raw ID in the upload; `extra` raw IDs
+ * are not in StatSig's list and are not migrated. `verified` is false when no hash file was
+ * uploaded, so the raw list could only be checked against StatSig's count.
+ */
+export interface IdListCoverage {
+  total: number;
+  matched: number;
+  missing: number;
+  extra: number;
+  verified: boolean;
+}
+export type IdListCoverages = Record<string, IdListCoverage>;
 
 export interface Dependency {
   kind: 'segment' | 'context_kind' | 'flag' | 'metric' | 'randomization_unit';

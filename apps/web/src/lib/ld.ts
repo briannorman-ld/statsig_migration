@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import type { CapabilityUpdate } from '@sslm/executor';
 import { LdAuthError, LdClient, LdWriteError, probeCapabilities, TAG_MIGRATED_ENV, type CapabilityMatrix, type LdCallerIdentity, type LdExperiment, type LdFlagSummary, type LdInstanceId, type LdMetric, type LdProject, type LdSegment } from '@sslm/ld-client';
 import { secrets } from './secrets.ts';
 import { store } from './store.ts';
@@ -115,6 +116,21 @@ export async function createLdEnvironment(workspaceId: string, input: { key: str
 
 /** LD's own environment palette (hex without `#`), picked deterministically per key. */
 const ENV_COLORS = ['417505', 'F5A623', '7B4DFF', '00A3BF', 'E8367D', '2B6CB0', 'D97706', '0F766E'];
+
+/**
+ * A write settled a plan-gated capability the probe could only mark "unknown" (PLAN §5.2
+ * "the first failed write updates the matrix"). The mapper's options follow the matrix, so a
+ * refused big segment or scheduled change stops being offered; an allowed one becomes recommended.
+ */
+export async function learnCapability(workspaceId: string, c: CapabilityUpdate): Promise<void> {
+  const s = sessions.get(workspaceId);
+  if (!s?.matrix) return;
+  const cap = s.matrix.capabilities.find((x) => x.key === c.key);
+  if (!cap || (cap.status === c.status && cap.evidence === c.evidence)) return;
+  const matrix: CapabilityMatrix = { ...s.matrix, capabilities: s.matrix.capabilities.map((x) => (x.key === c.key ? { ...x, status: c.status, evidence: `${c.evidence} (learned from a write)` } : x)) };
+  set(workspaceId, { matrix });
+  await store.saveCapabilities(workspaceId, matrix);
+}
 
 export async function reprobe(workspaceId: string): Promise<void> {
   const s = sessions.get(workspaceId);

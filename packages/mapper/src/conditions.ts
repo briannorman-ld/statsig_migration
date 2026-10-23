@@ -13,7 +13,7 @@
 import { normalizeCondition, toArray, type CanonicalSnapshot, type Condition, type Segment } from '@sslm/canonical';
 import { DROP_CONDITION, DROP_RULE, SKIP, type DecisionCollector } from './decisions.ts';
 import { attributeFor, kindFor, sanitizeKey } from './profile.ts';
-import type { DecisionOption, DecisionSubject, Dependency, FidelityNote, IdLists, LdClause, LdOperator, MapperCapabilities, MappingProfile } from './types.ts';
+import type { DecisionOption, DecisionSubject, Dependency, FidelityNote, IdListCoverages, IdLists, LdClause, LdOperator, MapperCapabilities, MappingProfile } from './types.ts';
 
 export type Dnf = LdClause[][];
 export const ALWAYS: Dnf = [[]];
@@ -37,7 +37,15 @@ export interface ConditionContext {
   snapshot: CanonicalSnapshot;
   sourceId: string;
   idLists: IdLists;
+  /** Reconciliation results for uploaded raw-ID lists, by segment uid (PLAN §4.2). */
+  coverage?: IdListCoverages;
   nowMs: number;
+  /**
+   * Collects the timestamps at which a `time` condition that chose "schedule" flips, so the
+   * flag mapper can compute the targeting as of each one (DesiredFlagEnv.scheduledChanges).
+   * Absent while that re-mapping runs: the condition is then simply resolved as of `nowMs`.
+   */
+  scheduleFlips?: Set<number>;
   decisions: DecisionCollector;
   subject: DecisionSubject;
   fidelity: FidelityNote[];
@@ -722,6 +730,30 @@ function timeCondition(ctx: ConditionContext, c: Condition, loc: Loc): Dnf {
     note(ctx, loc, 'full', nowValue ? `Time condition (${op} ${when}) is always true now; dropped.` : `Time condition (${op} ${when}) can never be true again; rule dropped.`);
     return nowValue ? ALWAYS : NEVER;
   }
+  const sc = ctx.capabilities.scheduledChanges ?? 'unknown';
+  const canSchedule = sc !== 'unavailable' && sc !== 'not_permitted';
+  const options: DecisionOption[] = [
+    ...(canSchedule
+      ? [
+          {
+            key: 'schedule',
+            label: `Schedule the flip in LD at ${when}`,
+            explanation: `Mirror how StatSig behaves today, and create an LD scheduled change that applies the targeting as of ${when} at that moment. Exact, with no re-sync needed. Enterprise plans${sc === 'unknown' ? '; your plan is checked on the first write' : ''}.`,
+            resultingFidelity: 'full' as const,
+          },
+        ]
+      : []),
+    {
+      key: 'resolve_now',
+      label: nowValue ? 'Keep the rule without the time check' : 'Leave the rule out for now',
+      explanation: `Mirror how StatSig behaves today, and re-sync after ${when} so LD catches up.`,
+      resultingFidelity: 'partial',
+    },
+    SKIP,
+  ];
+  // The scheduled change is exact, but it needs Enterprise: it's recommended once the probe (or a
+  // successful write) has shown the plan allows it; before that the safe default is to resolve now.
+  const recommended = sc === 'available' ? 'schedule' : 'resolve_now';
   const choice = ctx.decisions.choose(
     {
       type: 'time_condition',
@@ -729,24 +761,24 @@ function timeCondition(ctx: ConditionContext, c: Condition, loc: Loc): Dnf {
       subject: subjectAt(ctx, loc),
       path: path(ctx, loc),
       title: `Time condition: ${op} ${when}`,
-      explanation: `This rule ${nowValue ? 'applies now but stops' : 'starts applying'} at ${when}. LD clauses can't compare the current time; a scheduled change (Enterprise) can flip it at that moment, which arrives with M4.`,
+      explanation: `This rule ${nowValue ? 'applies now but stops' : 'starts applying'} at ${when}. LD clauses can't compare the current time; an LD scheduled change (Enterprise) can flip the targeting at that moment.`,
       sourceFragment: c.raw,
       fingerprintOf: { op, t },
-      options: [
-        {
-          key: 'resolve_now',
-          label: nowValue ? 'Keep the rule without the time check' : 'Leave the rule out for now',
-          explanation: `Mirror how StatSig behaves today, and re-sync after ${when} so LD catches up.`,
-          resultingFidelity: 'partial',
-        },
-        SKIP,
-      ],
-      recommended: 'resolve_now',
+      options,
+      recommended,
     },
-    'resolve_now',
+    recommended,
   );
   const common = applyCommon(choice, loc);
   if (common) return common;
+  if (choice === 'schedule' && canSchedule) {
+    if (ctx.scheduleFlips) {
+      ctx.scheduleFlips.add(op === 'on' ? Math.floor(t / DAY) * DAY : t);
+      if (op === 'on') ctx.scheduleFlips.add((Math.floor(t / DAY) + 1) * DAY);
+      note(ctx, loc, 'full', `Time condition resolved as of the sync (${nowValue ? 'true' : 'false'}); an LD scheduled change flips it at ${when}.`);
+    }
+    return nowValue ? ALWAYS : NEVER;
+  }
   note(ctx, loc, 'partial', `Time condition resolved as of the sync (${nowValue ? 'true' : 'false'}); re-sync after ${when}.`);
   return nowValue ? ALWAYS : NEVER;
 }
@@ -762,11 +794,101 @@ export function segmentSize(seg: Segment, idLists: IdLists): { count?: number; i
   return { count: seg.idList?.ids?.length ?? seg.idList?.count, ids: seg.idList?.ids, hashed: false };
 }
 
+/** Formats an ID count for decision text. */
+const n = (x: number | undefined) => (x ?? 0).toLocaleString('en-US');
+
+/**
+ * The `big_segment` decision for an ID list above LD's 15,000-ID limit (PLAN §8.3). Its subject is
+ * the *segment*, whichever gate's condition asks, so the gate and the segment mapper share one
+ * question and one answer. `import` is offered unless the probe ruled big segments out.
+ */
+export function bigSegmentChoice(ctx: ConditionContext, seg: Segment, count: number, fragment: unknown): { choice: string; resolved: boolean } {
+  const bs = ctx.capabilities.bigSegments ?? 'unknown';
+  const canImport = bs !== 'unavailable' && bs !== 'not_permitted';
+  const options: DecisionOption[] = [
+    ...(canImport
+      ? [
+          {
+            key: 'import',
+            label: 'Import as an LD big segment',
+            explanation: `Create an unbounded (big) segment and load the ${n(count)} IDs with a CSV import in replace mode, so every sync mirrors the StatSig list. Enterprise plans${bs === 'unknown' ? '; your plan is checked on the first write' : ''}. Big segments have no rules and can't be previewed in the LD UI.`,
+            resultingFidelity: 'full' as const,
+          },
+        ]
+      : []),
+    DROP_CONDITION,
+    DROP_RULE,
+    SKIP,
+  ];
+  return ctx.decisions.chooseEx(
+    {
+      type: 'big_segment',
+      severity: canImport ? 'choice' : 'blocking',
+      subject: { sourceId: seg.source.sourceId, kind: 'segment', uid: seg.uid, id: seg.id, location: `${n(count)} IDs` },
+      path: 'size',
+      title: `Segment “${seg.id}” has ${n(count)} IDs`,
+      explanation: `LD list segments hold at most ${n(LIST_SEGMENT_MAX)} IDs. Bigger lists need a big segment (Enterprise), filled by a CSV import.${canImport ? '' : ' Your LD plan does not include big segments.'}`,
+      sourceFragment: fragment,
+      fingerprintOf: { segment: seg.id, over: count > LIST_SEGMENT_MAX, canImport },
+      options,
+      ...(canImport ? { recommended: 'import' } : {}),
+    },
+    canImport ? 'import' : 'drop_rule',
+  );
+}
+
+/**
+ * The `hashed_id_list` decision for a spec-sourced list (PLAN §4.2, §8.3). Without raw IDs it is
+ * blocking: the segment can't be written until a raw-ID CSV is uploaded and reconciled (an action
+ * in the app, not an option here). With a reconciliation short of 100% it asks to accept the gap.
+ */
+export function hashedListChoice(ctx: ConditionContext, seg: Segment, fragment: unknown): { choice: string; resolved: boolean } {
+  const cov = ctx.coverage?.[seg.uid];
+  const have = ctx.idLists[seg.uid];
+  if (!have) {
+    return ctx.decisions.chooseEx(
+      {
+        type: 'hashed_id_list',
+        severity: 'blocking',
+        subject: { sourceId: seg.source.sourceId, kind: 'segment', uid: seg.uid, id: seg.id, location: `${n(seg.idList?.count)} hashed IDs` },
+        path: 'hashed',
+        title: `Segment “${seg.id}” has only hashed IDs`,
+        explanation: `The config spec ships this ID list as one-way hashes (the first 8 characters of base64(sha256(id))), which can't be turned back into IDs. Upload the raw IDs as a CSV under Source warnings › ID lists: the console hashes them in the browser, reports how many of StatSig's hashes they cover, and migrates the list once you accept that coverage. Or decide how to handle the rule now.`,
+        sourceFragment: fragment,
+        fingerprintOf: { segment: seg.id, hashed: true },
+        options: [DROP_CONDITION, DROP_RULE, SKIP],
+      },
+      'drop_rule',
+    );
+  }
+  if (!cov || (cov.verified && cov.missing === 0) || (!cov.verified && cov.matched >= cov.total)) return { choice: 'accept', resolved: true };
+  const pct = cov.total ? Math.floor((cov.matched / cov.total) * 1000) / 10 : 0;
+  const what = cov.verified ? `${n(cov.matched)} of StatSig's ${n(cov.total)} hashes matched (${pct}%); ${n(cov.missing)} hashes have no raw ID in the upload` : `the upload has ${n(cov.matched)} IDs against StatSig's count of ${n(cov.total)} (${pct}%); no hash file was uploaded, so the IDs themselves are unverified`;
+  return ctx.decisions.chooseEx(
+    {
+      type: 'hashed_id_list',
+      severity: 'acknowledge',
+      subject: { sourceId: seg.source.sourceId, kind: 'segment', uid: seg.uid, id: seg.id, location: `${pct}% reconciled` },
+      path: 'coverage',
+      title: `Segment “${seg.id}”: raw IDs cover ${pct}% of the StatSig list`,
+      explanation: `Reconciliation: ${what}${cov.extra ? `; ${n(cov.extra)} uploaded IDs are not in StatSig's list and are left out` : ''}. The LD segment will hold the ${n(cov.matched)} matched IDs.`,
+      sourceFragment: fragment,
+      fingerprintOf: { segment: seg.id, matched: cov.matched, total: cov.total, verified: cov.verified },
+      options: [
+        { key: 'accept', label: `Accept ${pct}% coverage`, explanation: `Migrate the ${n(cov.matched)} IDs the upload covers. Users in the ${n(cov.missing)} missing IDs are in the segment in StatSig but not in LD.`, resultingFidelity: 'partial' },
+        { key: 'skip', label: 'Skip until a fuller upload', explanation: 'Keep the segment and the rules that need it in StatSig; upload a more complete CSV later.', resultingFidelity: 'skipped' },
+      ],
+      recommended: 'accept',
+    },
+    'accept',
+  );
+}
+
 function segmentCondition(ctx: ConditionContext, c: Condition, loc: Loc, ids: string[], negate: boolean): Dnf {
   const clauses: LdClause[] = [];
   for (const id of ids) {
     const seg = ctx.snapshot.segments.find((s) => s.id === id);
-    const blocked = (type: 'missing_reference' | 'big_segment' | 'hashed_id_list' | 'id_list_unavailable', title: string, explanation: string): Dnf => {
+    const blocked = (type: 'missing_reference' | 'id_list_unavailable', title: string, explanation: string): Dnf => {
       const { choice, resolved } = ctx.decisions.chooseEx(
         { type, severity: 'blocking', subject: subjectAt(ctx, loc), path: `${path(ctx, loc)}:segment:${id}`, title, explanation, sourceFragment: c.raw, fingerprintOf: { segment: id, type }, options: [DROP_CONDITION, DROP_RULE, SKIP] },
         'drop_rule',
@@ -774,16 +896,26 @@ function segmentCondition(ctx: ConditionContext, c: Condition, loc: Loc, ids: st
       if (resolved) note(ctx, loc, 'partial', choice === 'drop_condition' ? `Condition on segment “${id}” dropped (the rule matches more users).` : `Rule requiring segment “${id}” dropped.`);
       return applyCommon(choice, loc)!;
     };
+    const decided = ({ choice, resolved }: { choice: string; resolved: boolean }): Dnf | undefined => {
+      const common = applyCommon(choice, loc);
+      if (common && resolved) note(ctx, loc, 'partial', choice === 'drop_condition' ? `Condition on segment “${id}” dropped (the rule matches more users).` : `Rule requiring segment “${id}” dropped.`);
+      return common;
+    };
     if (!seg) return blocked('missing_reference', `Segment “${id}” not found`, `The rule references segment “${id}”, which isn't in this StatSig snapshot.`);
     if (seg.archived) return blocked('missing_reference', `Segment “${id}” is archived`, `The rule references an archived segment.`);
     if (seg.segmentType !== 'rule_based') {
       const size = segmentSize(seg, ctx.idLists);
-      if (size.hashed)
-        return blocked('hashed_id_list', `Segment “${id}” has only hashed IDs`, `The config spec ships this ID list as hashes. Upload the raw IDs to reconcile it (M4), or decide how to handle the rule now.`);
-      if ((size.count ?? 0) > LIST_SEGMENT_MAX)
-        return blocked('big_segment', `Segment “${id}” has ${size.count?.toLocaleString('en-US')} IDs`, `LD list segments hold at most ${LIST_SEGMENT_MAX.toLocaleString('en-US')} IDs. Bigger lists need a big segment with a CSV import (Enterprise), which arrives with M4.`);
-      if (!size.ids)
-        return blocked('id_list_unavailable', `Segment “${id}” members aren't loaded`, `The ID list (${size.count ?? '?'} IDs) wasn't fetched from StatSig. Refresh the source with a Console API key to load it.`);
+      if (size.hashed || ctx.coverage?.[seg.uid]) {
+        const h = decided(hashedListChoice(ctx, seg, c.raw));
+        if (h) return h;
+      }
+      if (size.hashed) return NEVER; // unreachable: without raw IDs the decision above is blocking and applies drop/skip
+      if ((size.count ?? 0) > LIST_SEGMENT_MAX) {
+        if (!size.ids)
+          return blocked('id_list_unavailable', `Segment “${id}” members aren't loaded`, `The ID list (${n(size.count)} IDs) wasn't fetched from StatSig. Load it under Source warnings (Console API key needed), then it can migrate as a big segment.`);
+        const b = decided(bigSegmentChoice(ctx, seg, size.count ?? size.ids.length, c.raw));
+        if (b) return b;
+      } else if (!size.ids) return blocked('id_list_unavailable', `Segment “${id}” members aren't loaded`, `The ID list (${n(size.count)} IDs) wasn't fetched from StatSig. Refresh the source with a Console API key to load it.`);
     }
     const key = sanitizeKey(seg.id);
     ctx.deps.set(`segment:${key}`, { kind: 'segment', key, entityId: seg.id });

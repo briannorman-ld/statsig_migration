@@ -57,8 +57,8 @@ export class DecisionCollector {
   private readonly seen = new Set<string>();
 
   constructor(
-    private readonly resolutions: ReadonlyMap<string, Resolution>,
-    private readonly profile: MappingProfile,
+    readonly resolutions: ReadonlyMap<string, Resolution>,
+    readonly profile: MappingProfile,
   ) {}
 
   choose(spec: DecisionSpec, fallback: string): string {

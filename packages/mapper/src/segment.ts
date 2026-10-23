@@ -1,10 +1,12 @@
 /**
  * StatSig segment → LD segment in one environment (PLAN §6: rule-based and ID-list segments are
- * per environment in LD). Big (>15k) and hashed lists are left to M4; the gate that references
- * them already carries the blocking decision.
+ * per environment in LD). ID lists above LD's 15,000-ID limit become big (unbounded) segments
+ * filled by a CSV import (`big_segment`); spec-sourced hashed lists need a reconciled raw-ID
+ * upload first (`hashed_id_list`). Both decisions are shared with the gates that reference the
+ * segment (same decision id), so one answer covers the segment and every rule that needs it.
  */
 import { fingerprint, resolveRulesForEnvironment, targetingFingerprint, type Segment } from '@sslm/canonical';
-import { andDnf, LIST_SEGMENT_MAX, MAX_EXPANSION, resolveKind, segmentSize, SkipItem, translateCondition, unique, type ConditionContext } from './conditions.ts';
+import { andDnf, bigSegmentChoice, hashedListChoice, LIST_SEGMENT_MAX, MAX_EXPANSION, resolveKind, segmentSize, SkipItem, translateCondition, unique, type ConditionContext } from './conditions.ts';
 import { DecisionCollector } from './decisions.ts';
 import { report, sourceTag, TAG_MIGRATED, type MapArgs, type MapOutcome } from './gate.ts';
 import { sanitizeKey, sanitizeTag } from './profile.ts';
@@ -29,6 +31,7 @@ export function mapSegment(args: MapArgs<Segment>): SegmentMapResult {
     snapshot: canonical.snapshot,
     sourceId,
     idLists,
+    ...(canonical.coverage ? { coverage: canonical.coverage } : {}),
     nowMs: Date.parse(args.now),
     decisions,
     subject: { sourceId, kind: 'segment', uid: seg.uid, id: seg.id },
@@ -73,11 +76,26 @@ export function mapSegment(args: MapArgs<Segment>): SegmentMapResult {
 
   try {
     if (seg.segmentType !== 'rule_based') {
-      if (size.hashed) return finish(null, 'its ID list is hashed (config spec); raw-ID reconciliation arrives in M4');
-      if ((size.count ?? 0) > LIST_SEGMENT_MAX) return finish(null, `${size.count} IDs exceed LD's ${LIST_SEGMENT_MAX.toLocaleString('en-US')}-ID list segment limit; big segments arrive in M4`);
-      if (!size.ids) return finish(null, 'its ID list was not fetched from StatSig');
+      const fragment = { segment: seg.id, segmentType: seg.segmentType, count: size.count ?? null, hashed: size.hashed };
+      if (size.hashed || ctx.coverage?.[seg.uid]) {
+        const { choice } = hashedListChoice(ctx, seg, fragment);
+        if (choice === 'skip') throw new SkipItem('its hashed ID list is not reconciled closely enough yet');
+        if (choice !== 'accept') throw new SkipItem('its ID list is hashed (config spec): upload the raw IDs to reconcile it');
+        const cov = ctx.coverage?.[seg.uid];
+        if (cov && (cov.missing > 0 || cov.extra > 0 || !cov.verified))
+          fidelity.push({ fidelity: cov.missing > 0 || !cov.verified ? 'partial' : 'full', message: cov.verified ? `Reconciled raw-ID upload: ${cov.matched.toLocaleString('en-US')} of ${cov.total.toLocaleString('en-US')} StatSig hashes matched${cov.missing ? `, ${cov.missing.toLocaleString('en-US')} missing` : ''}${cov.extra ? `, ${cov.extra.toLocaleString('en-US')} uploaded IDs not in the list left out` : ''}.` : `Raw-ID upload of ${cov.matched.toLocaleString('en-US')} IDs against StatSig's count of ${cov.total.toLocaleString('en-US')}; no hash file was uploaded, so membership is unverified.` });
+      }
+      if (!size.ids) throw new SkipItem('its ID list was not fetched from StatSig');
       const kind = resolveKind(ctx, seg.idType);
       const ids = unique(size.ids);
+      if (ids.length > LIST_SEGMENT_MAX) {
+        const { choice } = bigSegmentChoice(ctx, seg, ids.length, fragment);
+        if (choice === 'skip') throw new SkipItem(`${ids.length.toLocaleString('en-US')} IDs exceed LD's ${LIST_SEGMENT_MAX.toLocaleString('en-US')}-ID list segment limit`);
+        if (choice !== 'import') return finish(null, `${ids.length.toLocaleString('en-US')} IDs exceed LD's ${LIST_SEGMENT_MAX.toLocaleString('en-US')}-ID list segment limit; the rules referencing it were changed instead`);
+        base.unbounded = { contextKind: kind, ids };
+        fidelity.push({ fidelity: 'full', message: `Big segment: ${ids.length.toLocaleString('en-US')} ${seg.idType} IDs imported from CSV (replace mode) on every sync.` });
+        return finish(base);
+      }
       if (kind === 'user') base.included = ids;
       else base.includedContexts = [{ contextKind: kind, values: ids }];
       fidelity.push({ fidelity: 'full', message: `${ids.length} ${seg.idType} IDs included.` });

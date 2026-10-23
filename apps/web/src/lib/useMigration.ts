@@ -48,6 +48,7 @@ export function useMigration(workspaceId: string, snapshots: CanonicalSnapshot[]
       resolutionList,
       capabilities: mapperCapabilities(ld.matrix, ld.contextKinds),
       idLists: Object.fromEntries(idListRecs.map((r) => [r.uid, r.ids])),
+      coverage: Object.fromEntries(idListRecs.flatMap((r) => (r.coverage ? [[r.uid, r.coverage] as const] : []))),
       now,
       resolve: async (decisions, optionKey) => {
         const decidedAt = new Date().toISOString();

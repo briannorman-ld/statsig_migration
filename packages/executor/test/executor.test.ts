@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { LdAuthError, LdWriteError, type LdExperiment, type LdFlag, type LdMetric } from '@sslm/ld-client';
 import type { PlanStep } from '@sslm/planner';
-import { Executor, footer, newRun, parseFooter, withFooter, type LdWriter, type RunRecord } from '../src/index.ts';
+import { Executor, footer, newRun, parseFooter, scheduledIdsFrom, segmentInstructions, withFooter, type LdWriter, type RunRecord } from '../src/index.ts';
 
 /** Minimal in-memory LD: enough state for the executor's control flow, not LD's semantics. */
 function fakeLd(over: Partial<Record<keyof LdWriter, (...a: never[]) => unknown>> = {}) {
@@ -10,6 +10,10 @@ function fakeLd(over: Partial<Record<keyof LdWriter, (...a: never[]) => unknown>
   const experiments = new Map<string, LdExperiment & { iteration?: unknown }>();
   const units: string[] = ['user'];
   const calls: string[] = [];
+  const approvals = new Map<string, { status: string; reviewStatus: string; executionDate?: number }>();
+  const scheduled = new Map<string, { executionDate: number; instructions: unknown[] }>();
+  const imports: { key: string; env: string; keys: string[]; mode: string }[] = [];
+  let nextId = 1;
   const flag = (key: string, body: Record<string, unknown> = {}): LdFlag => ({
     key,
     name: key,
@@ -62,8 +66,37 @@ function fakeLd(over: Partial<Record<keyof LdWriter, (...a: never[]) => unknown>
       units.splice(0, units.length, ...body.randomizationUnits.map((u) => u.randomizationUnit));
       return { randomizationUnits: body.randomizationUnits };
     },
+    createSegmentImport: async (_p, env, key, keys, opts) => void (calls.push(`import ${env}/${key} ${keys.length} ${opts.mode}`), imports.push({ key, env, keys, mode: opts.mode })),
+    getSegmentMembership: async (_p, env, key, contextKey) => ({ included: imports.some((i) => i.env === env && i.key === key && i.keys.includes(contextKey)), excluded: false }),
+    createFlagApprovalRequest: async (_p, key, env, body) => {
+      const id = `ar-${nextId++}`;
+      calls.push(`approval ${env}/${key} ${body.executionDate ? 'scheduled' : 'now'} ${body.instructions.map((i) => i.kind).join(',')}`);
+      approvals.set(id, { status: 'pending', reviewStatus: 'pending', ...(body.executionDate ? { executionDate: body.executionDate } : {}) });
+      return { _id: id, status: 'pending', reviewStatus: 'pending' };
+    },
+    getFlagApprovalRequest: async (_p, _k, _e, id) => (calls.push(`get approval ${id}`), approvals.has(id) ? { _id: id, ...approvals.get(id)! } : null),
+    deleteFlagApprovalRequest: async (_p, _k, _e, id) => void (calls.push(`delete approval ${id}`), approvals.delete(id)),
+    createApprovalRequest: async (body) => {
+      const id = `ar-${nextId++}`;
+      calls.push(`approval ${body.resourceId} ${body.instructions.map((i) => i.kind).join(',')}`);
+      approvals.set(id, { status: 'pending', reviewStatus: 'pending' });
+      return { _id: id, status: 'pending', reviewStatus: 'pending' };
+    },
+    getApprovalRequest: async (id) => (calls.push(`get approval ${id}`), approvals.has(id) ? { _id: id, ...approvals.get(id)! } : null),
+    deleteApprovalRequest: async (id) => void (calls.push(`delete approval ${id}`), approvals.delete(id)),
+    listScheduledChanges: async () => [...scheduled.entries()].map(([id, v]) => ({ _id: id, ...v })),
+    createScheduledChange: async (_p, key, env, body) => {
+      const id = `sc-${nextId++}`;
+      calls.push(`schedule ${env}/${key} ${new Date(body.executionDate).toISOString()}`);
+      scheduled.set(id, { executionDate: body.executionDate, instructions: body.instructions });
+      return { _id: id, executionDate: body.executionDate, instructions: body.instructions };
+    },
+    deleteScheduledChange: async (_p, _k, _e, id) => {
+      calls.push(`unschedule ${id}`);
+      if (!scheduled.delete(id)) throw new LdWriteError(404, '/scheduled-changes', null);
+    },
   };
-  return { client: { ...base, ...over } as LdWriter, flags, metrics, experiments, units, calls, flag };
+  return { client: { ...base, ...over } as LdWriter, flags, metrics, experiments, units, calls, flag, approvals, scheduled, imports };
 }
 
 const desiredEnv = { ldEnv: 'test', statsigEnv: 'staging', on: true, offVariation: 1, fallthrough: { variation: 0 }, rules: [], targets: [], prerequisites: [] };
@@ -156,11 +189,50 @@ describe('Executor', () => {
     expect(out.steps.map((s) => s.status)).toEqual(['failed', 'pending']);
   });
 
-  it('marks 405s as needing approval', async () => {
+  it('a 405 becomes an approval request with the same instructions; provenance waits for the approval', async () => {
+    const ld = fakeLd({ patchFlagSemantic: async () => Promise.reject(new LdWriteError(405, '/flags/p/a', null)) });
+    const learned: unknown[] = [];
+    const { ex, run } = setup(ld.client, [shell('a'), env('a')]);
+    (ex as unknown as { opts: { onCapability: (c: unknown) => void } }).opts.onCapability = (c) => learned.push(c);
+    const out = await ex.run(run);
+    expect(out.status).toBe('done');
+    expect(out.steps[1]).toMatchObject({ status: 'pending_approval', approvalRequired: true, approvals: [{ kind: 'flag', purpose: 'targeting', status: 'pending' }] });
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'approval test/a now turnFlagOn,updateOffVariation,updateFallthroughVariationOrRollout,replaceRules,replaceTargets']);
+    expect(learned).toEqual([{ key: 'approvals', status: 'available', evidence: expect.stringMatching(/405 on a in test/) }]);
+
+    // Reviewer applies it: the next check writes provenance and completes the step.
+    ld.approvals.set('ar-1', { status: 'completed', reviewStatus: 'approved' });
+    ld.calls.length = 0;
+    const checked = await ex.checkApprovals(out);
+    expect(checked.steps[1]).toMatchObject({ status: 'done', approvals: [{ status: 'applied', reviewStatus: 'approved' }] });
+    expect(checked.steps[1]!.message).toMatch(/Approved and applied/);
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['json a /customProperties/statsig.sync.test']);
+  });
+
+  it('a declined approval fails the step; a pending one is withdrawn by undo', async () => {
     const ld = fakeLd({ patchFlagSemantic: async () => Promise.reject(new LdWriteError(405, '/flags/p/a', null)) });
     const { ex, run } = setup(ld.client, [shell('a'), env('a')]);
     const out = await ex.run(run);
-    expect(out.steps[1]).toMatchObject({ status: 'failed', approvalRequired: true });
+    ld.approvals.set('ar-1', { status: 'pending', reviewStatus: 'declined' });
+    const checked = await ex.checkApprovals(structuredClone(out));
+    expect(checked.steps[1]).toMatchObject({ status: 'failed', error: expect.stringMatching(/ar-1 declined/) });
+    expect(checked.status).toBe('failed');
+
+    ld.approvals.set('ar-1', { status: 'pending', reviewStatus: 'pending' });
+    ld.calls.length = 0;
+    const undone = await ex.undo(out);
+    expect(undone.status).toBe('undone');
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['delete approval ar-1', 'delete a']);
+  });
+
+  it('a dry run in an approval-required environment reports the request it would file', async () => {
+    const ld = fakeLd({ patchFlagSemantic: async () => Promise.reject(new LdWriteError(405, '/flags/p/a', null)) });
+    ld.flags.set('a', ld.flag('a', { tags: ['statsig-migrated'], customProperties: { 'statsig.id': { name: 'StatSig ID', value: ['a'] }, 'statsig.source': { name: 'StatSig source', value: ['web'] } } }));
+    const { ex } = setup(ld.client, []);
+    const out = await ex.run(newRun({ id: 'dry-2', workspaceId: 'w', projectKey: 'p', label: 'dry', dryRun: true, steps: [env('a', [])], now: new Date() }));
+    expect(out.steps[0]!.status).toBe('done');
+    expect(out.steps[0]!.message).toMatch(/Would file an approval request/);
+    expect(ld.approvals.size).toBe(0);
   });
 
   it('resumes an interrupted run, recognizing a create that already happened by its provenance', async () => {
@@ -202,6 +274,181 @@ describe('Executor', () => {
     const out = await ex.run(dry);
     expect(out.steps.map((s) => s.message)).toEqual(['Would create boolean flag “a” (statsig-migrated, statsig-src-web).', 'Would set targeting in test: on, 0 rules, default true.']);
     expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual([]);
+  });
+});
+
+describe('scheduled changes (PLAN §5.1; time_condition → schedule)', () => {
+  const flip = '2027-11-26T05:00:00Z';
+  const scheduledEnv = (key: string): PlanStep => ({
+    ...(env(key) as Extract<PlanStep, { op: 'update_flag_env' }>),
+    desired: { ...desiredEnv, fallthrough: { variation: 1 }, scheduledChanges: [{ executionDate: flip, description: 'Black Friday', state: { on: true, offVariation: 1, fallthrough: { variation: 0 }, rules: [], targets: [], prerequisites: [] } }] },
+  });
+
+  it('creates one full-state scheduled change per flip after the targeting patch, and records the ids in the sync provenance', async () => {
+    const ld = fakeLd();
+    const { ex, run } = setup(ld.client, [shell('a'), scheduledEnv('a')]);
+    const out = await ex.run(run);
+    expect(out.status).toBe('done');
+    expect(out.steps[1]!.scheduledChangeIds).toEqual(['sc-1']);
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'semantic a test', `schedule test/a ${new Date(flip).toISOString()}`, 'json a /customProperties/statsig.sync.test']);
+    const sc = ld.scheduled.get('sc-1')!;
+    expect(sc.instructions.map((i) => (i as { kind: string }).kind)).toEqual(['turnFlagOn', 'updateOffVariation', 'updateFallthroughVariationOrRollout', 'replaceRules', 'replaceTargets']);
+    expect((sc.instructions[2] as { variationId: string }).variationId).toBe('a-t');
+    expect(out.steps[1]!.message).toMatch(/created 1 scheduled change/);
+  });
+
+  it('a re-sync deletes the scheduled changes the previous sync recorded before creating the new set', async () => {
+    const ld = fakeLd();
+    const f = ld.flag('a', { tags: ['statsig-migrated'], customProperties: { 'statsig.id': { name: 'StatSig ID', value: ['a'] }, 'statsig.source': { name: 'StatSig source', value: ['web'] }, 'statsig.sync.test': { name: 'sync', value: ['fp', '1', '2026-01-01T00:00:00Z', 'dh', 'sc:old-1', 'sc:old-2'] } } });
+    ld.flags.set('a', f);
+    ld.scheduled.set('old-1', { executionDate: 1, instructions: [] });
+    const { ex, run } = setup(ld.client, [scheduledEnv('a')]);
+    run.steps[0]!.step.deps = [];
+    const out = await ex.run(run);
+    expect(out.status).toBe('done');
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['semantic a test', 'unschedule old-1', 'unschedule old-2', `schedule test/a ${new Date(flip).toISOString()}`, 'json a /customProperties/statsig.sync.test']);
+    expect(scheduledIdsFrom(['fp', '1', 't', 'dh', 'sc:x', 'sc:y'])).toEqual(['x', 'y']);
+  });
+
+  it('when LD refuses the scheduled change, the step fails, the capability is learned and nothing half-scheduled is left', async () => {
+    const ld = fakeLd({ createScheduledChange: async () => Promise.reject(new LdWriteError(405, '/scheduled-changes', { message: 'Not available on this plan' })) });
+    const learned: unknown[] = [];
+    const { ex, run } = setup(ld.client, [shell('a'), scheduledEnv('a')]);
+    (ex as unknown as { opts: { onCapability: (c: unknown) => void } }).opts.onCapability = (c) => learned.push(c);
+    const out = await ex.run(run);
+    expect(out.steps[1]).toMatchObject({ status: 'failed', scheduledChangeIds: [], capability: { key: 'scheduled_changes', status: 'unavailable' } });
+    expect(out.steps[1]!.error).toMatch(/refused the scheduled change/);
+    expect(ld.calls).not.toContainEqual('json a /customProperties/statsig.sync.test');
+    expect(learned).toHaveLength(1);
+  });
+
+  it('in an approval-required environment each scheduled change is an approval request with an executionDate', async () => {
+    const ld = fakeLd({ patchFlagSemantic: async () => Promise.reject(new LdWriteError(405, '/flags/p/a', null)) });
+    const { ex, run } = setup(ld.client, [shell('a'), scheduledEnv('a')]);
+    const out = await ex.run(run);
+    expect(out.steps[1]!.approvals!.map((a) => [a.purpose, a.executionDate ?? ''])).toEqual([
+      ['targeting', ''],
+      ['scheduled_change', flip],
+    ]);
+    expect(ld.approvals.get('ar-2')?.executionDate).toBe(Date.parse(flip));
+    expect(ld.scheduled.size).toBe(0);
+  });
+
+  it('undo deletes the scheduled changes the run created', async () => {
+    const ld = fakeLd();
+    const { ex, run } = setup(ld.client, [shell('a'), scheduledEnv('a')]);
+    await ex.run(run);
+    ld.calls.length = 0;
+    await ex.undo(run);
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['unschedule sc-1', 'delete a']);
+    expect(ld.scheduled.size).toBe(0);
+  });
+});
+
+describe('big segments (PLAN §8.3 big_segment)', () => {
+  const ids = Array.from({ length: 20_000 }, (_, i) => `fraud-${i}`);
+  const big: PlanStep = {
+    id: 'segment:test:fraud_blocklist',
+    deps: [],
+    op: 'upsert_segment',
+    ldEnv: 'test',
+    key: 'fraud_blocklist',
+    exists: false,
+    adopt: false,
+    desired: { key: 'fraud_blocklist', ldEnv: 'test', statsigEnv: 'staging', name: 'Fraud blocklist', description: '', tags: ['statsig-migrated', 'statsig-src-web'], rules: [], included: [], includedContexts: [], unbounded: { contextKind: 'user', ids } },
+    provenance: { sourceAlias: 'web', statsigType: 'segment', statsigId: 'fraud_blocklist', statsigFingerprint: 'fp', decisionSetHash: 'dh' },
+  };
+  const withSegments = () => {
+    const segments = new Map<string, Record<string, unknown>>();
+    const ld = fakeLd({
+      getSegment: async (_p: string, _e: string, key: string) => segments.get(key) ?? null,
+      createSegment: async (_p: string, _e: string, b: Record<string, unknown>) => (segments.set(b.key as string, { key: b.key, name: b.name, tags: b.tags, unbounded: b.unbounded ?? false }), segments.get(b.key as string)!),
+      patchSegmentJson: async (_p: string, _e: string, key: string, ops: { path: string }[]) => (ld.calls.push(`json segment ${key} ${ops.map((o) => o.path).join(',')}`), segments.get(key)!),
+      deleteSegment: async (_p: string, _e: string, key: string) => void (ld.calls.push(`delete segment ${key}`), segments.delete(key)),
+    });
+    return { ld, segments };
+  };
+
+  it('creates an unbounded segment, patches only metadata, imports the CSV in replace mode and confirms membership on a sample', async () => {
+    const { ld, segments } = withSegments();
+    const ex = new Executor({ client: ld.client, projectKey: 'p', journal: { save: async () => undefined }, sleep: async () => undefined, now: () => new Date('2026-10-22T00:00:00Z') });
+    const learned: unknown[] = [];
+    (ex as unknown as { opts: { onCapability: (c: unknown) => void } }).opts.onCapability = (c) => learned.push(c);
+    const out = await ex.run(newRun({ id: 'r', workspaceId: 'w', projectKey: 'p', label: 'big', dryRun: false, steps: [big], now: new Date() }));
+    expect(out.status).toBe('done');
+    expect(segments.get('fraud_blocklist')).toMatchObject({ unbounded: true });
+    expect(ld.imports).toEqual([{ key: 'fraud_blocklist', env: 'test', keys: ids, mode: 'replace' }]);
+    expect(ld.calls.filter((c) => c.startsWith('json') || c.startsWith('import'))).toEqual(['json segment fraud_blocklist /description,/tags', 'import test/fraud_blocklist 20000 replace']);
+    expect(out.steps[0]!.import).toEqual({ ids: 20_000, sampled: 3, confirmed: 3 });
+    expect(out.steps[0]!.message).toMatch(/imported 20,000 user IDs .*3 sampled keys confirmed/);
+    expect(learned).toEqual([{ key: 'big_segments', status: 'available', evidence: expect.any(String) }]);
+  });
+
+  it('refuses to turn an existing standard segment into a big one in place', async () => {
+    const { ld, segments } = withSegments();
+    segments.set('fraud_blocklist', { key: 'fraud_blocklist', name: 'x', tags: ['statsig-migrated', 'statsig-src-web'], unbounded: false });
+    const ex = new Executor({ client: ld.client, projectKey: 'p', journal: { save: async () => undefined }, sleep: async () => undefined });
+    const out = await ex.run(newRun({ id: 'r', workspaceId: 'w', projectKey: 'p', label: 'big', dryRun: false, steps: [big], now: new Date() }));
+    expect(out.steps[0]!.error).toMatch(/as a standard segment/);
+    expect(ld.imports).toEqual([]);
+  });
+
+  it('a plan without big segments is learned from the refused create', async () => {
+    const { ld } = withSegments();
+    ld.client.createSegment = async () => Promise.reject(new LdWriteError(400, '/segments', { message: 'unbounded segments are not enabled' }));
+    const learned: unknown[] = [];
+    const ex = new Executor({ client: ld.client, projectKey: 'p', journal: { save: async () => undefined }, sleep: async () => undefined, onCapability: (c) => learned.push(c) });
+    const out = await ex.run(newRun({ id: 'r', workspaceId: 'w', projectKey: 'p', label: 'big', dryRun: false, steps: [big], now: new Date() }));
+    expect(out.steps[0]!.error).toMatch(/refused to create a big segment/);
+    expect(learned).toEqual([{ key: 'big_segments', status: 'unavailable', evidence: 'POST big segment → 400' }]);
+  });
+
+  it('a dry run describes the import without writing', async () => {
+    const { ld } = withSegments();
+    const ex = new Executor({ client: ld.client, projectKey: 'p', journal: { save: async () => undefined }, sleep: async () => undefined });
+    const out = await ex.run(newRun({ id: 'r', workspaceId: 'w', projectKey: 'p', label: 'big', dryRun: true, steps: [big], now: new Date() }));
+    expect(out.steps[0]!.message).toBe('Would create big segment “fraud_blocklist” in test with 20,000 user IDs (big segment).');
+    expect(ld.imports).toEqual([]);
+  });
+});
+
+describe('segment approval instructions', () => {
+  it('diffs rules and targets into semantic-patch instructions, chunking targets at 1,500', () => {
+    const current = { key: 's', name: 's', tags: ['statsig-migrated'], rules: [{ _id: 'r1', clauses: [] }], included: ['u1', 'u2'], includedContexts: [{ contextKind: 'org', values: ['o1'] }] };
+    const desired = { key: 's', ldEnv: 'test', statsigEnv: 'staging', name: 's', description: '', tags: ['statsig-migrated', 'statsig-src-web'], rules: [{ description: 'Beta', clauses: [{ contextKind: 'user', attribute: 'email', op: 'endsWith' as const, values: ['@acme.test'], negate: false }] }], included: ['u2', ...Array.from({ length: 1600 }, (_, i) => `n${i}`)], includedContexts: [{ contextKind: 'org', values: ['o2'] }] };
+    const out = segmentInstructions(current, desired);
+    expect(out.map((i) => i.kind)).toEqual(['removeRule', 'addRule', 'removeIncludedUsers', 'addIncludedUsers', 'addIncludedUsers', 'removeIncludedTargets', 'addIncludedTargets', 'addTags']);
+    expect(out[2]!.values).toEqual(['u1']);
+    expect(out[3]!.values).toHaveLength(1500);
+    expect(out[4]!.values).toHaveLength(100);
+    expect(out[7]).toEqual({ kind: 'addTags', values: ['statsig-src-web'] });
+  });
+
+  it('refuses weighted rules, which approvals cannot express in one step', () => {
+    const desired = { key: 's', ldEnv: 'test', statsigEnv: 'staging', name: 's', description: '', tags: [], rules: [{ description: 'Sample', clauses: [], weight: 10_000, rolloutContextKind: 'user' }], included: [], includedContexts: [] };
+    expect(() => segmentInstructions({ key: 's', name: 's' }, desired)).toThrow(/percentage/);
+  });
+
+  it('a 405 on a segment write files a generic approval request with the segment resource id', async () => {
+    const ld = fakeLd({
+      getSegment: async () => ({ key: 'beta', name: 'beta', tags: ['statsig-migrated', 'statsig-src-web'], rules: [], included: [] }),
+      patchSegmentJson: async () => Promise.reject(new LdWriteError(405, '/segments/p/test/beta', null)),
+    });
+    const step: PlanStep = {
+      id: 'segment:test:beta',
+      deps: [],
+      op: 'upsert_segment',
+      ldEnv: 'test',
+      key: 'beta',
+      exists: true,
+      adopt: false,
+      desired: { key: 'beta', ldEnv: 'test', statsigEnv: 'staging', name: 'beta', description: '', tags: ['statsig-migrated', 'statsig-src-web'], rules: [], included: ['u1'], includedContexts: [] },
+      provenance: { sourceAlias: 'web', statsigType: 'segment', statsigId: 'beta', statsigFingerprint: 'fp', decisionSetHash: 'dh' },
+    };
+    const { ex, run } = setup(ld.client, [step]);
+    const out = await ex.run(run);
+    expect(out.steps[0]).toMatchObject({ status: 'pending_approval', approvals: [{ kind: 'segment', purpose: 'targeting', status: 'pending' }] });
+    expect(ld.calls.filter((c) => c.startsWith('approval'))).toEqual(['approval proj/p:env/test:segment/beta addIncludedUsers']);
   });
 });
 

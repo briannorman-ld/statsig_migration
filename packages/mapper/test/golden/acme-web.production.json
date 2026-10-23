@@ -1304,7 +1304,7 @@
       "notes": [],
       "decisions": [
         "choice client_side_availability (flag settings) → both",
-        "blocking big_segment (rule “Not on blocklist” › condition 1) → no default"
+        "blocking id_list_unavailable (rule “Not on blocklist” › condition 1) → no default"
       ],
       "dependencies": [],
       "env": {
@@ -3012,7 +3012,7 @@
     },
     {
       "segment": "fraud_blocklist",
-      "skipped": "20000 IDs exceed LD's 15,000-ID list segment limit; big segments arrive in M4",
+      "skipped": "its ID list was not fetched from StatSig",
       "fidelity": "skipped",
       "decisions": []
     }

@@ -3,7 +3,7 @@
  * Pipeline Web Worker (PLAN §3): crawl the Console API, parse config specs, normalize to the
  * canonical model, off the UI thread. Pure packages only; no DOM, no storage, no logging of keys.
  */
-import { CrawlAuthError, crawlConsoleProject, normalizeConsoleSnapshot, normalizeSpec, parseSpecBytes, SpecRejectedError } from '@sslm/adapters';
+import { CrawlAuthError, crawlConsoleProject, normalizeConsoleSnapshot, normalizeSpec, parseRawIdCsv, parseSpecBytes, reconcileIdList, SpecRejectedError } from '@sslm/adapters';
 import { StatsigConsoleClient, type SchemaIssue } from '@sslm/statsig-client';
 import type { PipelineEvent, PipelineRequest } from './protocol.ts';
 
@@ -36,6 +36,9 @@ self.onmessage = async (ev: MessageEvent<PipelineRequest>) => {
       });
       const snapshot = normalizeConsoleSnapshot(raw, { source: { sourceId: req.source.sourceId, sourceKind: 'console_api', alias: req.source.alias } });
       post({ id: req.id, type: 'result', snapshot });
+    } else if (req.type === 'reconcile-id-list') {
+      const result = await reconcileIdList(parseRawIdCsv(req.rawCsv), req.hashes ? new Set(req.hashes) : undefined, req.count);
+      post({ id: req.id, type: 'reconciled', result });
     } else {
       const parsed = await parseSpecBytes(new Uint8Array(req.bytes), req.filename);
       const snapshot = normalizeSpec(parsed, {

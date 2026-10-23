@@ -4,6 +4,7 @@ import type { RunRecord } from "@sslm/executor";
 import {
   MigratorDb,
   type CapabilityRecord,
+  type IdListHashesRecord,
   type IdListRecord,
   type ProfileRecord,
   type RunJournalRecord,
@@ -137,12 +138,14 @@ export class WorkspaceStore {
       this.db.resolutions,
       this.db.runs,
       this.db.idLists,
+      this.db.idListHashes,
     ];
     await this.db.transaction("rw", tables, async () => {
       await this.db.profiles.delete(id);
       await this.db.resolutions.where("workspaceId").equals(id).delete();
       await this.db.runs.where("workspaceId").equals(id).delete();
       await this.db.idLists.where("workspaceId").equals(id).delete();
+      await this.db.idListHashes.where("workspaceId").equals(id).delete();
       await this.db.sources.where("workspaceId").equals(id).delete();
       await this.db.snapshots.where("workspaceId").equals(id).delete();
       await this.db.specUploads.where("workspaceId").equals(id).delete();
@@ -179,11 +182,13 @@ export class WorkspaceStore {
         this.db.snapshots,
         this.db.specUploads,
         this.db.idLists,
+        this.db.idListHashes,
       ],
       async () => {
         await this.db.snapshots.where("sourceId").equals(sourceId).delete();
         await this.db.specUploads.where("sourceId").equals(sourceId).delete();
         await this.db.idLists.where("sourceId").equals(sourceId).delete();
+        await this.db.idListHashes.where("sourceId").equals(sourceId).delete();
         await this.db.sources.delete(sourceId);
       },
     );
@@ -387,6 +392,24 @@ export class WorkspaceStore {
 
   async listIdLists(workspaceId: string): Promise<IdListRecord[]> {
     return this.db.idLists.where("workspaceId").equals(workspaceId).toArray();
+  }
+
+  async deleteIdList(uid: string): Promise<void> {
+    await this.db.idLists.delete(uid);
+  }
+
+  // --- Uploaded get_id_lists hashes (PLAN §4.2 reconciliation) ---------------------------------
+
+  async saveIdListHashes(rec: IdListHashesRecord): Promise<void> {
+    await this.db.idListHashes.put(rec);
+  }
+
+  getIdListHashes(uid: string): Promise<IdListHashesRecord | undefined> {
+    return this.db.idListHashes.get(uid);
+  }
+
+  listIdListHashes(workspaceId: string): Promise<IdListHashesRecord[]> {
+    return this.db.idListHashes.where("workspaceId").equals(workspaceId).toArray();
   }
 
   private async touch(workspaceId: string): Promise<void> {

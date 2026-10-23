@@ -4,10 +4,16 @@
  * - every write is idempotent (a create that already happened is recognized by its provenance);
  * - the state of anything updated is captured first (pre-image), so the run can be undone;
  * - each flag environment is one atomic semantic PATCH that also records provenance.
+ *
+ * M4 fallbacks (PLAN §5.1): a 405 means the environment requires approvals, so the same
+ * instructions go into an approval request and the step waits as `pending_approval` until
+ * `checkApprovals` sees it applied; `time` conditions the user chose to schedule become LD
+ * scheduled changes carrying the full targeting of that moment; ID lists above 15,000 become big
+ * segments filled by a CSV import. The first write a plan refuses updates the capability matrix.
  */
 import { LdAuthError, LdWriteError, type JsonPatchOp, type LdClient, type LdExperiment, type LdExperimentationSettings, type LdFlag, type LdFlagConfig, type LdMetric, type LdSegment, type SemanticPatch } from '@sslm/ld-client';
 import { flagOwner, ownsSegment, syncPropertyKey, type PlanStep } from '@sslm/planner';
-import type { DesiredBandit, DesiredRule, VariationOrRollout } from '@sslm/mapper';
+import type { DesiredBandit, DesiredFlagEnv, DesiredRule, DesiredSegment, VariationOrRollout } from '@sslm/mapper';
 
 export type LdWriter = Pick<
   LdClient,
@@ -31,9 +37,21 @@ export type LdWriter = Pick<
   | 'patchExperimentSemantic'
   | 'getExperimentationSettings'
   | 'putExperimentationSettings'
+  | 'createSegmentImport'
+  | 'getSegmentMembership'
+  | 'createFlagApprovalRequest'
+  | 'getFlagApprovalRequest'
+  | 'deleteFlagApprovalRequest'
+  | 'createApprovalRequest'
+  | 'getApprovalRequest'
+  | 'deleteApprovalRequest'
+  | 'listScheduledChanges'
+  | 'createScheduledChange'
+  | 'deleteScheduledChange'
 >;
 
-export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'undone';
+/** `pending_approval`: the write went into an LD approval request; `checkApprovals` moves it on. */
+export type StepStatus = 'pending' | 'running' | 'done' | 'pending_approval' | 'failed' | 'skipped' | 'undone';
 export type RunStatus = 'running' | 'done' | 'failed' | 'stopped' | 'undoing' | 'undone' | 'undo_failed';
 
 export interface StepRecord {
@@ -46,13 +64,40 @@ export interface StepRecord {
   /** Plain-language outcome, e.g. "Created flag", "Would update 3 rules". */
   message?: string;
   error?: string;
-  /** The environment needs an approval request (HTTP 405); fallback arrives in M4. */
+  /** The environment refused a direct write (HTTP 405), so the step went through approval requests. */
   approvalRequired?: boolean;
+  /** Approval requests this step filed (targeting, one per scheduled change, or an undo). */
+  approvals?: ApprovalRecord[];
+  /** LD scheduled changes this step created (also recorded in the flag's sync provenance for re-syncs). */
+  scheduledChangeIds?: string[];
+  /** Big-segment CSV import: IDs sent, and how many sampled keys were confirmed as members afterwards. */
+  import?: { ids: number; sampled: number; confirmed: number };
+  /** A capability this step proved or disproved (PLAN §5.2 "the first failed write updates the matrix"). */
+  capability?: CapabilityUpdate;
   /** Created by this run: undo deletes (or archives) it. */
   created?: boolean;
   /** State before this run touched it: undo restores it. Contains customer config; stays local. */
   preImage?: LdFlag | LdSegment | LdMetric | LdExperiment | LdExperimentationSettings;
   ldVersion?: number;
+}
+
+export interface ApprovalRecord {
+  id: string;
+  /** Flag-scoped request (flag environment routes) or a generic one (segments). */
+  kind: 'flag' | 'segment';
+  purpose: 'targeting' | 'scheduled_change' | 'undo';
+  status: 'pending' | 'applied' | 'declined' | 'failed';
+  createdAt: string;
+  /** For a scheduled change filed through an approval: when LD applies it once approved. */
+  executionDate?: string;
+  checkedAt?: string;
+  reviewStatus?: string;
+}
+
+export interface CapabilityUpdate {
+  key: 'prerequisites' | 'big_segments' | 'scheduled_changes' | 'approvals';
+  status: 'available' | 'unavailable' | 'not_permitted';
+  evidence: string;
 }
 
 export interface RunRecord {
@@ -80,7 +125,13 @@ export interface ExecutorOptions {
   /** Shown in LD audit-log comments, e.g. the member email from caller identity. */
   actor?: string;
   onProgress?: (run: RunRecord) => void;
+  /** A write proved or disproved an LD capability (plan-gated features). The app updates its matrix. */
+  onCapability?: (c: CapabilityUpdate) => void;
   now?: () => Date;
+  /** Wait between membership checks after a big-segment import (tests pass a no-op). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Membership checks after an import before giving up on confirmation (default 6, 5 s apart). */
+  importChecks?: number;
 }
 
 /**
@@ -129,6 +180,7 @@ export class Executor {
   private readonly c: LdWriter;
   private readonly p: string;
   private readonly now: () => Date;
+  private readonly sleep: (ms: number) => Promise<void>;
   /** Flags read during this run, by key (variation IDs for prerequisites). */
   private readonly flags = new Map<string, LdFlag>();
 
@@ -136,6 +188,7 @@ export class Executor {
     this.c = opts.client;
     this.p = opts.projectKey;
     this.now = opts.now ?? (() => new Date());
+    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
   /** Runs (or resumes) every pending step. A dry run writes nothing (LD `dryRun=true`). */
@@ -144,7 +197,7 @@ export class Executor {
     await this.save(run);
     const failed = new Set<string>();
     for (const rec of run.steps) {
-      if (rec.status === 'done' || rec.status === 'skipped') continue;
+      if (rec.status === 'done' || rec.status === 'skipped' || rec.status === 'pending_approval') continue;
       if (signal?.aborted) {
         run.status = 'stopped';
         break;
@@ -163,7 +216,7 @@ export class Executor {
       await this.save(run);
       try {
         rec.message = await this.execute(run, rec);
-        rec.status = 'done';
+        rec.status = rec.approvals?.some((a) => a.status === 'pending') ? 'pending_approval' : 'done';
       } catch (e) {
         rec.status = 'failed';
         rec.error = (e as Error).message;
@@ -193,11 +246,11 @@ export class Executor {
     const createdFlags = new Set(run.steps.filter((s) => s.step.op === 'upsert_flag_shell' && s.created).map((s) => s.step.key));
     let ok = true;
     for (const rec of [...run.steps].reverse()) {
-      if (rec.status !== 'done' && !(rec.status === 'failed' && rec.created)) continue;
+      if (rec.status !== 'done' && rec.status !== 'pending_approval' && !(rec.status === 'failed' && rec.created)) continue;
       try {
         await this.revert(run, rec, createdFlags);
-        rec.status = 'undone';
-        rec.message = `Undone: ${rec.message ?? ''}`.trim();
+        rec.status = rec.approvals?.some((a) => a.status === 'pending' && a.purpose === 'undo') ? 'pending_approval' : 'undone';
+        rec.message = `${rec.status === 'undone' ? 'Undone' : 'Undo requested (approval pending)'}: ${rec.message ?? ''}`.trim();
       } catch (e) {
         ok = false;
         rec.error = `Undo failed: ${(e as Error).message}`;
@@ -209,6 +262,60 @@ export class Executor {
     run.undoneAt = this.now().toISOString();
     await this.save(run);
     return run;
+  }
+
+  /**
+   * Re-read every pending approval request (PLAN §5.1 "poll its status and reviewStatus"). A
+   * flag environment's provenance is written only once LD has applied the targeting, so the
+   * status strip never claims a sync that is still waiting on a reviewer.
+   */
+  async checkApprovals(run: RunRecord): Promise<RunRecord> {
+    let changed = false;
+    for (const rec of run.steps) {
+      const pending = (rec.approvals ?? []).filter((a) => a.status === 'pending');
+      if (!pending.length) continue;
+      for (const a of pending) {
+        const s = rec.step;
+        const ar = a.kind === 'flag' && (s.op === 'update_flag_env' || s.op === 'upsert_flag_shell') ? await this.c.getFlagApprovalRequest(this.p, s.key, s.op === 'update_flag_env' ? s.ldEnv : '', a.id) : await this.c.getApprovalRequest(a.id);
+        a.checkedAt = this.now().toISOString();
+        if (!ar) {
+          a.status = 'failed';
+          a.reviewStatus = 'deleted';
+        } else {
+          a.reviewStatus = ar.reviewStatus ?? undefined;
+          // `scheduled` = approved, LD applies it at executionDate: nothing left for us to do.
+          if (ar.status === 'completed' || ar.status === 'scheduled') a.status = 'applied';
+          else if (ar.reviewStatus === 'declined') a.status = 'declined';
+          else if (ar.status === 'failed') a.status = 'failed';
+        }
+        changed = true;
+      }
+      if (rec.approvals!.some((a) => a.status === 'pending')) continue;
+      const bad = rec.approvals!.filter((a) => a.status === 'declined' || a.status === 'failed');
+      rec.finishedAt = this.now().toISOString();
+      if (bad.length) {
+        rec.status = 'failed';
+        rec.error = `Approval request${bad.length === 1 ? '' : 's'} ${bad.map((a) => `${a.id.slice(0, 8)} ${a.status}${a.reviewStatus && a.reviewStatus !== a.status ? ` (${a.reviewStatus})` : ''}`).join(', ')}.`;
+        continue;
+      }
+      if (rec.status === 'pending_approval') {
+        if (rec.step.op === 'update_flag_env' && rec.approvals!.some((a) => a.purpose === 'targeting')) await this.writeProvenance(run, rec.step, []);
+        rec.status = rec.approvals!.some((a) => a.purpose === 'undo') ? 'undone' : 'done';
+        rec.message = `${(rec.message ?? '').replace(/\s*Provenance is recorded once it is applied\.$/, '')} Approved and applied.`.trim();
+      }
+    }
+    if (changed) {
+      if (run.status === 'done' || run.status === 'failed') run.status = run.steps.some((x) => x.status === 'failed') ? 'failed' : 'done';
+      if (run.status === 'undoing' || run.status === 'undone' || run.status === 'undo_failed') run.status = run.steps.some((x) => x.status === 'failed' || x.error?.startsWith('Undo failed')) ? 'undo_failed' : run.steps.some((x) => x.status === 'pending_approval') ? 'undoing' : 'undone';
+      await this.save(run);
+    }
+    return run;
+  }
+
+  /** Something this run has learned about the LD plan. Recorded on the step and reported once. */
+  private learned(rec: StepRecord, c: CapabilityUpdate) {
+    rec.capability = c;
+    this.opts.onCapability?.(c);
   }
 
   private async save(run: RunRecord) {
@@ -343,18 +450,31 @@ export class Executor {
       if (!s.adopt && !ownsSegment({ key: current.key, tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw new Error(`Segment “${s.key}” appeared in ${s.ldEnv} since planning and wasn't created by this app. Re-plan to decide.`);
       if (!rec.created) rec.preImage = current;
     }
+    if (current && !!current.unbounded !== !!d.unbounded)
+      throw new Error(
+        d.unbounded
+          ? `Segment “${s.key}” exists in ${s.ldEnv} as a standard segment; LD can't turn it into a big segment in place. Delete or rename it in LD, then sync again.`
+          : `Segment “${s.key}” exists in ${s.ldEnv} as a big segment; this list now fits a standard segment. Delete or rename it in LD, then sync again.`,
+      );
     const description = withFooter(d.description, footer(s.provenance, this.now()));
     if (!current) {
-      if (run.dryRun) return `Would create segment “${s.key}” in ${s.ldEnv} with ${segmentSummary(d)}.`;
+      if (run.dryRun) return `Would create ${d.unbounded ? 'big ' : ''}segment “${s.key}” in ${s.ldEnv} with ${segmentSummary(d)}.`;
       try {
-        current = await this.c.createSegment(this.p, s.ldEnv, { key: s.key, name: d.name, description, tags: d.tags });
+        current = await this.c.createSegment(this.p, s.ldEnv, { key: s.key, name: d.name, description, tags: d.tags, ...(d.unbounded ? { unbounded: true, unboundedContextKind: d.unbounded.contextKind } : {}) });
       } catch (e) {
+        if (e instanceof LdWriteError && d.unbounded && (e.status === 400 || e.status === 403 || e.status === 404 || e.status === 405)) {
+          this.learned(rec, { key: 'big_segments', status: e.status === 403 ? 'not_permitted' : 'unavailable', evidence: `POST big segment → ${e.status}` });
+          throw new Error(`LaunchDarkly refused to create a big segment (${e.status}): the plan or token doesn't allow them. The big_segment decision now offers only the other options.`);
+        }
         if (!(e instanceof LdWriteError && e.status === 409)) throw e;
         current = await this.c.getSegment(this.p, s.ldEnv, s.key);
         if (!current || !ownsSegment({ key: current.key, tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw e;
       }
       rec.created = true;
+      if (d.unbounded) this.learned(rec, { key: 'big_segments', status: 'available', evidence: `created big segment ${s.key}` });
     }
+    if (d.unbounded) return this.bigSegment(run, rec, s, current, description);
+
     const patch: JsonPatchOp[] = [
       { op: 'add', path: '/rules', value: d.rules.map((r) => ({ description: r.description, clauses: r.clauses, ...(r.weight !== undefined ? { weight: r.weight, rolloutContextKind: r.rolloutContextKind } : {}) })) },
       { op: 'add', path: '/included', value: d.included },
@@ -362,10 +482,76 @@ export class Executor {
       { op: 'add', path: '/description', value: description },
       { op: 'add', path: '/tags', value: union(current.tags ?? [], d.tags) },
     ];
-    const res = await this.c.patchSegmentJson(this.p, s.ldEnv, s.key, patch, { comment: this.comment(run, s), dryRun: run.dryRun });
-    rec.ldVersion = res.version ?? undefined;
+    try {
+      const res = await this.c.patchSegmentJson(this.p, s.ldEnv, s.key, patch, { comment: this.comment(run, s), dryRun: run.dryRun });
+      rec.ldVersion = res.version ?? undefined;
+    } catch (e) {
+      if (!(e instanceof LdWriteError && e.status === 405)) throw e;
+      rec.approvalRequired = true;
+      if (run.dryRun) return `Would file an approval request for segment “${s.key}” in ${s.ldEnv} (the environment requires approvals): ${segmentSummary(d)}.`;
+      return this.segmentApproval(run, rec, s, current);
+    }
     if (run.dryRun) return `Would update segment “${s.key}” in ${s.ldEnv}: ${segmentSummary(d)}.`;
     return `${rec.created ? 'Created' : 'Updated'} segment “${s.key}” in ${s.ldEnv}: ${segmentSummary(d)}.`;
+  }
+
+  /**
+   * Big segment (PLAN §8.3 `big_segment`): description and tags by JSON patch, membership by a CSV
+   * import in `replace` mode. LD answers the import with 204 and a `Location` the browser can't
+   * read, so completion is confirmed by sampling membership instead of polling the import.
+   */
+  private async bigSegment(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'upsert_segment' }>, current: LdSegment, description: string): Promise<string> {
+    const d = s.desired;
+    const ids = d.unbounded!.ids;
+    const patch: JsonPatchOp[] = [
+      { op: 'add', path: '/description', value: description },
+      { op: 'add', path: '/tags', value: union(current.tags ?? [], d.tags) },
+    ];
+    const res = await this.c.patchSegmentJson(this.p, s.ldEnv, s.key, patch, { comment: this.comment(run, s), dryRun: run.dryRun });
+    rec.ldVersion = res.version ?? undefined;
+    if (run.dryRun) return `Would import ${ids.length.toLocaleString('en-US')} ${d.unbounded!.contextKind} IDs into big segment “${s.key}” in ${s.ldEnv} (replace mode).`;
+    try {
+      await this.c.createSegmentImport(this.p, s.ldEnv, s.key, ids, { mode: 'replace' });
+    } catch (e) {
+      if (e instanceof LdWriteError && (e.status === 403 || e.status === 404 || e.status === 405)) {
+        this.learned(rec, { key: 'big_segments', status: e.status === 403 ? 'not_permitted' : 'unavailable', evidence: `POST segment import → ${e.status}` });
+        throw new Error(`The big segment “${s.key}” exists but LaunchDarkly refused the CSV import (${e.status}): ${e.message}`);
+      }
+      throw e;
+    }
+    // Confirm asynchronously processed membership on a sample: first, middle and last key.
+    const sample = unique([ids[0]!, ids[Math.floor(ids.length / 2)]!, ids[ids.length - 1]!]);
+    let confirmed = 0;
+    const checks = this.opts.importChecks ?? 6;
+    for (let attempt = 0; attempt < checks; attempt++) {
+      if (attempt > 0) await this.sleep(5000);
+      const results = await Promise.all(sample.map((k) => this.c.getSegmentMembership(this.p, s.ldEnv, s.key, k).catch(() => null)));
+      confirmed = results.filter((r) => r?.included).length;
+      if (confirmed === sample.length) break;
+    }
+    rec.import = { ids: ids.length, sampled: sample.length, confirmed };
+    const verdict = confirmed === sample.length ? `${sample.length} sampled keys confirmed as members` : `${confirmed}/${sample.length} sampled keys visible so far; LD processes imports asynchronously`;
+    return `${rec.created ? 'Created' : 'Updated'} big segment “${s.key}” in ${s.ldEnv}: imported ${ids.length.toLocaleString('en-US')} ${d.unbounded!.contextKind} IDs (replace mode); ${verdict}.`;
+  }
+
+  /**
+   * Segment write in an environment that requires approvals: the same change as semantic-patch
+   * instructions (reference/launchdarkly/openapi.json "Patch segment"), filed with the generic
+   * approval-request route and `resourceId: proj/…:env/…:segment/…`.
+   */
+  private async segmentApproval(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'upsert_segment' }>, current: LdSegment): Promise<string> {
+    const d = s.desired;
+    if (rec.approvals?.some((a) => a.purpose === 'targeting' && a.status === 'pending')) return rec.message ?? `Approval requested for segment “${s.key}” in ${s.ldEnv}.`;
+    const instructions = segmentInstructions(current, d);
+    const ar = await this.c.createApprovalRequest({
+      resourceId: `proj/${this.p}:env/${s.ldEnv}:segment/${s.key}`,
+      description: `StatSig migration: segment “${s.key}” in ${s.ldEnv} (${segmentSummary(d)})`,
+      instructions,
+      comment: this.comment(run, s),
+    });
+    (rec.approvals ??= []).push({ id: ar._id, kind: 'segment', purpose: 'targeting', status: 'pending', createdAt: this.now().toISOString() });
+    this.learned(rec, { key: 'approvals', status: 'available', evidence: `405 on segment ${s.key} in ${s.ldEnv}; approval request ${ar._id} filed` });
+    return `Approval requested for segment “${s.key}” in ${s.ldEnv} (${instructions.length} instructions): ${segmentSummary(d)}. Provenance is recorded once it is applied.`;
   }
 
   private async shell(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'upsert_flag_shell' }>): Promise<string> {
@@ -410,32 +596,100 @@ export class Executor {
     if (rec.preImage === undefined) rec.preImage = flag;
     const ids = variationIds(flag, s.variations);
     const d = s.desired;
+    const scheduled = d.scheduledChanges ?? [];
+    const instructions = await this.stateInstructions(d, flag, s.ldEnv, ids);
+    const comment = this.comment(run, s);
+    // Scheduled changes an earlier sync created (recorded in the sync provenance) and any this
+    // step created before an interrupted attempt: both are replaced below.
+    const previous = unique([...scheduledIdsFrom(flag.customProperties?.[syncPropertyKey(s.ldEnv)]?.value), ...(rec.scheduledChangeIds ?? [])]);
+
+    let approval = false;
+    try {
+      const res = await this.c.patchFlagSemantic(this.p, s.key, { environmentKey: s.ldEnv, comment, instructions }, { dryRun: run.dryRun });
+      rec.ldVersion = res.environments?.[s.ldEnv]?.version ?? undefined;
+    } catch (e) {
+      if (!(e instanceof LdWriteError && e.status === 405)) throw e;
+      approval = true;
+      rec.approvalRequired = true;
+    }
+
+    const summary = envSummary(d, s.variations);
+    const schedNote = scheduled.length ? ` and ${scheduled.length} scheduled change${scheduled.length === 1 ? '' : 's'} (${scheduled.map((c) => c.executionDate).join(', ')})` : '';
+    if (approval) {
+      if (run.dryRun) return `Would file an approval request for targeting in ${s.ldEnv}${schedNote} (the environment requires approvals): ${summary}.`;
+      rec.approvals ??= [];
+      if (!rec.approvals.some((a) => a.purpose === 'targeting' && a.status === 'pending')) {
+        const ar = await this.c.createFlagApprovalRequest(this.p, s.key, s.ldEnv, { description: `StatSig migration: targeting for “${s.key}” in ${s.ldEnv} (${summary})`, instructions, comment });
+        rec.approvals.push({ id: ar._id, kind: 'flag', purpose: 'targeting', status: 'pending', createdAt: this.now().toISOString() });
+        this.learned(rec, { key: 'approvals', status: 'available', evidence: `405 on ${s.key} in ${s.ldEnv}; approval request ${ar._id} filed` });
+      }
+      // PLAN §5.1: when approvals are required, executionDate goes on the approval request.
+      for (const sc of scheduled) {
+        if (rec.approvals.some((a) => a.purpose === 'scheduled_change' && a.executionDate === sc.executionDate && a.status === 'pending')) continue;
+        const ar = await this.c.createFlagApprovalRequest(this.p, s.key, s.ldEnv, { description: `StatSig migration: ${sc.description} for “${s.key}”`, instructions: await this.stateInstructions(sc.state, flag, s.ldEnv, ids), comment, executionDate: Date.parse(sc.executionDate) });
+        rec.approvals.push({ id: ar._id, kind: 'flag', purpose: 'scheduled_change', status: 'pending', createdAt: this.now().toISOString(), executionDate: sc.executionDate });
+      }
+      return `Approval requested for targeting in ${s.ldEnv}${schedNote}: ${summary}. Provenance is recorded once it is applied.`;
+    }
+
+    if (run.dryRun) return `Would set targeting in ${s.ldEnv}${schedNote ? `${schedNote.replace(' and ', ' and create ')}` : ''}${previous.length ? `, replacing ${previous.length} earlier scheduled change${previous.length === 1 ? '' : 's'}` : ''}: ${summary}.`;
+
+    // Scheduled changes: ours are full-state snapshots, so the earlier ones go and the new set is created.
+    const created: string[] = [];
+    if (scheduled.length || previous.length) {
+      for (const id of previous) await this.c.deleteScheduledChange(this.p, s.key, s.ldEnv, id).catch(ignore404);
+      rec.scheduledChangeIds = [];
+      try {
+        for (const sc of scheduled) {
+          const r = await this.c.createScheduledChange(this.p, s.key, s.ldEnv, { executionDate: Date.parse(sc.executionDate), instructions: await this.stateInstructions(sc.state, flag, s.ldEnv, ids), comment: `${comment}: ${sc.description}` }, { ignoreConflicts: true });
+          created.push(r._id);
+          rec.scheduledChangeIds = [...created];
+        }
+        if (scheduled.length) this.learned(rec, { key: 'scheduled_changes', status: 'available', evidence: `created ${scheduled.length} scheduled change(s) on ${s.key}` });
+      } catch (e) {
+        if (e instanceof LdWriteError && (e.status === 403 || e.status === 404 || e.status === 405)) this.learned(rec, { key: 'scheduled_changes', status: e.status === 403 ? 'not_permitted' : 'unavailable', evidence: `POST scheduled change → ${e.status}` });
+        for (const id of created) await this.c.deleteScheduledChange(this.p, s.key, s.ldEnv, id).catch(() => undefined);
+        rec.scheduledChangeIds = [];
+        throw new Error(`Targeting in ${s.ldEnv} was written (as StatSig evaluates today), but LaunchDarkly refused the scheduled change: ${(e as Error).message} The time_condition decision now offers only the other options; re-sync after choosing one.`);
+      }
+    }
+    await this.writeProvenance(run, s, created);
+    return `Set targeting in ${s.ldEnv}${schedNote ? schedNote.replace(' and ', ' and created ') : ''}: ${summary}.`;
+  }
+
+  /**
+   * Provenance, `statsig.sync.<env>` (PLAN §3.3): `[fingerprint, version, syncedAt, decisionSetHash, sc:<id>…]`.
+   * LD refuses custom-property instructions in a patch with environment instructions, so it's a
+   * second write; it runs only after targeting succeeded (or was approved and applied), so LD
+   * never claims a sync that didn't happen.
+   */
+  private async writeProvenance(run: RunRecord, s: Extract<PlanStep, { op: 'update_flag_env' }>, scheduledChangeIds: string[]): Promise<void> {
+    const prop = syncPropertyKey(s.ldEnv);
+    const value = [s.provenance.statsigFingerprint, String(s.provenance.statsigVersion ?? ''), this.now().toISOString(), s.provenance.decisionSetHash, ...scheduledChangeIds.map((id) => `sc:${id}`)];
+    await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: { name: `StatSig sync (${s.ldEnv})`, value } }], { comment: this.comment(run, s), dryRun: run.dryRun });
+  }
+
+  /** The semantic-patch instructions that make an environment match `state` (also used for scheduled changes and approvals). */
+  private async stateInstructions(state: Pick<DesiredFlagEnv, 'on' | 'offVariation' | 'fallthrough' | 'rules' | 'targets' | 'prerequisites'>, flag: LdFlag, ldEnv: string, ids: Ids): Promise<SemanticPatch['instructions']> {
     const instructions: SemanticPatch['instructions'] = [
-      { kind: d.on ? 'turnFlagOn' : 'turnFlagOff' },
-      { kind: 'updateOffVariation', variationId: ids(d.offVariation) },
-      { kind: 'updateFallthroughVariationOrRollout', ...serve(d.fallthrough, ids) },
-      { kind: 'replaceRules', rules: d.rules.map((r) => rule(r, ids)) },
-      { kind: 'replaceTargets', targets: d.targets.map((t) => ({ contextKind: t.contextKind, variationId: ids(t.variation), values: t.values })) },
+      { kind: state.on ? 'turnFlagOn' : 'turnFlagOff' },
+      { kind: 'updateOffVariation', variationId: ids(state.offVariation) },
+      { kind: 'updateFallthroughVariationOrRollout', ...serve(state.fallthrough, ids) },
+      { kind: 'replaceRules', rules: state.rules.map((r) => rule(r, ids)) },
+      { kind: 'replaceTargets', targets: state.targets.map((t) => ({ contextKind: t.contextKind, variationId: ids(t.variation), values: t.values })) },
     ];
-    const prev = flag.environments?.[s.ldEnv]?.prerequisites ?? [];
-    if (d.prerequisites.length || prev.length) {
+    const prev = flag.environments?.[ldEnv]?.prerequisites ?? [];
+    if (state.prerequisites.length || prev.length) {
       const prerequisites = [];
-      for (const p of d.prerequisites) {
+      for (const p of state.prerequisites) {
         const pf = this.flags.get(p.key) ?? (await this.c.getFlag(this.p, p.key));
         if (!pf) throw new Error(`Prerequisite flag “${p.key}” doesn't exist.`);
+        this.flags.set(p.key, pf);
         prerequisites.push({ key: p.key, variationId: variationIds(pf, [true, false])(p.variation) });
       }
       instructions.push({ kind: 'replacePrerequisites', prerequisites });
     }
-    const res = await this.c.patchFlagSemantic(this.p, s.key, { environmentKey: s.ldEnv, comment: this.comment(run, s), instructions }, { dryRun: run.dryRun });
-    rec.ldVersion = res.environments?.[s.ldEnv]?.version ?? undefined;
-    // Provenance, `statsig.sync.<env>` (PLAN §3.3). LD refuses custom-property instructions in a
-    // patch with environment instructions, so it's a second write; it runs only after targeting
-    // succeeded, so LD never claims a sync that didn't happen.
-    const prop = syncPropertyKey(s.ldEnv);
-    const value = [s.provenance.statsigFingerprint, String(s.provenance.statsigVersion ?? ''), this.now().toISOString(), s.provenance.decisionSetHash];
-    await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: { name: `StatSig sync (${s.ldEnv})`, value } }], { comment: this.comment(run, s), dryRun: run.dryRun });
-    return `${run.dryRun ? 'Would set' : 'Set'} targeting in ${s.ldEnv}: ${envSummary(d, s.variations)}.`;
+    return instructions;
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -451,9 +705,16 @@ export class Executor {
         if (rec.created) await this.c.putContextKind(this.p, s.key, { name: s.name, archived: true });
         return;
       case 'upsert_segment': {
+        for (const a of rec.approvals ?? []) if (a.status === 'pending') await this.c.deleteApprovalRequest(a.id).catch(ignore404);
         if (rec.created) return this.c.deleteSegment(this.p, s.ldEnv, s.key);
         const pre = rec.preImage as LdSegment | undefined;
         if (!pre) return;
+        if (pre.unbounded) {
+          // Big-segment membership can't be read back in bulk, so only the metadata is restored.
+          await this.c.patchSegmentJson(this.p, s.ldEnv, s.key, [{ op: 'add', path: '/description', value: pre.description ?? '' }, { op: 'add', path: '/tags', value: pre.tags ?? [] }], { comment });
+          rec.error = 'Undo restored the description and tags; the members imported into the big segment stay (LD has no bulk read to restore the previous list).';
+          return;
+        }
         await this.c.patchSegmentJson(
           this.p,
           s.ldEnv,
@@ -513,6 +774,9 @@ export class Executor {
         return;
       }
       case 'update_flag_env': {
+        // Approval requests still waiting are withdrawn; scheduled changes this run created are deleted.
+        for (const a of rec.approvals ?? []) if (a.status === 'pending' && a.purpose !== 'undo') await this.c.deleteFlagApprovalRequest(this.p, s.key, s.ldEnv, a.id).catch(ignore404);
+        for (const id of rec.scheduledChangeIds ?? []) await this.c.deleteScheduledChange(this.p, s.key, s.ldEnv, id).catch(ignore404);
         // A flag this run created is deleted at its (last) environment step: environment steps are
         // in dependency order, so reversing them deletes dependents before their prerequisites,
         // and flags before the segments they use (LD refuses both the other way round).
@@ -520,6 +784,8 @@ export class Executor {
         const pre = rec.preImage as LdFlag | undefined;
         const env = pre?.environments?.[s.ldEnv];
         if (!pre || !env) return;
+        // Targeting that never got applied (approval still pending) has nothing to restore.
+        if (rec.status === 'pending_approval') return;
         const current = await this.c.getFlag(this.p, s.key);
         if (!current) return;
         const prop = syncPropertyKey(s.ldEnv);
@@ -529,7 +795,15 @@ export class Executor {
           const id = pf?.variations[p.variation]?._id;
           if (id) prereqs.push({ key: p.key, variationId: id });
         }
-        await this.c.patchFlagSemantic(this.p, s.key, { environmentKey: s.ldEnv, comment, instructions: restoreInstructions(pre, env, current, current.environments?.[s.ldEnv], prereqs) });
+        const instructions = restoreInstructions(pre, env, current, current.environments?.[s.ldEnv], prereqs);
+        try {
+          await this.c.patchFlagSemantic(this.p, s.key, { environmentKey: s.ldEnv, comment, instructions });
+        } catch (e) {
+          if (!(e instanceof LdWriteError && e.status === 405)) throw e;
+          // The environment requires approvals: the restore is filed as one too.
+          const ar = await this.c.createFlagApprovalRequest(this.p, s.key, s.ldEnv, { description: `Undo StatSig migration: restore targeting for “${s.key}” in ${s.ldEnv}`, instructions, comment });
+          (rec.approvals ??= []).push({ id: ar._id, kind: 'flag', purpose: 'undo', status: 'pending', createdAt: this.now().toISOString() });
+        }
         const before = pre.customProperties?.[prop];
         if (before) await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: before }], { comment });
         else if (current.customProperties?.[prop]) await this.c.patchFlagJson(this.p, s.key, [{ op: 'remove', path: `/customProperties/${pointer(prop)}` }], { comment });
@@ -628,6 +902,55 @@ function shellPatch(flag: LdFlag, d: Extract<PlanStep, { op: 'upsert_flag_shell'
   return ops;
 }
 
+/** `sc:<id>` entries of a `statsig.sync.<env>` value: the scheduled changes an earlier sync created. */
+export function scheduledIdsFrom(value: (string | null | undefined)[] | null | undefined): string[] {
+  return (value ?? []).filter((v): v is string => typeof v === 'string' && v.startsWith('sc:')).map((v) => v.slice(3));
+}
+
+function ignore404(e: unknown): void {
+  if (!(e instanceof LdWriteError && e.status === 404)) throw e;
+}
+
+function unique<T>(xs: T[]): T[] {
+  return [...new Set(xs)];
+}
+
+/** LD caps target operations at 1,500 per instruction ("Patch segment"). */
+const TARGET_BATCH = 1500;
+
+function chunks<T>(xs: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Semantic-patch instructions that make `current` match `d` (for approval requests, which only
+ * take instructions): rules are removed and re-added, included targets diffed per context kind,
+ * tags added. Weighted segment rules can't be added with a weight in one instruction, so they
+ * are refused here rather than filed wrong.
+ */
+export function segmentInstructions(current: LdSegment, d: DesiredSegment): SemanticPatch['instructions'] {
+  const weighted = d.rules.find((r) => r.weight !== undefined);
+  if (weighted) throw new Error(`Segment rule “${weighted.description}” has a percentage; LD approval requests can't add a weighted segment rule in one step. Have an approver create the rule, or turn off segment approvals for this environment.`);
+  const out: SemanticPatch['instructions'] = [];
+  for (const r of current.rules ?? []) if (r._id) out.push({ kind: 'removeRule', ruleId: r._id });
+  for (const r of d.rules) out.push({ kind: 'addRule', description: r.description, clauses: r.clauses });
+  const diff = (have: string[], want: string[]) => ({ add: want.filter((v) => !have.includes(v)), remove: have.filter((v) => !want.includes(v)) });
+  const users = diff(current.included ?? [], d.included);
+  for (const c of chunks(users.remove, TARGET_BATCH)) out.push({ kind: 'removeIncludedUsers', values: c });
+  for (const c of chunks(users.add, TARGET_BATCH)) out.push({ kind: 'addIncludedUsers', values: c });
+  const kinds = unique([...(current.includedContexts ?? []).map((c) => c.contextKind), ...d.includedContexts.map((c) => c.contextKind)]);
+  for (const kind of kinds) {
+    const t = diff(current.includedContexts?.find((c) => c.contextKind === kind)?.values ?? [], d.includedContexts.find((c) => c.contextKind === kind)?.values ?? []);
+    for (const c of chunks(t.remove, TARGET_BATCH)) out.push({ kind: 'removeIncludedTargets', contextKind: kind, values: c });
+    for (const c of chunks(t.add, TARGET_BATCH)) out.push({ kind: 'addIncludedTargets', contextKind: kind, values: c });
+  }
+  const tags = d.tags.filter((t) => !(current.tags ?? []).includes(t));
+  if (tags.length) out.push({ kind: 'addTags', values: tags });
+  return out;
+}
+
 function pointer(k: string): string {
   return k.replace(/~/g, '~0').replace(/\//g, '~1');
 }
@@ -677,7 +1000,8 @@ export function banditSummary(d: DesiredBandit): string {
   return `${d.treatments.length} arms (${d.treatments.map((t) => `${t.name} ${t.allocationPercent}%`).join(', ')}), optimizing “${d.metricKey}” by ${d.randomizationUnit}`;
 }
 
-function segmentSummary(d: { rules: unknown[]; included: string[]; includedContexts: { values: string[] }[] }): string {
+function segmentSummary(d: { rules: unknown[]; included: string[]; includedContexts: { values: string[] }[]; unbounded?: { contextKind: string; ids: string[] } }): string {
+  if (d.unbounded) return `${d.unbounded.ids.length.toLocaleString('en-US')} ${d.unbounded.contextKind} IDs (big segment)`;
   const ids = d.included.length + d.includedContexts.reduce((n, c) => n + c.values.length, 0);
   return [d.rules.length ? `${d.rules.length} rule${d.rules.length === 1 ? '' : 's'}` : '', ids ? `${ids} IDs` : ''].filter(Boolean).join(', ') || 'no members';
 }
@@ -701,5 +1025,6 @@ export function envSummary(d: Extract<PlanStep, { op: 'update_flag_env' }>['desi
     ...(targets ? [`${targets} individual target${targets === 1 ? '' : 's'}`] : []),
     ...(d.prerequisites.length ? [`prerequisite ${d.prerequisites.map((p) => p.key).join(', ')}`] : []),
     `default ${ft}`,
+    ...(d.scheduledChanges?.length ? [`${d.scheduledChanges.length} scheduled change${d.scheduledChanges.length === 1 ? '' : 's'}`] : []),
   ].join(', ');
 }

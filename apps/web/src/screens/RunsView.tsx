@@ -4,7 +4,9 @@ import type { RunRecord } from "@sslm/executor";
 import { LD_INSTANCES } from "@sslm/ld-client";
 import { Badge, Button, Callout, Card, cx } from "../components/ui.tsx";
 import {
+  checkRunApprovals,
   isInterrupted,
+  pendingApprovals,
   resumeRun,
   undoRun,
   useActiveRun,
@@ -41,6 +43,7 @@ export function RunsView({
   const [open, setOpen] = useState<string>();
   const [error, setError] = useState<string>();
   const [confirmUndo, setConfirmUndo] = useState<string>();
+  const [checking, setChecking] = useState<string>();
   const ldBase = m.ld.projectKey
     ? `${LD_INSTANCES[m.ld.instance ?? "us"].origin}/${m.ld.projectKey}`
     : undefined;
@@ -71,6 +74,7 @@ export function RunsView({
       {runs.map((stored) => {
         const run = active?.id === stored.id ? active : stored;
         const interrupted = isInterrupted(run, workspaceId);
+        const awaiting = pendingApprovals(run);
         const createdFlags = new Set(
           run.steps
             .filter((s) => s.created && s.step.op === "upsert_flag_shell")
@@ -100,11 +104,30 @@ export function RunsView({
                 {interrupted ? "interrupted" : run.status}
               </Badge>
               {run.dryRun && <Badge tone="violet">dry run</Badge>}
+              {awaiting > 0 && (
+                <Badge tone="violet" title="Writes filed as LaunchDarkly approval requests; provenance is recorded once a reviewer applies them">
+                  {awaiting} pending approval
+                </Badge>
+              )}
               <span className="text-xs text-fg-muted">
                 {timeAgo(run.startedAt)} · #{run.id.slice(0, 8)} ·{" "}
                 {run.steps.length} operations
               </span>
               <div className="ml-auto flex gap-2">
+                {awaiting > 0 && !interrupted && (
+                  <Button
+                    variant="secondary"
+                    className="py-1.5"
+                    disabled={!m.connected || !!active || checking === run.id}
+                    onClick={() => {
+                      setChecking(run.id);
+                      void act(() => checkRunApprovals(workspaceId, m.ld, run)).finally(() => setChecking(undefined));
+                    }}
+                    title="Re-read the approval requests this run is waiting on"
+                  >
+                    Check approvals
+                  </Button>
+                )}
                 {interrupted && (
                   <Button
                     variant="secondary"

@@ -1,9 +1,12 @@
 import type { CanonicalSnapshot, EntityKind } from '@sslm/canonical';
-import type { CrawlProgress } from '@sslm/adapters';
+import type { CrawlProgress, ReconcileResult } from '@sslm/adapters';
 import type { PipelineEvent, PipelineRequest, PipelineSource } from './protocol.ts';
 
+type SnapshotResult = { snapshot: CanonicalSnapshot; spec?: { version: 1 | 2; json: unknown; bytes: number } };
+
 type Pending = {
-  resolve: (r: { snapshot: CanonicalSnapshot; spec?: { version: 1 | 2; json: unknown; bytes: number } }) => void;
+  resolve: (r: SnapshotResult) => void;
+  resolveReconciled?: (r: ReconcileResult) => void;
   reject: (e: PipelineError) => void;
   onProgress?: (p: CrawlProgress) => void;
   onTransport?: (e: Extract<PipelineEvent, { type: 'transport' }>['event']) => void;
@@ -35,6 +38,9 @@ export class Pipeline {
       else if (e.type === 'result') {
         this.pending.delete(e.id);
         p.resolve({ snapshot: e.snapshot, ...(e.spec ? { spec: e.spec } : {}) });
+      } else if (e.type === 'reconciled') {
+        this.pending.delete(e.id);
+        p.resolveReconciled?.(e.result);
       } else {
         this.pending.delete(e.id);
         p.reject(new PipelineError(e.code, e.message));
@@ -48,6 +54,15 @@ export class Pipeline {
 
   parseSpec(args: { source: PipelineSource; bytes: ArrayBuffer; filename: string }, handlers: Omit<Pending, 'resolve' | 'reject'> = {}) {
     return this.send({ type: 'parse-spec', ...args }, handlers, [args.bytes]);
+  }
+
+  /** Hash a raw-ID upload off the UI thread and reconcile it with StatSig's hashed list. */
+  reconcileIdList(args: { rawCsv: string; hashes?: string[]; count?: number }): Promise<ReconcileResult> {
+    const id = this.nextId++;
+    return new Promise<ReconcileResult>((resolveReconciled, reject) => {
+      this.pending.set(id, { resolve: () => undefined, resolveReconciled, reject });
+      this.worker.postMessage({ type: 'reconcile-id-list', ...args, id } satisfies PipelineRequest);
+    });
   }
 
   private send(body: RequestBody<PipelineRequest>, handlers: Omit<Pending, 'resolve' | 'reject'>, transfer: Transferable[] = []) {

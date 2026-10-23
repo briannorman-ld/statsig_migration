@@ -129,8 +129,8 @@ describe('time, null and unsupported conditions', () => {
     }
   });
 
-  it('big and unloaded ID lists block the gate', () => {
-    expect(mapGate(args('block_fraudulent_checkout')).unresolved.map((d) => [d.type, d.severity])).toContainEqual(['big_segment', 'blocking']);
+  it('an unloaded ID list blocks the gate until it is fetched', () => {
+    expect(mapGate(args('block_fraudulent_checkout')).unresolved.map((d) => [d.type, d.severity])).toContainEqual(['id_list_unavailable', 'blocking']);
     expect(mapGate(args('wholesale_portal')).unresolved.map((d) => d.type)).toContain('id_list_unavailable');
   });
 
@@ -141,6 +141,136 @@ describe('time, null and unsupported conditions', () => {
     expect(mapGate(args('wholesale_portal', { canonical })).unresolved.map((d) => d.type)).toEqual(['client_side_availability']);
     const s = mapSegment({ ...args('wholesale_portal', { canonical }), entity: seg });
     expect(s.desired?.included).toHaveLength(2500);
+  });
+});
+
+describe('big segments (PLAN §8.3 big_segment; edge case 9.3)', () => {
+  const fraud = () => web.segments.find((s) => s.id === 'fraud_blocklist')!;
+  const ids = Array.from({ length: 20_000 }, (_, i) => `fraud-user-${String(i + 1).padStart(6, '0')}`);
+  const loaded = () => ({ snapshot: web, idLists: { [fraud().uid]: ids } });
+
+  it('a loaded list above 15,000 IDs is a choice shared by the gate and the segment, recommending a CSV import', () => {
+    const g = mapGate(args('block_fraudulent_checkout', { canonical: loaded() }));
+    const d = g.unresolved.find((x) => x.type === 'big_segment')!;
+    expect(d.severity).toBe('choice');
+    expect(d.recommended).toBe('import');
+    expect(d.subject.uid).toBe(fraud().uid);
+    // Preview with the recommended option: the rule targets the (big) segment.
+    expect(g.env.rules[0]!.clauses).toEqual([{ contextKind: 'user', attribute: 'segmentMatch', op: 'segmentMatch', values: ['fraud_blocklist'], negate: true }]);
+    expect(g.dependencies).toContainEqual({ kind: 'segment', key: 'fraud_blocklist', entityId: 'fraud_blocklist' });
+    const s = mapSegment({ ...args('block_fraudulent_checkout', { canonical: loaded() }), entity: fraud() });
+    expect(s.unresolved.map((x) => x.id)).toEqual([d.id]);
+    expect(s.desired?.unbounded).toEqual({ contextKind: 'user', ids });
+    expect(s.desired?.included).toEqual([]);
+  });
+
+  it('is blocking without an import option when the LD plan has no big segments', () => {
+    const capabilities = { ...CAPS, bigSegments: 'unavailable' as const };
+    const d = mapGate(args('block_fraudulent_checkout', { canonical: loaded(), capabilities })).unresolved.find((x) => x.type === 'big_segment')!;
+    expect(d.severity).toBe('blocking');
+    expect(d.options.map((o) => o.key)).toEqual(['drop_condition', 'drop_rule', 'skip']);
+  });
+
+  it('one answer covers the gate rule and the segment', () => {
+    const g = mapGate(args('block_fraudulent_checkout', { canonical: loaded() }));
+    const d = g.unresolved.find((x) => x.type === 'big_segment')!;
+    const res = { id: d.id, type: d.type, optionKey: 'drop_rule', scope: 'resource' as const, fingerprint: d.fingerprint, decidedAt: NOW };
+    const resolutions = new Map([[res.id, res]]);
+    const g2 = mapGate(args('block_fraudulent_checkout', { canonical: loaded(), resolutions }));
+    expect(g2.env.rules).toEqual([]);
+    expect(g2.dependencies.filter((x) => x.kind === 'segment')).toEqual([]);
+    const s = mapSegment({ ...args('block_fraudulent_checkout', { canonical: loaded(), resolutions }), entity: fraud() });
+    expect(s.desired).toBeNull();
+    expect(s.skipped).toMatch(/rules referencing it were changed/);
+  });
+});
+
+describe('hashed ID lists and reconciliation (PLAN §4.2; edge case 9.4)', () => {
+  const hashed = (): CanonicalSnapshot => {
+    const seg = web.segments.find((s) => s.id === 'wholesale_partners')!;
+    return { ...web, segments: web.segments.map((s) => (s === seg ? { ...s, idList: { count: 2500, hashed: { listName: 'wholesale_partners' } } } : s)) };
+  };
+  const seg = () => hashed().segments.find((s) => s.id === 'wholesale_partners')!;
+  const ids = Array.from({ length: 2490 }, (_, i) => `partner-${String(i + 1).padStart(5, '0')}`);
+
+  it('without raw IDs the segment blocks every rule that needs it, and the segment is skipped', () => {
+    const snapshot = hashed();
+    const g = mapGate(args('wholesale_portal', { canonical: { snapshot } }));
+    const d = g.unresolved.find((x) => x.type === 'hashed_id_list')!;
+    expect(d.severity).toBe('blocking');
+    expect(d.subject.uid).toBe(seg().uid);
+    expect(d.explanation).toMatch(/Upload the raw IDs/);
+    const s = mapSegment({ ...args('wholesale_portal', { canonical: { snapshot } }), entity: seg() });
+    expect(s.skipped).toMatch(/upload the raw IDs/);
+  });
+
+  it('a reconciled upload short of 100% is an acknowledgement; accepting it migrates the matched IDs', () => {
+    const snapshot = hashed();
+    const canonical = { snapshot, idLists: { [seg().uid]: ids }, coverage: { [seg().uid]: { total: 2500, matched: 2490, missing: 10, extra: 0, verified: true } } };
+    const g = mapGate(args('wholesale_portal', { canonical }));
+    const d = g.unresolved.find((x) => x.type === 'hashed_id_list')!;
+    expect(d.severity).toBe('acknowledge');
+    expect(d.title).toMatch(/99\.6%/);
+    expect(g.env.rules[0]!.clauses[0]!.op).toBe('segmentMatch');
+    const s = mapSegment({ ...args('wholesale_portal', { canonical }), entity: seg() });
+    expect(s.desired?.included).toHaveLength(2490);
+    expect(s.fidelity.overall).toBe('partial');
+    expect(s.unresolved.map((x) => x.id)).toEqual([d.id]);
+  });
+
+  it('a complete, verified upload needs no decision', () => {
+    const snapshot = hashed();
+    const canonical = { snapshot, idLists: { [seg().uid]: ids }, coverage: { [seg().uid]: { total: 2490, matched: 2490, missing: 0, extra: 3, verified: true } } };
+    expect(types(mapGate(args('wholesale_portal', { canonical })))).toEqual(['client_side_availability']);
+    const s = mapSegment({ ...args('wholesale_portal', { canonical }), entity: seg() });
+    expect(s.fidelity.overall).toBe('full');
+    expect(s.fidelity.notes.map((n) => n.message)).toContainEqual(expect.stringMatching(/3 uploaded IDs not in the list left out/));
+  });
+});
+
+describe('scheduled changes for time conditions (PLAN §5.1; edge case 5.3)', () => {
+  const schedule = (over: Partial<MapArgs<Gate>> = {}) => {
+    const first = mapGate(args('black_friday_2027'));
+    const d = first.unresolved.find((x) => x.type === 'time_condition')!;
+    const res = { id: d.id, type: d.type, optionKey: 'schedule', scope: 'resource' as const, fingerprint: d.fingerprint, decidedAt: NOW };
+    return { d, r: mapGate(args('black_friday_2027', { resolutions: new Map([[res.id, res]]), ...over })) };
+  };
+
+  it('offers a scheduled change, recommended once the probe shows the plan allows it', () => {
+    const unknown = mapGate(args('black_friday_2027')).unresolved.find((x) => x.type === 'time_condition')!;
+    expect(unknown.options.map((o) => o.key)).toEqual(['schedule', 'resolve_now', 'skip']);
+    expect(unknown.recommended).toBe('resolve_now');
+    const available = mapGate(args('black_friday_2027', { capabilities: { ...CAPS, scheduledChanges: 'available' } })).unresolved.find((x) => x.type === 'time_condition')!;
+    expect(available.recommended).toBe('schedule');
+    const none = mapGate(args('black_friday_2027', { capabilities: { ...CAPS, scheduledChanges: 'unavailable' } })).unresolved.find((x) => x.type === 'time_condition')!;
+    expect(none.options.map((o) => o.key)).toEqual(['resolve_now', 'skip']);
+  });
+
+  it('"schedule" mirrors StatSig now and carries the targeting as of the flip in a scheduled change', () => {
+    const { r } = schedule();
+    expect(r.unresolved.map((d) => d.type)).toEqual(['client_side_availability']);
+    expect(r.fidelity.overall).toBe('full');
+    // Before Black Friday the rule can't match: off-state targeting, nothing served.
+    expect(r.env.rules).toEqual([]);
+    expect(r.env.fallthrough).toEqual({ variation: 1 });
+    expect(r.env.scheduledChanges).toHaveLength(1);
+    const sc = r.env.scheduledChanges![0]!;
+    expect(sc.executionDate).toBe('2027-11-26T05:00:00Z');
+    // As of the flip the rule matches everyone, so the scheduled state serves true by default.
+    expect(sc.state.fallthrough).toEqual({ variation: 0 });
+    expect(sc.state.rules).toEqual([]);
+  });
+
+  it('once the flip has passed nothing is scheduled and the condition resolves statically', () => {
+    const { r } = schedule({ now: '2028-01-01T00:00:00.000Z' });
+    expect(r.env.scheduledChanges).toBeUndefined();
+    expect(r.env.fallthrough).toEqual({ variation: 0 });
+  });
+
+  it('is deterministic', () => {
+    const a = schedule().r;
+    const b = schedule().r;
+    expect(a).toEqual(b);
   });
 });
 

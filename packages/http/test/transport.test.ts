@@ -123,6 +123,21 @@ describe('Transport', () => {
   });
 });
 
+describe('Transport multipart bodies', () => {
+  it('sends a FormData body as is, letting fetch set the multipart boundary', async () => {
+    const seen: RequestInit[] = [];
+    const t = new Transport({ fetch: async (_u, init) => (seen.push(init!), new Response(null, { status: 204 })), clock: instantClock().clock });
+    const form = new FormData();
+    form.append('mode', 'replace');
+    form.append('file', new Blob(['a\nb\n'], { type: 'text/csv' }), 'ids.csv');
+    const res = await t.request({ method: 'POST', url: 'https://ld.test/api/v2/segments/p/e/k/imports', headers: { Authorization: 'tok', 'Content-Type': 'application/json' }, body: form });
+    expect(res.status).toBe(204);
+    expect(seen[0]!.body).toBe(form);
+    expect((seen[0]!.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+    expect((seen[0]!.headers as Record<string, string>).Authorization).toBe('tok');
+  });
+});
+
 describe('Transport retry policy by method', () => {
   it('does not retry a POST on 5xx or a timeout: it may already have been applied', async () => {
     let calls = 0;

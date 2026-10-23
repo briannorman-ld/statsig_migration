@@ -24,6 +24,7 @@ import {
   type DesiredSegment,
   type FidelityReport,
   type GateMapResult,
+  type IdListCoverages,
   type IdLists,
   type MapperCapabilities,
   type MappingProfile,
@@ -89,6 +90,8 @@ export interface PlanRequest {
   ldEnvs: string[];
   snapshots: CanonicalSnapshot[];
   idLists?: IdLists;
+  /** Reconciliation results for uploaded raw-ID lists (PLAN §4.2), by segment uid. */
+  coverage?: IdListCoverages;
   profile: MappingProfile;
   resolutions: ReadonlyMap<string, Resolution>;
   capabilities: MapperCapabilities;
@@ -245,7 +248,7 @@ export function planMigration(req: PlanRequest): Plan {
       existing.requiredBy.push(requiredBy);
       return existing.status === 'ready' ? { ok: true, stepId: `segment:${ldEnv}:${existing.ldKey}` } : { ok: false, reason: `segment “${segmentId}” is ${existing.status}` };
     }
-    const r: SegmentMapResult = mapSegment({ canonical: { snapshot, idLists: req.idLists }, entity: seg, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
+    const r: SegmentMapResult = mapSegment({ canonical: { snapshot, idLists: req.idLists, ...(req.coverage ? { coverage: req.coverage } : {}) }, entity: seg, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
     const ldSeg = req.ld.segments[ldEnv]?.get(r.segmentKey);
     const item: PlanItem = { uid: seg.uid, kind: 'segment', entityId: seg.id, sourceId: seg.source.sourceId, ldKey: r.segmentKey, ldEnv, statsigEnv, status: 'ready', dependency: true, requiredBy: [requiredBy], fidelity: r.fidelity, decisions: [], exists: !!ldSeg };
     items.set(itemKey, item);
@@ -298,7 +301,7 @@ export function planMigration(req: PlanRequest): Plan {
     if (!statsigEnv) return finishItem(item, 'error', `no StatSig environment of ${snapshot.source.alias} is mapped to LD “${ldEnv}”`);
     item.statsigEnv = statsigEnv;
 
-    const r: GateMapResult = mapGate({ canonical: { snapshot, idLists: req.idLists }, entity: gate, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
+    const r: GateMapResult = mapGate({ canonical: { snapshot, idLists: req.idLists, ...(req.coverage ? { coverage: req.coverage } : {}) }, entity: gate, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
     item.ldKey = r.flagKey;
     item.fidelity = r.fidelity;
     addDecisions(item, r.unresolved, r.stale);
@@ -410,7 +413,7 @@ export function planMigration(req: PlanRequest): Plan {
     if (!statsigEnv) return void finishItem(item, 'error', `no StatSig environment of ${snapshot.source.alias} is mapped to LD “${ldEnv}”`);
     item.statsigEnv = statsigEnv;
 
-    const r: ConfigMapResult = mapConfig({ canonical: { snapshot, idLists: req.idLists }, entity: config, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
+    const r: ConfigMapResult = mapConfig({ canonical: { snapshot, idLists: req.idLists, ...(req.coverage ? { coverage: req.coverage } : {}) }, entity: config, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
     item.ldKey = r.flagKey;
     item.fidelity = r.fidelity;
     addDecisions(item, r.unresolved, r.stale);
@@ -538,7 +541,7 @@ export function planMigration(req: PlanRequest): Plan {
       return;
     }
     item.statsigEnv = statsigEnv;
-    const r = mapAutotune({ canonical: { snapshot, idLists: req.idLists }, entity: a, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
+    const r = mapAutotune({ canonical: { snapshot, idLists: req.idLists, ...(req.coverage ? { coverage: req.coverage } : {}) }, entity: a, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
     item.ldKey = r.flagKey;
     item.fidelity = r.fidelity;
     addDecisions(item, r.unresolved, r.stale);
@@ -688,12 +691,20 @@ export function planMigration(req: PlanRequest): Plan {
     errors,
     confirmEnvs: req.ldEnvs.filter((e) => req.ld.criticalEnvs.includes(e) && ordered.some((s) => 'ldEnv' in s && s.ldEnv === e)),
     ready: errors.length === 0 && requested.every((i) => i.status === 'ready' || i.status === 'skipped') && all.every((i) => i.status !== 'blocked' && i.status !== 'error'),
-    requests: ordered.reduce((n, s) => n + REQUESTS[s.op], 0),
+    requests: ordered.reduce((n, s) => n + requestsFor(s), 0),
   };
 }
 
 /** Writes per step, including the reads that capture pre-images. */
 const REQUESTS: Record<PlanStep['op'], number> = { ensure_context_kind: 1, upsert_segment: 3, upsert_flag_shell: 2, update_flag_env: 2, ensure_randomization_unit: 2, upsert_metric: 2, create_bandit: 3 };
+
+/** A big segment adds the CSV import and its status polls; scheduled changes add a list, a delete each and a create each. */
+export function requestsFor(s: PlanStep): number {
+  let n = REQUESTS[s.op];
+  if (s.op === 'upsert_segment' && s.desired.unbounded) n += 4;
+  if (s.op === 'update_flag_env' && s.desired.scheduledChanges?.length) n += 1 + 2 * s.desired.scheduledChanges.length;
+  return n;
+}
 
 /** Kahn's algorithm, stable by step id. Steps in a cycle are reported and left out. */
 export function topoSort(steps: PlanStep[], errors: string[]): PlanStep[] {

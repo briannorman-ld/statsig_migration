@@ -87,7 +87,10 @@ export interface RunJournalRecord extends RunRecord {
   snapshots?: { sourceId: string; takenAt: string }[];
 }
 
-/** ID lists fetched on demand for segments the crawl deferred (PLAN §4.1). Customer data: local only. */
+/**
+ * Plaintext ID lists by segment uid (PLAN §4.1, §4.2): fetched on demand from the Console API, or
+ * uploaded as a raw-ID CSV for a spec source's hashed list. Customer data: local only.
+ */
 export interface IdListRecord {
   /** Segment uid. */
   uid: string;
@@ -95,6 +98,22 @@ export interface IdListRecord {
   sourceId: string;
   fetchedAt: string;
   ids: string[];
+  /** Where the IDs came from; absent = Console API fetch (M3 records). */
+  origin?: "console" | "upload";
+  fileName?: string;
+  /** Reconciliation against StatSig's hashed list, for uploads (mapper `IdListCoverage`). */
+  coverage?: { total: number; matched: number; missing: number; extra: number; verified: boolean };
+}
+
+/** Hashes from uploaded `get_id_lists` files, by segment uid, so a later raw-ID upload can be reconciled. */
+export interface IdListHashesRecord {
+  uid: string;
+  workspaceId: string;
+  sourceId: string;
+  listName: string;
+  uploadedAt: string;
+  fileNames: string[];
+  hashes: string[];
 }
 
 export class MigratorDb extends Dexie {
@@ -107,6 +126,7 @@ export class MigratorDb extends Dexie {
   resolutions!: Dexie.Table<ResolutionRecord, [string, string]>;
   runs!: EntityTable<RunJournalRecord, "id">;
   idLists!: EntityTable<IdListRecord, "uid">;
+  idListHashes!: EntityTable<IdListHashesRecord, "uid">;
 
   constructor(name = "statsig-ld-migrator") {
     super(name);
@@ -128,6 +148,10 @@ export class MigratorDb extends Dexie {
     this.version(3).stores({
       specUploads:
         "id, workspaceId, sourceId, snapshotId, [sourceId+uploadedAt]",
+    });
+    // M4: hashes from uploaded get_id_lists files (ID-list reconciliation for spec sources).
+    this.version(4).stores({
+      idListHashes: "uid, workspaceId, sourceId",
     });
   }
 }

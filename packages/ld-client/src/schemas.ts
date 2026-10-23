@@ -217,6 +217,53 @@ export const ExperimentationSettingsSchema = z.looseObject({
 });
 export type LdExperimentationSettings = z.infer<typeof ExperimentationSettingsSchema>;
 
+/** Big-segment CSV import (GET /segments/{p}/{e}/{key}/imports/{id}). `status` runs preparing → … → complete | stopped. */
+export const SegmentImportSchema = z.looseObject({
+  id: optStr,
+  segmentKey: optStr,
+  mode: optStr,
+  status: optStr,
+  creationTime: optNum,
+  files: z.array(z.looseObject({ filename: optStr, status: optStr })).nullish(),
+});
+export type LdSegmentImport = z.infer<typeof SegmentImportSchema>;
+
+/** GET /segments/{p}/{e}/{key}/contexts/{contextKey} (BigSegmentTarget). */
+export const SegmentMembershipSchema = z.looseObject({ userKey: optStr, included: z.boolean(), excluded: z.boolean() });
+
+/** Approval request (flag-scoped or generic). `status` pending → completed | failed | scheduled; `reviewStatus` pending → approved | declined. */
+export const ApprovalRequestSchema = z.looseObject({
+  _id: z.string(),
+  _version: optNum,
+  creationDate: optNum,
+  serviceKind: optStr,
+  requestorId: optStr,
+  description: optStr,
+  reviewStatus: optStr,
+  status: optStr,
+  appliedDate: optNum,
+  executionDate: optNum,
+  resourceId: optStr,
+  instructions: z.array(z.unknown()).nullish(),
+  conflicts: z.array(z.unknown()).nullish(),
+  allReviews: z.array(z.looseObject({ kind: optStr, memberId: optStr, creationDate: optNum, comment: optStr })).nullish(),
+});
+export type LdApprovalRequest = z.infer<typeof ApprovalRequestSchema>;
+
+/** Scheduled flag change (GET /projects/{p}/flags/{f}/environments/{e}/scheduled-changes). */
+export const ScheduledChangeSchema = z.looseObject({
+  _id: z.string(),
+  _version: optNum,
+  _creationDate: optNum,
+  _maintainerId: optStr,
+  _maintainerServiceTokenId: optStr,
+  executionDate: optNum,
+  instructions: z.array(z.unknown()).nullish(),
+  conflicts: z.unknown().optional(),
+});
+export const ScheduledChangesSchema = z.looseObject({ items: z.array(ScheduledChangeSchema), totalCount: optNum });
+export type LdScheduledChange = z.infer<typeof ScheduledChangeSchema>;
+
 /** Any `{items: [...]}` collection, for probes where we only care that the route answers. */
 export const CollectionSchema = z.looseObject({ items: z.array(z.unknown()).nullish(), totalCount: optNum });
 

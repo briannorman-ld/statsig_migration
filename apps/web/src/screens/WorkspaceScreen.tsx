@@ -265,7 +265,7 @@ export function WorkspaceScreen({
   const interrupted = (runs ?? []).filter((r) => isInterrupted(r, workspaceId));
 
   // Load deferred ID lists (≤15k IDs) once per snapshot, so small list segments don't sit behind an
-  // "ID list not loaded" decision. Bigger lists stay deferred until big segments (M4).
+  // "ID list not loaded" decision. Bigger lists (big segments) load on request from Source warnings.
   const fetchedFor = useRef(new Set<string>());
   useEffect(() => {
     if (!m || !sources) return;

@@ -2,6 +2,7 @@ import { HttpError, Transport, UnreachableError, type TransportOptions } from '@
 import type { z } from 'zod';
 import { LD_API_VERSION, LD_INSTANCES, type LdInstance, type LdInstanceId } from './instances.ts';
 import {
+  ApprovalRequestSchema,
   CallerIdentitySchema,
   ContextKindsSchema,
   EnvironmentSchema,
@@ -17,7 +18,12 @@ import {
   SegmentSchema,
   SegmentsSchema,
   ProjectsSchema,
+  ScheduledChangeSchema,
+  ScheduledChangesSchema,
+  SegmentImportSchema,
+  SegmentMembershipSchema,
   TokenSchema,
+  type LdApprovalRequest,
   type LdCallerIdentity,
   type LdEnvironment,
   type LdExperiment,
@@ -26,7 +32,9 @@ import {
   type LdMetric,
   type LdFlagSummary,
   type LdProject,
+  type LdScheduledChange,
   type LdSegment,
+  type LdSegmentImport,
   type LdToken,
 } from './schemas.ts';
 
@@ -60,7 +68,7 @@ export interface ProbeResult {
   body?: unknown;
 }
 
-/** A failed LD write. `status` 405 on a flag PATCH means the environment requires approvals. */
+/** A failed LD write. `status` 405 on a flag or segment PATCH means the environment requires approvals (PLAN §5.1). */
 export class LdWriteError extends Error {
   constructor(
     readonly status: number | 'unreachable',
@@ -75,7 +83,7 @@ export class LdWriteError extends Error {
 function ldErrorMessage(status: number | 'unreachable', path: string, body: unknown): string {
   const msg = body && typeof body === 'object' && 'message' in body ? String((body as { message: unknown }).message) : undefined;
   if (status === 'unreachable') return `LaunchDarkly unreachable for ${path}.`;
-  if (status === 405) return `Approval required for ${path} (405). Approval requests arrive with M4.`;
+  if (status === 405) return `${path} requires an approval (405): the environment's approval settings forbid direct writes.`;
   return `LaunchDarkly ${status} for ${path}${msg ? `: ${msg}` : ''}`;
 }
 
@@ -304,8 +312,99 @@ export class LdClient {
     await this.write('DELETE', `/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, undefined, null);
   }
 
-  createSegment(projectKey: string, envKey: string, body: { key: string; name: string; description?: string; tags?: string[] }): Promise<LdSegment> {
+  /** `unbounded: true` with `unboundedContextKind` creates a big segment (Enterprise), whose members come from imports. */
+  createSegment(projectKey: string, envKey: string, body: { key: string; name: string; description?: string; tags?: string[]; unbounded?: boolean; unboundedContextKind?: string }): Promise<LdSegment> {
     return this.write('POST', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}`, body, SegmentSchema);
+  }
+
+  /**
+   * Start a big-segment CSV import (POST /segments/{p}/{e}/{key}/imports, multipart `file` + `mode`;
+   * reference/launchdarkly/openapi.json createBigSegmentImport). `keys` become one key per line.
+   * LD answers 204 with the import's URL in `Location`, which the browser can't read without an
+   * exposed header; the import is then found by listing (`getSegmentImport` with the id when known).
+   */
+  async createSegmentImport(projectKey: string, envKey: string, key: string, keys: string[], opts: { mode: 'merge' | 'replace'; waitOnApprovals?: boolean }): Promise<void> {
+    const form = new FormData();
+    form.append('file', new Blob([keys.join('\n') + '\n'], { type: 'text/csv' }), `${key}.csv`);
+    form.append('mode', opts.mode);
+    if (opts.waitOnApprovals !== undefined) form.append('waitOnApprovals', String(opts.waitOnApprovals));
+    await this.write('POST', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}/imports`, form, null);
+  }
+
+  /** GET /segments/{p}/{e}/{key}/contexts/{contextKey}: whether one key is an included member (how an import is verified from a browser). */
+  getSegmentMembership(projectKey: string, envKey: string, key: string, contextKey: string, signal?: AbortSignal): Promise<{ included: boolean; excluded: boolean } | null> {
+    return this.optional(`/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}/contexts/${encodeURIComponent(contextKey)}`, SegmentMembershipSchema, signal);
+  }
+
+  getSegmentImport(projectKey: string, envKey: string, key: string, importId: string, signal?: AbortSignal): Promise<LdSegmentImport> {
+    return this.get(`/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}/imports/${encodeURIComponent(importId)}`, SegmentImportSchema, { signal });
+  }
+
+  /** Semantic patch on a segment (needed for approval requests, which only take instructions). */
+  patchSegmentSemantic(projectKey: string, envKey: string, key: string, patch: SemanticPatch): Promise<LdSegment> {
+    return this.write('PATCH', `/segments/${encodeURIComponent(projectKey)}/${encodeURIComponent(envKey)}/${encodeURIComponent(key)}`, { ...patch, environmentKey: envKey }, SegmentSchema, {
+      contentType: 'application/json; domain-model=launchdarkly.semanticpatch',
+    });
+  }
+
+  // --- Approvals and scheduled changes (PLAN §5.1) -------------------------------------------------
+
+  /** POST /projects/{p}/flags/{f}/environments/{e}/approval-requests (createFlagConfigApprovalRequestRequest). */
+  createFlagApprovalRequest(
+    projectKey: string,
+    flagKey: string,
+    envKey: string,
+    body: { description: string; instructions: SemanticPatch['instructions']; comment?: string; executionDate?: number; notifyMemberIds?: string[]; notifyTeamKeys?: string[] },
+  ): Promise<LdApprovalRequest> {
+    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/flags/${encodeURIComponent(flagKey)}/environments/${encodeURIComponent(envKey)}/approval-requests`, body, ApprovalRequestSchema);
+  }
+
+  getFlagApprovalRequest(projectKey: string, flagKey: string, envKey: string, id: string, signal?: AbortSignal): Promise<LdApprovalRequest | null> {
+    return this.optional(`/projects/${encodeURIComponent(projectKey)}/flags/${encodeURIComponent(flagKey)}/environments/${encodeURIComponent(envKey)}/approval-requests/${encodeURIComponent(id)}`, ApprovalRequestSchema, signal);
+  }
+
+  async deleteFlagApprovalRequest(projectKey: string, flagKey: string, envKey: string, id: string): Promise<void> {
+    await this.write('DELETE', `/projects/${encodeURIComponent(projectKey)}/flags/${encodeURIComponent(flagKey)}/environments/${encodeURIComponent(envKey)}/approval-requests/${encodeURIComponent(id)}`, undefined, null);
+  }
+
+  /** POST /approval-requests: any resource, e.g. `resourceId: "proj/p:env/e:segment/s"` with segment instructions. */
+  createApprovalRequest(body: { resourceId: string; description: string; instructions: SemanticPatch['instructions']; comment?: string; notifyMemberIds?: string[]; notifyTeamKeys?: string[] }): Promise<LdApprovalRequest> {
+    return this.write('POST', '/approval-requests', body, ApprovalRequestSchema);
+  }
+
+  getApprovalRequest(id: string, signal?: AbortSignal): Promise<LdApprovalRequest | null> {
+    return this.optional(`/approval-requests/${encodeURIComponent(id)}`, ApprovalRequestSchema, signal);
+  }
+
+  async deleteApprovalRequest(id: string): Promise<void> {
+    await this.write('DELETE', `/approval-requests/${encodeURIComponent(id)}`, undefined, null);
+  }
+
+  async listScheduledChanges(projectKey: string, flagKey: string, envKey: string, signal?: AbortSignal): Promise<LdScheduledChange[]> {
+    const page = await this.get(`/projects/${encodeURIComponent(projectKey)}/flags/${encodeURIComponent(flagKey)}/environments/${encodeURIComponent(envKey)}/scheduled-changes`, ScheduledChangesSchema, { signal });
+    return page.items;
+  }
+
+  /**
+   * POST scheduled changes (PostFlagScheduledChangesInput). `ignoreConflicts` lets several full-state
+   * changes on one flag coexist: ours each replace the whole targeting, so conflicts between them are intended.
+   */
+  createScheduledChange(projectKey: string, flagKey: string, envKey: string, body: { executionDate: number; instructions: SemanticPatch['instructions']; comment?: string }, opts: { ignoreConflicts?: boolean } = {}): Promise<LdScheduledChange> {
+    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/flags/${encodeURIComponent(flagKey)}/environments/${encodeURIComponent(envKey)}/scheduled-changes`, body, ScheduledChangeSchema, opts.ignoreConflicts ? { query: { ignoreConflicts: 'true' } } : {});
+  }
+
+  async deleteScheduledChange(projectKey: string, flagKey: string, envKey: string, id: string): Promise<void> {
+    await this.write('DELETE', `/projects/${encodeURIComponent(projectKey)}/flags/${encodeURIComponent(flagKey)}/environments/${encodeURIComponent(envKey)}/scheduled-changes/${encodeURIComponent(id)}`, undefined, null);
+  }
+
+  /** GET that returns `null` on 404. */
+  private async optional<S extends z.ZodType>(path: string, schema: S, signal?: AbortSignal): Promise<z.output<S> | null> {
+    try {
+      return await this.get(path, schema, { signal });
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) return null;
+      throw e;
+    }
   }
 
   patchSegmentJson(projectKey: string, envKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string; dryRun?: boolean } = {}): Promise<LdSegment> {

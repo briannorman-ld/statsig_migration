@@ -18,6 +18,7 @@ import {
   type DecisionPoint,
   type EnvTarget,
   type GateMapResult,
+  type IdListCoverages,
   type IdLists,
   type MapperCapabilities,
   type MappingProfile,
@@ -33,7 +34,7 @@ import {
 import { StatsigConsoleClient } from "@sslm/statsig-client";
 import type { SourceRecord, RunJournalRecord } from "@sslm/store";
 import { demoKey, startDemoMock } from "./demo.ts";
-import { ldClient, refreshLdState, type LdSession } from "./ld.ts";
+import { learnCapability, ldClient, refreshLdState, type LdSession } from "./ld.ts";
 import { secrets } from "./secrets.ts";
 import { store } from "./store.ts";
 
@@ -72,6 +73,8 @@ export function mapperCapabilities(
   return {
     prerequisites: cap("prerequisites"),
     contextKinds: cap("context_kinds"),
+    bigSegments: cap("big_segments"),
+    scheduledChanges: cap("scheduled_changes"),
     existingContextKinds: contextKinds ?? ["user"],
   };
 }
@@ -136,6 +139,8 @@ export interface MappingInputs {
   resolutions: ReadonlyMap<string, Resolution>;
   capabilities: MapperCapabilities;
   idLists: IdLists;
+  /** Reconciliation results for uploaded raw-ID lists (PLAN §4.2), by segment uid. */
+  coverage: IdListCoverages;
   now: string;
 }
 
@@ -170,7 +175,7 @@ export function mapGateFor(
 ): GateMapResult {
   return memoized(i, snapshot, memoKey("gate", gate.uid, env), () =>
     mapGate({
-      canonical: { snapshot, idLists: i.idLists },
+      canonical: { snapshot, idLists: i.idLists, coverage: i.coverage },
       entity: gate,
       profile: i.profile,
       resolutions: i.resolutions,
@@ -189,7 +194,7 @@ export function mapSegmentFor(
 ): SegmentMapResult {
   return memoized(i, snapshot, memoKey("segment", segment.uid, env), () =>
     mapSegment({
-      canonical: { snapshot, idLists: i.idLists },
+      canonical: { snapshot, idLists: i.idLists, coverage: i.coverage },
       entity: segment,
       profile: i.profile,
       resolutions: i.resolutions,
@@ -202,13 +207,13 @@ export function mapSegmentFor(
 
 export function mapConfigFor(snapshot: CanonicalSnapshot, config: Config, env: EnvTarget, i: MappingInputs): ConfigMapResult {
   return memoized(i, snapshot, memoKey("config", config.uid, env), () =>
-    mapConfig({ canonical: { snapshot, idLists: i.idLists }, entity: config, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now }),
+    mapConfig({ canonical: { snapshot, idLists: i.idLists, coverage: i.coverage }, entity: config, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now }),
   );
 }
 
 export function mapAutotuneFor(snapshot: CanonicalSnapshot, autotune: Autotune, env: EnvTarget, i: MappingInputs): AutotuneMapResult {
   return memoized(i, snapshot, memoKey("autotune", autotune.uid, env), () =>
-    mapAutotune({ canonical: { snapshot, idLists: i.idLists }, entity: autotune, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now }),
+    mapAutotune({ canonical: { snapshot, idLists: i.idLists, coverage: i.coverage }, entity: autotune, profile: i.profile, resolutions: i.resolutions, capabilities: i.capabilities, env, now: i.now }),
   );
 }
 
@@ -284,33 +289,35 @@ export async function loadIdLists(workspaceId: string): Promise<IdLists> {
   );
 }
 
-/** ID lists above this stay deferred: they become big segments (CSV import, M4). */
-export const ID_LIST_FETCH_MAX = 15_000;
+/** Lists up to this size load automatically after a sync; bigger ones on request from Source warnings. */
+export const ID_LIST_AUTO_MAX = 15_000;
+/** Upper bound for an on-demand load: one Console API page per 100 IDs, within the 900-per-15-minutes budget. */
+export const ID_LIST_FETCH_MAX = 250_000;
 
 export interface IdListFetchReport {
   idLists: IdLists;
   /** Segments whose lists were loaded by this call. */
   loaded: string[];
-  /** Segments too big to load on demand (big segments, M4). */
+  /** Segments above the requested limit, left deferred. */
   tooBig: string[];
   /** Sources whose lists couldn't be read, and why (no key in memory, not a Console API source). */
   blocked: { sourceId: string; reason: string }[];
 }
 
-/** Fetch members of deferred ID-list segments (≤15k IDs) from Console API sources. */
-export async function fetchDeferredIdLists(workspaceId: string, sources: SourceRecord[], snapshots: CanonicalSnapshot[], have: IdLists, onProgress?: (m: string) => void): Promise<IdLists> {
-  return (await fetchDeferredIdListsReport(workspaceId, sources, snapshots, have, onProgress)).idLists;
+/** Fetch members of deferred ID-list segments up to `max` IDs (default: the automatic limit) from Console API sources. */
+export async function fetchDeferredIdLists(workspaceId: string, sources: SourceRecord[], snapshots: CanonicalSnapshot[], have: IdLists, onProgress?: (m: string) => void, max = ID_LIST_AUTO_MAX): Promise<IdLists> {
+  return (await fetchDeferredIdListsReport(workspaceId, sources, snapshots, have, onProgress, max)).idLists;
 }
 
 /** Like fetchDeferredIdLists, and says what it could not load, so the warnings page can offer a retry. */
-export async function fetchDeferredIdListsReport(workspaceId: string, sources: SourceRecord[], snapshots: CanonicalSnapshot[], have: IdLists, onProgress?: (m: string) => void): Promise<IdListFetchReport> {
+export async function fetchDeferredIdListsReport(workspaceId: string, sources: SourceRecord[], snapshots: CanonicalSnapshot[], have: IdLists, onProgress?: (m: string) => void, max = ID_LIST_AUTO_MAX): Promise<IdListFetchReport> {
   const out: IdLists = { ...have };
   const report: IdListFetchReport = { idLists: out, loaded: [], tooBig: [], blocked: [] };
   for (const snap of snapshots) {
     const source = sources.find((s) => s.id === snap.source.sourceId);
     const deferred = snap.segments.filter((s) => s.segmentType === "id_list" && !s.archived && !s.idList?.ids && !s.idList?.hashed && !out[s.uid]);
-    const pending = deferred.filter((s) => (s.idList?.count ?? 0) <= ID_LIST_FETCH_MAX);
-    report.tooBig.push(...deferred.filter((s) => (s.idList?.count ?? 0) > ID_LIST_FETCH_MAX).map((s) => s.id));
+    const pending = deferred.filter((s) => (s.idList?.count ?? 0) <= max);
+    report.tooBig.push(...deferred.filter((s) => (s.idList?.count ?? 0) > max).map((s) => s.id));
     if (!pending.length) continue;
     if (source?.kind !== "console_api" || !source.baseUrl) {
       report.blocked.push({ sourceId: snap.source.sourceId, reason: "ID lists can only be read through the Console API; a config spec carries hashed IDs." });
@@ -331,7 +338,7 @@ export async function fetchDeferredIdListsReport(workspaceId: string, sources: S
       const list = await client.getIdList(seg.id);
       out[seg.uid] = list.ids;
       report.loaded.push(seg.id);
-      await store.saveIdList({ uid: seg.uid, workspaceId, sourceId: source.id, fetchedAt: new Date().toISOString(), ids: list.ids });
+      await store.saveIdList({ uid: seg.uid, workspaceId, sourceId: source.id, fetchedAt: new Date().toISOString(), ids: list.ids, origin: "console" });
     }
   }
   return report;
@@ -366,6 +373,7 @@ export function buildPlan(input: { selection: MigrationSelection; ldEnvs: string
     ldEnvs: input.ldEnvs,
     snapshots: input.snapshots,
     idLists: input.idLists,
+    coverage: input.coverage,
     profile: input.profile,
     resolutions: input.resolutions,
     capabilities: input.capabilities,
@@ -414,8 +422,25 @@ function executor(
       active.set(workspaceId, r);
       notify();
     },
+    // PLAN §5.2: the first write a plan refuses (or allows) settles an "unknown" capability.
+    onCapability: (c) => void learnCapability(workspaceId, c),
   });
 }
+
+/**
+ * Re-read the approval requests a run is waiting on (PLAN §5.1). Steps whose request was applied
+ * get their provenance written and complete; declined ones fail. Refreshes LD state afterwards so
+ * the status strip reflects what approvers applied.
+ */
+export async function checkRunApprovals(workspaceId: string, ld: LdSession, run: RunRecord): Promise<RunRecord> {
+  const before = run.steps.filter((s) => s.status === "pending_approval").length;
+  const r = await executor(workspaceId, ld, (run as RunJournalRecord).snapshots).checkApprovals(structuredClone(run));
+  const after = r.steps.filter((s) => s.status === "pending_approval").length;
+  if (after !== before) await refreshLdState(workspaceId);
+  return r;
+}
+
+export const pendingApprovals = (run: RunRecord) => run.steps.filter((s) => s.status === "pending_approval").length;
 
 /**
  * Run with a Web Locks guard (one running tab per workspace) and a beforeunload warning

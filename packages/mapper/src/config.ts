@@ -18,6 +18,7 @@ import { DecisionCollector } from './decisions.ts';
 import { chooseClientSideAvailability, commonPassesGate, expansion, gateReference, PASS, provenanceProperties, report, sourceTag, TAG_MIGRATED, type MapArgs, type MapOutcome } from './gate.ts';
 import { sanitizeKey, sanitizeTag } from './profile.ts';
 import type { InlineState } from './refs.ts';
+import { scheduledChanges } from './schedule.ts';
 import type { Dependency, DesiredFlagEnv, DesiredFlagShell, DesiredRule, DesiredTarget, FidelityNote, VariationOrRollout } from './types.ts';
 
 /** Variation index of the config's `defaultValue`: fallthrough and off variation of every migrated config. */
@@ -70,7 +71,9 @@ export function mapConfig(args: MapArgs<Config>): ConfigMapResult {
     snapshot,
     sourceId,
     idLists: canonical.idLists ?? {},
+    ...(canonical.coverage ? { coverage: canonical.coverage } : {}),
     nowMs: Date.parse(args.now),
+    scheduleFlips: new Set(),
     decisions,
     subject,
     fidelity,
@@ -104,11 +107,12 @@ export function mapConfig(args: MapArgs<Config>): ConfigMapResult {
 
   if (config.archived) return finish(offEnv, 'archived in StatSig');
 
-  try {
+  /** The environment's targeting as of `c.nowMs`; re-run per scheduled flip (./schedule.ts), sharing `deps` and the kind cache. */
+  const translate = (c: ConditionContext, state: InlineState): DesiredFlagEnv => {
     const resolved = resolveRulesForEnvironment(config.rules, env.statsig);
     for (const d of resolved.dropped) {
       const r = config.rules.find((x) => x.id === d.ruleId);
-      fidelity.push({ fidelity: 'full', message: `Rule “${r?.name ?? d.ruleId}” doesn't apply in ${env.statsig} (${d.reason === 'not_enabled_in_environment' ? 'not enabled here' : 'environment tier is false here'}).` });
+      c.fidelity.push({ fidelity: 'full', message: `Rule “${r?.name ?? d.ruleId}” doesn't apply in ${env.statsig} (${d.reason === 'not_enabled_in_environment' ? 'not enabled here' : 'environment tier is false here'}).` });
     }
     const rules = resolved.rules;
     const overrides = overridesForEnvironment(config.overrides, env.statsig);
@@ -117,40 +121,31 @@ export function mapConfig(args: MapArgs<Config>): ConfigMapResult {
     // PLAN §10.4 rule 1: every rule requires the same gate → an LD prerequisite is exact.
     const prereqCandidate = commonPassesGate(rules.map((r) => r.conditions));
     const prerequisites = new Set<string>();
-    ctx.gateReference = (ids, negate, c, loc) => gateReference(ctx, inline, { ids, negate, c, loc, prereqCandidate, hasPassOverrides, prerequisites });
+    c.gateReference = (ids, negate, cond, loc) => gateReference(c, state, { ids, negate, c: cond, loc, prereqCandidate, hasPassOverrides, prerequisites });
 
     const out: DesiredRule[] = [];
     let fallthrough: VariationOrRollout = { variation: DEFAULT };
     rules: for (const r of rules) {
-      const serve = serveFor(ctx, config, r, variations);
-      const conds = r.conditions.map((c, i) => translateCondition(ctx, c, { ruleId: r.id, ruleName: r.name, index: i }));
+      const serve = serveFor(c, config, r, variations);
+      const conds = r.conditions.map((cond, i) => translateCondition(c, cond, { ruleId: r.id, ruleName: r.name, index: i }));
       let dnf = andDnf(conds);
-      if (!dnf) dnf = expansion(ctx, r.id, r.name, conds.reduce((n, d) => n * Math.max(d.length, 1), 1));
+      if (!dnf) dnf = expansion(c, r.id, r.name, conds.reduce((n, d) => n * Math.max(d.length, 1), 1));
       if (dnf.length === 0) continue;
       for (const [k, term] of dnf.entries()) {
         if (term.length === 0) {
           // A rule that matches everyone: it becomes the fallthrough and nothing after it is reachable.
           fallthrough = serve;
           const after = rules.length - rules.indexOf(r) - 1;
-          if (after > 0) fidelity.push({ fidelity: 'full', message: `Rule “${r.name}” matches everyone; the ${after} rule${after === 1 ? '' : 's'} after it can never match and ${after === 1 ? 'is' : 'are'} dropped.` });
+          if (after > 0) c.fidelity.push({ fidelity: 'full', message: `Rule “${r.name}” matches everyone; the ${after} rule${after === 1 ? '' : 's'} after it can never match and ${after === 1 ? 'is' : 'are'} dropped.` });
           break rules;
         }
         out.push({ description: dnf.length > 1 ? `${r.name} (${k + 1}/${dnf.length})` : r.name, clauses: term, ...serve });
       }
     }
 
-    const targets = overrideTargets(ctx, overrides, variations);
+    const targets = overrideTargets(c, overrides, variations);
     for (const key of [...prerequisites].sort()) deps.set(`flag:${sanitizeKey(key)}`, { kind: 'flag', key: sanitizeKey(key), entityId: key });
-    if (!config.enabled) fidelity.push({ fidelity: 'full', message: `Disabled in StatSig: the flag is off in ${env.ld} and serves the default value.` });
-    if (config.lifecycle?.type === 'STALE') fidelity.push({ fidelity: 'full', message: `StatSig marks this config stale (${config.lifecycle.typeReason ?? 'STALE'}). Consider hard-coding its value instead of migrating.` });
-    if (config.schema) fidelity.push({ fidelity: 'full', message: 'The StatSig JSON schema is not carried over: LD JSON variations are not schema-validated.' });
-    for (const h of config.holdoutIds) {
-      const holdout = snapshot.holdouts.find((x) => x.id === h);
-      const share = holdout ? `${holdout.passPercentage}% of users are` : 'Some users are';
-      fidelity.push({ fidelity: 'partial', message: `${share} held out by “${h}” in StatSig and get the default value; LD holdouts aren't created yet, so they get the rules' values in LD.` });
-    }
-
-    return finish({
+    return {
       ldEnv: env.ld,
       statsigEnv: env.statsig,
       on: config.enabled,
@@ -159,7 +154,21 @@ export function mapConfig(args: MapArgs<Config>): ConfigMapResult {
       rules: out,
       targets,
       prerequisites: [...prerequisites].sort().map((k) => ({ key: sanitizeKey(k), variation: PASS })),
-    });
+    };
+  };
+
+  try {
+    const desired = translate(ctx, inline);
+    const scheduled = scheduledChanges(ctx, inline, translate);
+    if (!config.enabled) fidelity.push({ fidelity: 'full', message: `Disabled in StatSig: the flag is off in ${env.ld} and serves the default value.` });
+    if (config.lifecycle?.type === 'STALE') fidelity.push({ fidelity: 'full', message: `StatSig marks this config stale (${config.lifecycle.typeReason ?? 'STALE'}). Consider hard-coding its value instead of migrating.` });
+    if (config.schema) fidelity.push({ fidelity: 'full', message: 'The StatSig JSON schema is not carried over: LD JSON variations are not schema-validated.' });
+    for (const h of config.holdoutIds) {
+      const holdout = snapshot.holdouts.find((x) => x.id === h);
+      const share = holdout ? `${holdout.passPercentage}% of users are` : 'Some users are';
+      fidelity.push({ fidelity: 'partial', message: `${share} held out by “${h}” in StatSig and get the default value; LD holdouts aren't created yet, so they get the rules' values in LD.` });
+    }
+    return finish(scheduled.length ? { ...desired, scheduledChanges: scheduled } : desired);
   } catch (e) {
     if (e instanceof SkipItem) return finish(offEnv, e.reason);
     throw e;

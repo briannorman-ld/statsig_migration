@@ -85,9 +85,9 @@ const META: Record<CapabilityKey, { label: string; requirement: string; fallback
     fallback: 'Generate a copyable list for an admin to create; SDK evaluations also auto-create kinds.',
   },
   prerequisites: { label: 'Prerequisites', requirement: 'Enterprise', fallback: "Inline the referenced gate's conditions, or decide." },
-  big_segments: { label: 'Big / unbounded segments, CSV import', requirement: 'Enterprise', fallback: 'Split the list or decide.' },
-  scheduled_changes: { label: 'Scheduled changes', requirement: 'Enterprise', fallback: 'Resolve time conditions statically, or decide.' },
-  approvals: { label: 'Approvals', requirement: 'Enterprise', fallback: 'Approval-request fallback.' },
+  big_segments: { label: 'Big / unbounded segments, CSV import', requirement: 'Enterprise', fallback: 'Drop the condition or rule, or skip the item (big_segment decision).' },
+  scheduled_changes: { label: 'Scheduled changes', requirement: 'Enterprise', fallback: 'Resolve time conditions as of the sync and re-sync after the flip (time_condition decision).' },
+  approvals: { label: 'Approvals', requirement: 'Enterprise', fallback: 'Writes that LD answers with 405 are filed as approval requests automatically.' },
   experimentation: { label: 'Experiments', requirement: 'Experimentation add-on', fallback: 'Flags-only migration; experiments shown but blocked.' },
   holdouts: { label: 'Holdouts', requirement: 'Experimentation add-on', fallback: 'Flags-only migration.' },
   layers: { label: 'Layers', requirement: 'Experimentation add-on', fallback: 'Flags-only migration.' },
@@ -230,9 +230,9 @@ export async function probeCapabilities(client: LdClient, projectKey: string, op
             ? { status: 'unknown', evidence: 'context kinds are readable; create permission not stated in _access (verify with a Writer service token, PLAN §18 item 1)' }
             : fromProbe(results.contextKinds, 'context kinds'),
     ),
-    cap('prerequisites', { status: 'unknown', evidence: 'Not probeable without a write; the first failed write updates this.' }),
-    cap('big_segments', { status: 'unknown', evidence: 'Not probeable without a write; the first failed write updates this.' }),
-    cap('scheduled_changes', { status: 'unknown', evidence: 'Not probeable without a write; the first failed write updates this.' }),
+    cap('prerequisites', { status: 'unknown', evidence: 'Not probeable without a write; the first write that uses it updates this.' }),
+    cap('big_segments', { status: 'unknown', evidence: 'Not probeable without a write; the first write that uses it updates this.' }),
+    cap('scheduled_changes', { status: 'unknown', evidence: 'Not probeable without a write; the first write that uses it updates this.' }),
     cap(
       'approvals',
       anyApprovals

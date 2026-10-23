@@ -7,6 +7,7 @@ import { ALWAYS, andDnf, MAX_EXPANSION, NEVER, resolveKind, SkipItem, translateC
 import { DecisionCollector, DROP_CONDITION, DROP_RULE, SKIP } from './decisions.ts';
 import { sanitizeKey, sanitizeTag } from './profile.ts';
 import { inlineGate, type InlineState } from './refs.ts';
+import { scheduledChanges } from './schedule.ts';
 import type {
   AppliedDecision,
   ClientSideAvailability,
@@ -21,6 +22,7 @@ import type {
   Fidelity,
   FidelityNote,
   FidelityReport,
+  IdListCoverages,
   IdLists,
   MapperCapabilities,
   MappingProfile,
@@ -37,7 +39,7 @@ export const PASS = 0;
 export const FAIL = 1;
 
 export interface MapArgs<E> {
-  canonical: { snapshot: CanonicalSnapshot; idLists?: IdLists };
+  canonical: { snapshot: CanonicalSnapshot; idLists?: IdLists; coverage?: IdListCoverages };
   entity: E;
   profile: MappingProfile;
   resolutions: ReadonlyMap<string, Resolution>;
@@ -85,7 +87,9 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
     snapshot,
     sourceId,
     idLists: canonical.idLists ?? {},
+    ...(canonical.coverage ? { coverage: canonical.coverage } : {}),
     nowMs: Date.parse(args.now),
+    scheduleFlips: new Set(),
     decisions,
     subject,
     fidelity,
@@ -131,12 +135,16 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
   }
   const enabled = gate.enabled && gate.status !== 'Disabled';
 
-  try {
-    holdoutsAttached(ctx, gate, holdouts);
+  /**
+   * The environment's targeting as of `c.nowMs`. Run once for now, and once more per scheduled
+   * flip (see ./schedule.ts); every pass shares `deps` and the kind cache, so the plan carries
+   * every segment and prerequisite any of the states needs.
+   */
+  const translate = (c: ConditionContext, state: InlineState): DesiredFlagEnv => {
     const resolved = resolveRulesForEnvironment(gate.rules, env.statsig);
     for (const d of resolved.dropped) {
       const r = gate.rules.find((x) => x.id === d.ruleId);
-      fidelity.push({ fidelity: 'full', message: `Rule “${r?.name ?? d.ruleId}” doesn't apply in ${env.statsig} (${d.reason === 'not_enabled_in_environment' ? 'not enabled here' : 'environment tier is false here'}).` });
+      c.fidelity.push({ fidelity: 'full', message: `Rule “${r?.name ?? d.ruleId}” doesn't apply in ${env.statsig} (${d.reason === 'not_enabled_in_environment' ? 'not enabled here' : 'environment tier is false here'}).` });
     }
     const rules = resolved.rules;
     const overrides = overridesForEnvironment(gate.overrides, env.statsig);
@@ -145,34 +153,31 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
     // PLAN §10.4 rule 1: every rule requires the same gate → an LD prerequisite is exact.
     const prereqCandidate = commonPassesGate(rules.map((r) => r.conditions));
     const prerequisites = new Set<string>();
-    ctx.gateReference = (ids, negate, c, loc) => gateReference(ctx, inline, { ids, negate, c, loc, prereqCandidate, hasPassOverrides, prerequisites });
+    c.gateReference = (ids, negate, cond, loc) => gateReference(c, state, { ids, negate, c: cond, loc, prereqCandidate, hasPassOverrides, prerequisites });
 
     const out: DesiredRule[] = [];
     let fallthrough: VariationOrRollout = { variation: FAIL };
     rules: for (const r of rules) {
-      const serve = serveFor(ctx, gate, r.id, r.name, r.passPercentage, r.idType);
-      const conds = r.conditions.map((c, i) => translateCondition(ctx, c, { ruleId: r.id, ruleName: r.name, index: i }));
+      const serve = serveFor(c, gate, r.id, r.name, r.passPercentage, r.idType);
+      const conds = r.conditions.map((cond, i) => translateCondition(c, cond, { ruleId: r.id, ruleName: r.name, index: i }));
       let dnf = andDnf(conds);
-      if (!dnf) dnf = expansion(ctx, r.id, r.name, conds.reduce((n, d) => n * Math.max(d.length, 1), 1));
+      if (!dnf) dnf = expansion(c, r.id, r.name, conds.reduce((n, d) => n * Math.max(d.length, 1), 1));
       if (dnf.length === 0) continue;
       for (const [k, term] of dnf.entries()) {
         if (term.length === 0) {
           // A rule that matches everyone: it becomes the fallthrough and nothing after it is reachable.
           fallthrough = serve;
           const after = rules.length - rules.indexOf(r) - 1;
-          if (after > 0) fidelity.push({ fidelity: 'full', message: `Rule “${r.name}” matches everyone; the ${after} rule${after === 1 ? '' : 's'} after it can never match and ${after === 1 ? 'is' : 'are'} dropped.` });
+          if (after > 0) c.fidelity.push({ fidelity: 'full', message: `Rule “${r.name}” matches everyone; the ${after} rule${after === 1 ? '' : 's'} after it can never match and ${after === 1 ? 'is' : 'are'} dropped.` });
           break rules;
         }
         out.push({ description: dnf.length > 1 ? `${r.name} (${k + 1}/${dnf.length})` : r.name, clauses: term, ...serve });
       }
     }
 
-    const targets = overrideTargets(ctx, overrides);
+    const targets = overrideTargets(c, overrides);
     for (const key of [...prerequisites].sort()) deps.set(`flag:${sanitizeKey(key)}`, { kind: 'flag', key: sanitizeKey(key), entityId: key });
-    if (!enabled) fidelity.push({ fidelity: 'full', message: `Disabled in StatSig: the flag is off in ${env.ld} and serves false.` });
-    if (gate.lifecycle?.type === 'STALE') fidelity.push({ fidelity: 'full', message: `StatSig marks this gate stale (${gate.lifecycle.typeReason ?? 'STALE'}). Consider hard-coding it instead of migrating.` });
-
-    return finish({
+    return {
       ldEnv: env.ld,
       statsigEnv: env.statsig,
       on: enabled,
@@ -181,7 +186,16 @@ export function mapGate(args: MapArgs<Gate>): GateMapResult {
       rules: out,
       targets,
       prerequisites: [...prerequisites].sort().map((k) => ({ key: sanitizeKey(k), variation: PASS })),
-    });
+    };
+  };
+
+  try {
+    holdoutsAttached(ctx, gate, holdouts);
+    const desired = translate(ctx, inline);
+    const scheduled = scheduledChanges(ctx, inline, translate);
+    if (!enabled) fidelity.push({ fidelity: 'full', message: `Disabled in StatSig: the flag is off in ${env.ld} and serves false.` });
+    if (gate.lifecycle?.type === 'STALE') fidelity.push({ fidelity: 'full', message: `StatSig marks this gate stale (${gate.lifecycle.typeReason ?? 'STALE'}). Consider hard-coding it instead of migrating.` });
+    return finish(scheduled.length ? { ...desired, scheduledChanges: scheduled } : desired);
   } catch (e) {
     if (e instanceof SkipItem) return finish(offEnv, e.reason);
     throw e;

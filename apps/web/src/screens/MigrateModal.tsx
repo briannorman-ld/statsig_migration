@@ -37,11 +37,12 @@ const ITEM_TONE: Record<ItemStatus, "green" | "red" | "slate" | "amber"> = {
 };
 export const STEP_TONE: Record<
   StepStatus,
-  "green" | "red" | "slate" | "amber" | "blue"
+  "green" | "red" | "slate" | "amber" | "blue" | "violet"
 > = {
   pending: "slate",
   running: "blue",
   done: "green",
+  pending_approval: "violet",
   failed: "red",
   skipped: "amber",
   undone: "slate",
@@ -503,10 +504,13 @@ export function RunSummary({ run }: { run: RunRecord }) {
         {what} {run.status === "undone" ? "" : run.status}
       </b>
       : {count("done")} done{failed ? `, ${failed} failed` : ""}
+      {count("pending_approval")
+        ? `, ${count("pending_approval")} pending approval`
+        : ""}
       {count("skipped") ? `, ${count("skipped")} skipped` : ""}
       {count("undone") ? `, ${count("undone")} undone` : ""}.
-      {run.steps.some((s) => s.approvalRequired) &&
-        " Some environments require approvals; approval requests arrive with M4."}
+      {count("pending_approval") > 0 &&
+        " Those environments require approvals, so the targeting went into LaunchDarkly approval requests; use “Check approvals” on the Runs page once a reviewer has applied them, and the sync status follows."}
       {run.status === "stopped" &&
         " The run stopped on an authentication, rate-limit or connection error. Fix it (or give LaunchDarkly a minute), then resume from Runs."}
     </Callout>

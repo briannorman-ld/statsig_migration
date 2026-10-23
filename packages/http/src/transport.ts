@@ -33,6 +33,7 @@ export interface TransportRequest {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   url: string;
   headers?: Record<string, string>;
+  /** JSON-encoded, except a `FormData` body, which is sent as multipart (the browser sets the boundary). */
   body?: unknown;
   signal?: AbortSignal;
 }
@@ -226,8 +227,12 @@ export class Transport {
     const timer = setTimeout(() => ctrl.abort(new DOMException('Timeout', 'TimeoutError')), this.timeoutMs);
     try {
       const headers: Record<string, string> = { Accept: 'application/json', ...req.headers };
-      let body: string | undefined;
-      if (req.body !== undefined) {
+      let body: string | FormData | undefined;
+      if (typeof FormData !== 'undefined' && req.body instanceof FormData) {
+        // Multipart (LD big-segment CSV import): fetch derives Content-Type with the boundary.
+        body = req.body;
+        delete headers['Content-Type'];
+      } else if (req.body !== undefined) {
         body = JSON.stringify(req.body);
         headers['Content-Type'] ??= 'application/json';
       }
