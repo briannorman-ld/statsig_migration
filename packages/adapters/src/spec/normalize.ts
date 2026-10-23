@@ -14,8 +14,24 @@ import {
   type SnapshotWarning,
   type SourceRef,
 } from '@sslm/canonical';
+import type { z } from 'zod';
 import { normalizeDcsCondition, type DcsCondition } from './conditions.ts';
 import type { ParsedSpec } from './parse.ts';
+import {
+  DcsConditionMapSchema,
+  DcsConditionSchema,
+  DcsExperimentToLayerSchema,
+  DcsIdListsSchema,
+  DcsLayersSchema,
+  DcsParamStoreSchema,
+  DcsRawRuleSchema,
+  DcsRawSpecSchema,
+  DcsSectionSchema,
+  describeIssues,
+  type DcsParamStoreParameter,
+  type DcsRawRule,
+  type DcsRawSpec,
+} from './schemas.ts';
 
 /** A DCS rule with conditions resolved (v2 condition_map IDs replaced by the conditions). */
 export interface DcsRule {
@@ -55,7 +71,14 @@ export interface NormalizeSpecOptions {
 const LAYER_ALL = -1;
 const BUCKETS = 1000;
 
-/** Config spec (v1 or v2) → canonical (PLAN §4.2). Pure and deterministic. */
+/**
+ * Config spec (v1 or v2) → canonical (PLAN §4.2). Pure and deterministic.
+ *
+ * Every section is schema-validated leniently (schemas.ts) the way the Console API path is: a
+ * malformed section, entity, rule or condition becomes a `schema_mismatch` warning naming it, the
+ * entity it belongs to is skipped (a rule or condition is never dropped on its own, which would
+ * widen targeting), and everything that parsed is normalized as usual.
+ */
 export function normalizeSpec(parsed: ParsedSpec, opts: NormalizeSpecOptions): CanonicalSnapshot {
   const { json } = parsed;
   const { source } = opts;
@@ -66,38 +89,79 @@ export function normalizeSpec(parsed: ParsedSpec, opts: NormalizeSpecOptions): C
   snap.companyId = typeof json.company_id === 'string' ? json.company_id : undefined;
   for (const m of parsed.partialHints) warn({ code: 'partial_spec', message: m });
 
-  const conditionMap = (json.condition_map ?? {}) as Record<string, DcsCondition>;
-  const resolveSpecs = (section: unknown, sectionName: string): DcsSpec[] => {
-    if (!section) return [];
-    const entries: [string | undefined, Record<string, unknown>][] = Array.isArray(section)
-      ? section.map((s) => [undefined, s as Record<string, unknown>])
-      : Object.entries(section as Record<string, Record<string, unknown>>);
-    return entries.map(([key, s], si) => {
-      const rules = ((s.rules as Record<string, unknown>[] | undefined) ?? []).map((r, ri) => ({
-        ...(r as object),
-        conditions: ((r.conditions as unknown[]) ?? []).map((c, ci) => {
-          if (typeof c === 'string' || typeof c === 'number') {
-            const found = conditionMap[String(c)];
-            if (!found) {
-              warn({ code: 'unresolved_reference', path: `${sectionName}[${key ?? si}].rules[${ri}].conditions[${ci}]`, message: `condition_map has no entry ${c}` });
-              return { type: 'unresolved_condition', targetValue: String(c) } as DcsCondition;
-            }
-            return found;
-          }
-          return c as DcsCondition;
-        }),
-      })) as DcsRule[];
-      return { ...(s as object), name: (s.name as string | undefined) ?? key ?? `spec_${si}`, rules } as DcsSpec;
-    });
+  const mismatch = (path: string, detail: string) => warn({ code: 'schema_mismatch', path, message: detail });
+  /** Parse a top-level section; a wrong shape is one warning and the section counts as absent. */
+  const section = <S extends z.ZodType>(name: string, schema: S): z.output<S> | undefined => {
+    const value = json[name];
+    if (value === undefined || value === null) return undefined;
+    const r = schema.safeParse(value);
+    if (r.success) return r.data;
+    mismatch(name, `Section ignored: ${describeIssues(r.error.issues)}`);
+    return undefined;
   };
 
-  const gatesSec = resolveSpecs(json.feature_gates, 'feature_gates');
-  const configsSec = resolveSpecs(json.dynamic_configs, 'dynamic_configs');
-  const layersSec = resolveSpecs(json.layer_configs, 'layer_configs');
+  const conditionMap = section('condition_map', DcsConditionMapSchema) ?? {};
+  const resolveSpecs = (sectionName: string): DcsSpec[] => {
+    const sec = section(sectionName, DcsSectionSchema);
+    if (!sec) return [];
+    const entries: [string | undefined, unknown][] = Array.isArray(sec) ? sec.map((s) => [undefined, s]) : Object.entries(sec);
+    const out: DcsSpec[] = [];
+    for (const [si, [key, raw]] of entries.entries()) {
+      const parsedSpec = DcsRawSpecSchema.safeParse(raw);
+      if (!parsedSpec.success) {
+        mismatch(`${sectionName}[${key ?? si}]`, `Skipped: ${describeIssues(parsedSpec.error.issues)}`);
+        continue;
+      }
+      const s = parsedSpec.data;
+      // v2 keys entities by name; v1 is an array, so the name (when present) beats the index.
+      const name = key ?? s.name ?? `spec_${si}`;
+      const rules = resolveRules(s, `${sectionName}[${name}]`);
+      if (!rules) continue;
+      out.push(toDcsSpec(s, s.name ?? name, rules));
+    }
+    return out;
+  };
+  /** Rules with v2 condition references resolved; undefined (after a warning) if any rule or condition is malformed. */
+  const resolveRules = (s: DcsRawSpec, path: string): DcsRule[] | undefined => {
+    const rules: DcsRule[] = [];
+    for (const [ri, rawRule] of (s.rules ?? []).entries()) {
+      const parsedRule = DcsRawRuleSchema.safeParse(rawRule);
+      if (!parsedRule.success) {
+        mismatch(path, `Skipped: rules[${ri}]: ${describeIssues(parsedRule.error.issues)}`);
+        return undefined;
+      }
+      const r = parsedRule.data;
+      const conditions: DcsCondition[] = [];
+      for (const [ci, c] of (r.conditions ?? []).entries()) {
+        let resolved: unknown = c;
+        if (typeof c === 'string' || typeof c === 'number') {
+          resolved = conditionMap[String(c)];
+          if (resolved === undefined) {
+            warn({ code: 'unresolved_reference', path: `${path}.rules[${ri}].conditions[${ci}]`, message: `condition_map has no entry ${c}` });
+            conditions.push({ type: 'unresolved_condition', targetValue: String(c) });
+            continue;
+          }
+        }
+        const parsedCond = DcsConditionSchema.safeParse(resolved);
+        if (!parsedCond.success) {
+          mismatch(path, `Skipped: rules[${ri}].conditions[${ci}]${typeof c === 'string' || typeof c === 'number' ? ` (condition_map[${c}])` : ''}: ${describeIssues(parsedCond.error.issues)}`);
+          return undefined;
+        }
+        conditions.push(parsedCond.data);
+      }
+      rules.push(toDcsRule(r, conditions));
+    }
+    return rules;
+  };
+
+  const gatesSec = resolveSpecs('feature_gates');
+  const configsSec = resolveSpecs('dynamic_configs');
+  const layersSec = resolveSpecs('layer_configs');
   const entityOf = new Map<string, string>([...gatesSec, ...configsSec, ...layersSec].map((s) => [s.name, s.entity ?? s.type]));
   const isHoldoutRef = (c: DcsCondition) => c.type === 'pass_gate' && entityOf.get(String(c.targetValue)) === 'holdout';
   // v1 lists ID-list names in `id_lists`; v2 omits the key, so only check when it's present.
-  const idListNames = json.id_lists ? new Set(Object.keys(json.id_lists as Record<string, unknown>)) : null;
+  const idLists = section('id_lists', DcsIdListsSchema);
+  const idListNames = idLists ? new Set(Object.keys(idLists)) : null;
 
   const base = (kind: Parameters<typeof entityUid>[1], id: string, missing: FieldGroup[] = []) => ({
     uid: entityUid(source.sourceId, kind, id),
@@ -212,8 +276,8 @@ export function normalizeSpec(parsed: ParsedSpec, opts: NormalizeSpecOptions): C
 
   // --- dynamic_configs: configs, experiments, autotunes -----------------------------------
   const expToLayer = new Map<string, string>();
-  for (const [exp, layer] of Object.entries((json.experiment_to_layer ?? {}) as Record<string, string>)) expToLayer.set(exp, layer);
-  for (const [layer, exps] of Object.entries((json.layers ?? {}) as Record<string, string[]>)) for (const e of exps) expToLayer.set(e, layer);
+  for (const [exp, layer] of Object.entries(section('experiment_to_layer', DcsExperimentToLayerSchema) ?? {})) expToLayer.set(exp, layer);
+  for (const [layer, exps] of Object.entries(section('layers', DcsLayersSchema) ?? {})) for (const e of exps) expToLayer.set(e, layer);
 
   for (const s of configsSec) {
     const path = `dynamic_configs[${s.name}]`;
@@ -283,13 +347,19 @@ export function normalizeSpec(parsed: ParsedSpec, opts: NormalizeSpecOptions): C
     });
   }
 
-  // --- param stores (v2) -----------------------------------------------------------------
-  for (const [name, store] of Object.entries((json.param_stores ?? {}) as Record<string, { parameters?: Record<string, Record<string, unknown>>; targetAppIDs?: string[]; version?: number }>)) {
+  // --- param stores (v2): each store validated on its own, so one bad store skips only itself -----
+  for (const [name, raw] of Object.entries(section('param_stores', DcsConditionMapSchema) ?? {})) {
+    const parsedStore = DcsParamStoreSchema.safeParse(raw);
+    if (!parsedStore.success) {
+      mismatch(`param_stores[${name}]`, `Skipped: ${describeIssues(parsedStore.error.issues)}`);
+      continue;
+    }
+    const store = parsedStore.data;
     snap.paramStores.push({
       kind: 'param_store',
       ...base('param_store', name),
       targetApps: store.targetAppIDs ?? [],
-      version: store.version,
+      version: store.version ?? undefined,
       parameters: Object.values(store.parameters ?? {}).map(specParam),
     });
   }
@@ -495,15 +565,49 @@ export function allocationFromBuckets(c: DcsCondition): number {
   return Math.round((allocated / BUCKETS) * 1000) / 10;
 }
 
-function specParam(p: Record<string, unknown>): ParamStoreParameter {
-  const refType = String(p.ref_type ?? 'static');
+function specParam(p: DcsParamStoreParameter): ParamStoreParameter {
+  const refType = p.ref_type ?? 'static';
   const ref =
     refType === 'gate' ? { kind: 'gate' as const, id: String(p.gate_name) }
     : refType === 'dynamic_config' ? { kind: 'config' as const, id: String(p.config_name), param: String(p.param_name) }
     : refType === 'experiment' ? { kind: 'experiment' as const, id: String(p.experiment_name), param: String(p.param_name) }
     : refType === 'layer' ? { kind: 'layer' as const, id: String(p.layer_name), param: String(p.param_name) }
     : undefined;
-  return { name: String(p.name), refType, paramType: String(p.param_type ?? 'unknown'), ...(refType === 'static' ? { value: p.value } : {}), ...(ref ? { ref } : {}), raw: p };
+  return { name: p.name, refType, paramType: p.param_type ?? 'unknown', ...(refType === 'static' ? { value: p.value } : {}), ...(ref ? { ref } : {}), raw: p };
+}
+
+/** A validated file entry → the normalizer's spec shape (nulls become absent, per exactOptionalPropertyTypes). */
+function toDcsSpec(s: DcsRawSpec, name: string, rules: DcsRule[]): DcsSpec {
+  return {
+    name,
+    type: s.type ?? s.entity ?? 'unknown',
+    enabled: s.enabled,
+    rules,
+    ...(s.salt ? { salt: s.salt } : {}),
+    ...(s.defaultValue !== undefined ? { defaultValue: s.defaultValue } : {}),
+    ...(s.idType ? { idType: s.idType } : {}),
+    ...(s.entity ? { entity: s.entity } : {}),
+    ...(s.isActive != null ? { isActive: s.isActive } : {}),
+    ...(s.hasSharedParams != null ? { hasSharedParams: s.hasSharedParams } : {}),
+    ...(s.explicitParameters !== undefined ? { explicitParameters: s.explicitParameters } : {}),
+    ...(s.version != null ? { version: s.version } : {}),
+    ...(s.targetAppIDs !== undefined ? { targetAppIDs: s.targetAppIDs } : {}),
+  };
+}
+
+function toDcsRule(r: DcsRawRule, conditions: DcsCondition[]): DcsRule {
+  return {
+    id: r.id,
+    name: r.name ?? r.id,
+    passPercentage: r.passPercentage,
+    conditions,
+    returnValue: r.returnValue,
+    ...(r.salt !== undefined ? { salt: r.salt } : {}),
+    ...(r.idType !== undefined ? { idType: r.idType } : {}),
+    ...(r.groupName !== undefined ? { groupName: r.groupName } : {}),
+    ...(r.isExperimentGroup !== undefined ? { isExperimentGroup: r.isExperimentGroup } : {}),
+    ...(r.configDelegate !== undefined ? { configDelegate: r.configDelegate } : {}),
+  };
 }
 
 function paramType(v: unknown): 'string' | 'number' | 'boolean' | 'object' | 'array' {

@@ -4,10 +4,12 @@ import type { RunRecord } from "@sslm/executor";
 import { LD_INSTANCES } from "@sslm/ld-client";
 import { Badge, Button, Callout, Card, cx } from "../components/ui.tsx";
 import {
+  cancelRun,
   isInterrupted,
   resumeRun,
   undoRun,
   useActiveRun,
+  useCancelling,
 } from "../lib/migration.ts";
 import { store } from "../lib/store.ts";
 import type { MigrationContext } from "../lib/useMigration.ts";
@@ -38,6 +40,7 @@ export function RunsView({
   const runs =
     useLiveQuery(() => store.listRuns(workspaceId), [workspaceId]) ?? [];
   const active = useActiveRun(workspaceId);
+  const cancelling = useCancelling(workspaceId);
   const [open, setOpen] = useState<string>();
   const [error, setError] = useState<string>();
   const [confirmUndo, setConfirmUndo] = useState<string>();
@@ -71,6 +74,11 @@ export function RunsView({
       {runs.map((stored) => {
         const run = active?.id === stored.id ? active : stored;
         const interrupted = isInterrupted(run, workspaceId);
+        // A stopped run (cancelled, 401, 429, offline) picks up where it left off, like an interrupted one.
+        const resumable =
+          interrupted ||
+          (run.status === "stopped" &&
+            run.steps.some((s) => s.status === "pending"));
         const createdFlags = new Set(
           run.steps
             .filter((s) => s.created && s.step.op === "upsert_flag_shell")
@@ -105,7 +113,7 @@ export function RunsView({
                 {run.steps.length} operations
               </span>
               <div className="ml-auto flex gap-2">
-                {interrupted && (
+                {resumable && (
                   <Button
                     variant="secondary"
                     className="py-1.5"
@@ -179,6 +187,12 @@ export function RunsView({
                   run={run}
                   title="Operations"
                   {...(ldBase ? { ldBase } : {})}
+                  {...(active?.id === run.id
+                    ? {
+                        onCancel: () => cancelRun(workspaceId),
+                        cancelling,
+                      }
+                    : {})}
                 />
               </div>
             )}

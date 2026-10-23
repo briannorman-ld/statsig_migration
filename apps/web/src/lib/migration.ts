@@ -376,17 +376,35 @@ export function buildPlan(input: { selection: MigrationSelection; ldEnvs: string
 
 // Live progress of the run executing in this tab (one at a time per workspace).
 const active = new Map<string, RunRecord>();
+// The cancel controller of that run; aborting it stops the executor after the write in flight.
+const controllers = new Map<string, AbortController>();
 const listeners = new Set<() => void>();
 const notify = () => listeners.forEach((l) => l());
+const subscribe = (l: () => void) => {
+  listeners.add(l);
+  return () => listeners.delete(l);
+};
 
 export function useActiveRun(workspaceId: string): RunRecord | undefined {
-  return useSyncExternalStore(
-    (l) => {
-      listeners.add(l);
-      return () => listeners.delete(l);
-    },
-    () => active.get(workspaceId),
-  );
+  return useSyncExternalStore(subscribe, () => active.get(workspaceId));
+}
+
+/**
+ * Cancel the run (execute, resume or undo) executing in this tab for the workspace. The executor
+ * finishes journaling the step in flight and records the run as `stopped`; `useActiveRun`
+ * keeps reporting until then. Returns false when nothing is running.
+ */
+export function cancelRun(workspaceId: string): boolean {
+  const ctrl = controllers.get(workspaceId);
+  if (!ctrl || ctrl.signal.aborted) return false;
+  ctrl.abort(new DOMException("Cancelled by the user.", "AbortError"));
+  notify();
+  return true;
+}
+
+/** True between the user's cancel and the executor finishing the step in flight. */
+export function useCancelling(workspaceId: string): boolean {
+  return useSyncExternalStore(subscribe, () => controllers.get(workspaceId)?.signal.aborted ?? false);
 }
 
 /** `{ sourceId, takenAt }` per snapshot: stored on the run so those snapshots survive pruning. */
@@ -464,7 +482,7 @@ export async function executePlan(
   return finishRun(
     workspaceId,
     ld,
-    () => executor(workspaceId, ld, opts.snapshots).run(run),
+    (signal) => executor(workspaceId, ld, opts.snapshots).run(run, signal),
     !opts.dryRun,
     plan,
   );
@@ -478,9 +496,10 @@ export async function resumeRun(
   return finishRun(
     workspaceId,
     ld,
-    () =>
+    (signal) =>
       executor(workspaceId, ld, (run as RunJournalRecord).snapshots).run(
         structuredClone(run),
+        signal,
       ),
     true,
   );
@@ -494,9 +513,10 @@ export async function undoRun(
   return finishRun(
     workspaceId,
     ld,
-    () =>
+    (signal) =>
       executor(workspaceId, ld, (run as RunJournalRecord).snapshots).undo(
         structuredClone(run),
+        signal,
       ),
     true,
   );
@@ -505,12 +525,16 @@ export async function undoRun(
 async function finishRun(
   workspaceId: string,
   ld: LdSession,
-  fn: () => Promise<RunRecord>,
+  fn: (signal: AbortSignal) => Promise<RunRecord>,
   refresh: boolean,
   plan?: Plan,
 ): Promise<RunRecord> {
+  if (controllers.has(workspaceId))
+    throw new Error("A run is already in progress for this workspace.");
+  const ctrl = new AbortController();
+  controllers.set(workspaceId, ctrl);
   try {
-    const r = await guarded(workspaceId, fn);
+    const r = await guarded(workspaceId, () => fn(ctrl.signal));
     if (refresh) {
       const envs = [
         ...new Set(
@@ -525,6 +549,7 @@ async function finishRun(
     }
     return r;
   } finally {
+    controllers.delete(workspaceId);
     active.delete(workspaceId);
     notify();
   }

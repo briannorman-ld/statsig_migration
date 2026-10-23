@@ -144,6 +144,8 @@ export class Transport {
   async request(req: TransportRequest): Promise<TransportResponse> {
     let lastCause = 'unknown';
     for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt++) {
+      // A cancelled caller gets its abort reason back at once: no attempt, no retry, no backoff.
+      if (req.signal?.aborted) throw abortReason(req.signal);
       if (this.budget) {
         const waitMs = this.budget.peekWait();
         if (waitMs > 0) this.onEvent({ type: 'paced', url: req.url, waitMs });
@@ -221,8 +223,9 @@ export class Transport {
 
   private async once(req: TransportRequest): Promise<Outcome> {
     const ctrl = new AbortController();
-    const onOuterAbort = () => ctrl.abort(req.signal?.reason);
-    req.signal?.addEventListener('abort', onOuterAbort, { once: true });
+    const onOuterAbort = () => ctrl.abort(abortReason(req.signal!));
+    if (req.signal?.aborted) onOuterAbort();
+    else req.signal?.addEventListener('abort', onOuterAbort, { once: true });
     const timer = setTimeout(() => ctrl.abort(new DOMException('Timeout', 'TimeoutError')), this.timeoutMs);
     try {
       const headers: Record<string, string> = { Accept: 'application/json', ...req.headers };
@@ -265,6 +268,16 @@ export class Transport {
 type Outcome =
   | { kind: 'response'; status: number; body: unknown; retryAfterMs?: number | undefined }
   | { kind: 'failure'; aborted: boolean; error: unknown; reason: string };
+
+/** The signal's reason, or a standard AbortError when it was aborted without one. */
+export function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('Aborted', 'AbortError');
+}
+
+/** True when `e` is the error an aborted request, sleep or budget wait rejects with. */
+export function isAbortError(e: unknown): boolean {
+  return e instanceof DOMException ? e.name === 'AbortError' : e instanceof Error && e.name === 'AbortError';
+}
 
 /** Strip query strings from URLs in messages; defensive, as none of ours carry secrets. */
 export function redactUrl(url: string): string {

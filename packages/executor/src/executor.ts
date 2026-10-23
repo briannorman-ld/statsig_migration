@@ -67,6 +67,8 @@ export interface RunRecord {
   status: RunStatus;
   steps: StepRecord[];
   undoneAt?: string;
+  /** Why a `stopped` (or cancelled `undo_failed`) run ended early: a cancel, or the systemic error. */
+  stopReason?: string;
 }
 
 export interface Journal {
@@ -131,6 +133,8 @@ export class Executor {
   private readonly now: () => Date;
   /** Flags read during this run, by key (variation IDs for prerequisites). */
   private readonly flags = new Map<string, LdFlag>();
+  /** The current run's cancel signal; every LD call gets it, so a cancel also aborts the write in flight. */
+  private signal?: AbortSignal;
 
   constructor(private readonly opts: ExecutorOptions) {
     this.c = opts.client;
@@ -138,15 +142,22 @@ export class Executor {
     this.now = opts.now ?? (() => new Date());
   }
 
-  /** Runs (or resumes) every pending step. A dry run writes nothing (LD `dryRun=true`). */
+  /**
+   * Runs (or resumes) every pending step. A dry run writes nothing (LD `dryRun=true`).
+   * Aborting `signal` stops the run after the step in flight: that step goes back to `pending`
+   * (the write may or may not have reached LD; resuming re-checks it idempotently), later steps
+   * stay `pending`, and the run is `stopped` with `stopReason`, never `failed`.
+   */
   async run(run: RunRecord, signal?: AbortSignal): Promise<RunRecord> {
+    this.signal = signal;
     run.status = 'running';
+    delete run.stopReason;
     await this.save(run);
     const failed = new Set<string>();
     for (const rec of run.steps) {
       if (rec.status === 'done' || rec.status === 'skipped') continue;
       if (signal?.aborted) {
-        run.status = 'stopped';
+        this.cancel(run, rec);
         break;
       }
       const blockedBy = rec.step.deps.find((d) => failed.has(d));
@@ -165,6 +176,11 @@ export class Executor {
         rec.message = await this.execute(run, rec);
         rec.status = 'done';
       } catch (e) {
+        if (signal?.aborted) {
+          this.cancel(run, rec, true);
+          await this.save(run);
+          break;
+        }
         rec.status = 'failed';
         rec.error = (e as Error).message;
         if (e instanceof LdWriteError && e.status === 405) rec.approvalRequired = true;
@@ -172,6 +188,7 @@ export class Executor {
         if (isSystemic(e)) {
           rec.finishedAt = this.now().toISOString();
           run.status = 'stopped';
+          run.stopReason = `Stopped on a systemic error: ${rec.error} Fix it (or give LaunchDarkly a minute), then resume from Runs.`;
           await this.save(run);
           break;
         }
@@ -185,21 +202,36 @@ export class Executor {
     return run;
   }
 
-  /** Undo a run: restore pre-images and delete what it created, newest first (PLAN §15). */
-  async undo(run: RunRecord): Promise<RunRecord> {
+  /**
+   * Undo a run: restore pre-images and delete what it created, newest first (PLAN §15).
+   * Aborting `signal` leaves the remaining steps as they were; the run ends `undo_failed` with a
+   * `stopReason` saying it was cancelled, so "Undo…" can be tried again.
+   */
+  async undo(run: RunRecord, signal?: AbortSignal): Promise<RunRecord> {
     if (run.dryRun) throw new Error('A dry run wrote nothing; there is nothing to undo.');
+    this.signal = signal;
     run.status = 'undoing';
+    delete run.stopReason;
     await this.save(run);
     const createdFlags = new Set(run.steps.filter((s) => s.step.op === 'upsert_flag_shell' && s.created).map((s) => s.step.key));
     let ok = true;
     for (const rec of [...run.steps].reverse()) {
       if (rec.status !== 'done' && !(rec.status === 'failed' && rec.created)) continue;
+      if (signal?.aborted) {
+        ok = false;
+        run.stopReason = `Undo cancelled before “${rec.label}”. Steps not yet undone keep their LD changes; use Undo… again to finish.`;
+        break;
+      }
       try {
         await this.revert(run, rec, createdFlags);
         rec.status = 'undone';
         rec.message = `Undone: ${rec.message ?? ''}`.trim();
       } catch (e) {
         ok = false;
+        if (signal?.aborted) {
+          run.stopReason = `Undo cancelled while “${rec.label}” was being reverted. Use Undo… again to finish; every revert is safe to repeat.`;
+          break;
+        }
         rec.error = `Undo failed: ${(e as Error).message}`;
         if (isSystemic(e)) break;
       }
@@ -209,6 +241,17 @@ export class Executor {
     run.undoneAt = this.now().toISOString();
     await this.save(run);
     return run;
+  }
+
+  /** Records a cancel: the step goes (back) to pending and the run is `stopped`, resumable from Runs. */
+  private cancel(run: RunRecord, rec: StepRecord, inFlight = false): void {
+    rec.status = 'pending';
+    delete rec.startedAt;
+    delete rec.error;
+    rec.message = inFlight ? 'Cancelled while in flight; resuming re-checks what LaunchDarkly received.' : 'Cancelled before it started.';
+    const pending = run.steps.filter((s) => s.status === 'pending').length;
+    run.status = 'stopped';
+    run.stopReason = `Cancelled${inFlight ? ` during “${rec.label}”` : ` before “${rec.label}”`}; ${pending} step${pending === 1 ? '' : 's'} still pending. Resume from Runs to continue where it stopped.`;
   }
 
   private async save(run: RunRecord) {
@@ -251,19 +294,19 @@ export class Executor {
   }
 
   private async randomizationUnit(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'ensure_randomization_unit' }>): Promise<string> {
-    const settings = await this.c.getExperimentationSettings(this.p);
+    const settings = await this.c.getExperimentationSettings(this.p, this.signal);
     const units = settings.randomizationUnits ?? [];
     if (units.some((u) => u.randomizationUnit === s.key)) return `Randomization unit “${s.key}” already enabled.`;
     if (run.dryRun) return `Would enable “${s.key}” as a randomization unit.`;
     if (rec.preImage === undefined) rec.preImage = settings;
-    await this.c.putExperimentationSettings(this.p, { randomizationUnits: [...units.map((u) => ({ randomizationUnit: u.randomizationUnit, ...(u.default ? { default: true } : {}) })), { randomizationUnit: s.key }] });
+    await this.c.putExperimentationSettings(this.p, { randomizationUnits: [...units.map((u) => ({ randomizationUnit: u.randomizationUnit, ...(u.default ? { default: true } : {}) })), { randomizationUnit: s.key }] }, this.signal);
     rec.created = true;
     return `Enabled “${s.key}” as a randomization unit.`;
   }
 
   private async metric(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'upsert_metric' }>): Promise<string> {
     const d = s.desired;
-    let current = await this.c.getMetric(this.p, s.key);
+    let current = await this.c.getMetric(this.p, s.key, this.signal);
     if (current && !rec.created && rec.preImage === undefined) {
       const same = current.kind === 'custom' && current.eventKey === d.eventKey;
       if (!s.adopt && !same && !ownsSegment({ tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw new Error(`Metric “${s.key}” appeared since planning and wasn't created by this app. Re-plan to decide.`);
@@ -273,10 +316,10 @@ export class Executor {
       if (run.dryRun) return `Would create custom metric “${s.key}” on event “${d.eventKey}”.`;
       const body = { key: d.key, name: d.name, description: d.description, kind: d.kind, eventKey: d.eventKey, isNumeric: d.isNumeric, successCriteria: d.successCriteria, tags: d.tags, analysisUnits: d.analysisUnits };
       try {
-        current = await this.c.createMetric(this.p, body);
+        current = await this.c.createMetric(this.p, body, this.signal);
       } catch (e) {
         if (!(e instanceof LdWriteError && e.status === 409)) throw e;
-        current = await this.c.getMetric(this.p, s.key);
+        current = await this.c.getMetric(this.p, s.key, this.signal);
         if (!current || !ownsSegment({ tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw e;
       }
       rec.created = true;
@@ -289,20 +332,20 @@ export class Executor {
     if (current.eventKey !== d.eventKey) ops.push({ op: 'replace', path: '/eventKey', value: d.eventKey });
     if (ops.length === 0) return `Metric “${s.key}” already up to date.`;
     if (run.dryRun) return `Would update metric “${s.key}” (${ops.map((o) => o.path.slice(1)).join(', ')}).`;
-    await this.c.patchMetricJson(this.p, s.key, ops, { comment: this.comment(run, s) });
+    await this.c.patchMetricJson(this.p, s.key, ops, { comment: this.comment(run, s), signal: this.signal });
     return `Updated metric “${s.key}” (${ops.map((o) => o.path.slice(1)).join(', ')}).`;
   }
 
   private async bandit(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'create_bandit' }>): Promise<string> {
     const d = s.desired;
-    const flag = this.flags.get(s.flagKey) ?? (await this.c.getFlag(this.p, s.flagKey));
+    const flag = this.flags.get(s.flagKey) ?? (await this.c.getFlag(this.p, s.flagKey, this.signal));
     if (!flag) {
       if (run.dryRun) return `Would create bandit “${s.key}” in ${s.ldEnv}: ${banditSummary(d)}.`;
       throw new Error(`Flag “${s.flagKey}” doesn't exist (its settings step didn't run).`);
     }
     const env = flag.environments?.[s.ldEnv];
     const iteration = banditIteration(d, flag, env?.version ?? 0);
-    let current = await this.c.getExperiment(this.p, s.ldEnv, s.key);
+    let current = await this.c.getExperiment(this.p, s.ldEnv, s.key, this.signal);
     if (current && !rec.created && rec.preImage === undefined) {
       if (!s.adopt && !ownsSegment({ tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw new Error(`Experiment “${s.key}” appeared in ${s.ldEnv} since planning and wasn't created by this app. Re-plan to decide.`);
       rec.preImage = current;
@@ -311,10 +354,10 @@ export class Executor {
       if (run.dryRun) return `Would create bandit “${s.key}” in ${s.ldEnv}: ${banditSummary(d)}.`;
       const body = { key: d.key, name: d.name, description: withFooter(d.description, footer(s.provenance, this.now())), type: 'mab', tags: d.tags, iteration };
       try {
-        current = await this.c.createExperiment(this.p, s.ldEnv, body);
+        current = await this.c.createExperiment(this.p, s.ldEnv, body, this.signal);
       } catch (e) {
         if (!(e instanceof LdWriteError && e.status === 409)) throw e;
-        current = await this.c.getExperiment(this.p, s.ldEnv, s.key);
+        current = await this.c.getExperiment(this.p, s.ldEnv, s.key, this.signal);
         if (!current || !ownsSegment({ tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw e;
       }
       rec.created = true;
@@ -324,20 +367,20 @@ export class Executor {
     const status = current.draftIteration?.status ?? current.currentIteration?.status;
     if (status && status !== 'not_started') return `Bandit “${s.key}” in ${s.ldEnv} has ${status === 'running' ? 'a running' : 'a finished'} iteration; left as is.`;
     if (run.dryRun) return `Would replace the draft of bandit “${s.key}” in ${s.ldEnv}: ${banditSummary(d)}.`;
-    await this.c.createIteration(this.p, s.ldEnv, s.key, iteration);
+    await this.c.createIteration(this.p, s.ldEnv, s.key, iteration, this.signal);
     return `Replaced the draft of bandit “${s.key}” in ${s.ldEnv}: ${banditSummary(d)}.`;
   }
 
   private async contextKind(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'ensure_context_kind' }>): Promise<string> {
     if (run.dryRun) return `Would create context kind “${s.key}”.`;
-    await this.c.putContextKind(this.p, s.key, { name: s.name, description: `StatSig unit type ${s.unitType} (created by the StatSig migration).` });
+    await this.c.putContextKind(this.p, s.key, { name: s.name, description: `StatSig unit type ${s.unitType} (created by the StatSig migration).` }, this.signal);
     rec.created = true;
     return `Created context kind “${s.key}”.`;
   }
 
   private async segment(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'upsert_segment' }>): Promise<string> {
     const d = s.desired;
-    let current = await this.c.getSegment(this.p, s.ldEnv, s.key);
+    let current = await this.c.getSegment(this.p, s.ldEnv, s.key, this.signal);
     if (current && !rec.created && rec.preImage === undefined) {
       // Re-check ownership: the LD project may have changed since planning.
       if (!s.adopt && !ownsSegment({ key: current.key, tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw new Error(`Segment “${s.key}” appeared in ${s.ldEnv} since planning and wasn't created by this app. Re-plan to decide.`);
@@ -347,10 +390,10 @@ export class Executor {
     if (!current) {
       if (run.dryRun) return `Would create segment “${s.key}” in ${s.ldEnv} with ${segmentSummary(d)}.`;
       try {
-        current = await this.c.createSegment(this.p, s.ldEnv, { key: s.key, name: d.name, description, tags: d.tags });
+        current = await this.c.createSegment(this.p, s.ldEnv, { key: s.key, name: d.name, description, tags: d.tags }, this.signal);
       } catch (e) {
         if (!(e instanceof LdWriteError && e.status === 409)) throw e;
-        current = await this.c.getSegment(this.p, s.ldEnv, s.key);
+        current = await this.c.getSegment(this.p, s.ldEnv, s.key, this.signal);
         if (!current || !ownsSegment({ key: current.key, tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw e;
       }
       rec.created = true;
@@ -362,7 +405,7 @@ export class Executor {
       { op: 'add', path: '/description', value: description },
       { op: 'add', path: '/tags', value: union(current.tags ?? [], d.tags) },
     ];
-    const res = await this.c.patchSegmentJson(this.p, s.ldEnv, s.key, patch, { comment: this.comment(run, s), dryRun: run.dryRun });
+    const res = await this.c.patchSegmentJson(this.p, s.ldEnv, s.key, patch, { comment: this.comment(run, s), dryRun: run.dryRun, signal: this.signal });
     rec.ldVersion = res.version ?? undefined;
     if (run.dryRun) return `Would update segment “${s.key}” in ${s.ldEnv}: ${segmentSummary(d)}.`;
     return `${rec.created ? 'Created' : 'Updated'} segment “${s.key}” in ${s.ldEnv}: ${segmentSummary(d)}.`;
@@ -370,7 +413,7 @@ export class Executor {
 
   private async shell(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'upsert_flag_shell' }>): Promise<string> {
     const d = s.desired;
-    let flag = await this.c.getFlag(this.p, s.key);
+    let flag = await this.c.getFlag(this.p, s.key, this.signal);
     if (flag && !rec.created && rec.preImage === undefined) {
       const owner = flagOwner({ key: flag.key, tags: flag.tags ?? [], customProperties: flag.customProperties ?? {} });
       if (!s.adopt && !owner) throw new Error(`Flag “${s.key}” appeared since planning and wasn't created by this app. Re-plan to decide.`);
@@ -380,11 +423,11 @@ export class Executor {
       if (run.dryRun) return d.variations.every((v) => typeof v.value === 'boolean') ? `Would create boolean flag “${s.key}” (${d.tags.join(', ')}).` : `Would create JSON flag “${s.key}” with ${d.variations.length} variations (${d.tags.join(', ')}).`;
       const body = { key: d.key, name: d.name, description: d.description, variations: d.variations, defaults: d.defaults, temporary: d.temporary, tags: d.tags, customProperties: d.customProperties, clientSideAvailability: d.clientSideAvailability };
       try {
-        flag = await this.c.createFlag(this.p, body);
+        flag = await this.c.createFlag(this.p, body, this.signal);
       } catch (e) {
         if (!(e instanceof LdWriteError && e.status === 409)) throw e;
         // A retried create after an interrupted run: it's ours if it carries our provenance.
-        flag = await this.c.getFlag(this.p, s.key);
+        flag = await this.c.getFlag(this.p, s.key, this.signal);
         const owner = flag && flagOwner({ key: flag.key, tags: flag.tags ?? [], customProperties: flag.customProperties ?? {} });
         if (!flag || owner?.id !== d.customProperties['statsig.id']?.value[0]) throw e;
       }
@@ -395,13 +438,13 @@ export class Executor {
     const ops = shellPatch(flag, d);
     this.flags.set(s.key, flag);
     if (ops.length === 0) return `Flag “${s.key}” settings already up to date.`;
-    const res = await this.c.patchFlagJson(this.p, s.key, ops, { comment: this.comment(run, s), dryRun: run.dryRun });
+    const res = await this.c.patchFlagJson(this.p, s.key, ops, { comment: this.comment(run, s), dryRun: run.dryRun, signal: this.signal });
     if (!run.dryRun) this.flags.set(s.key, res);
     return `${run.dryRun ? 'Would update' : 'Updated'} flag “${s.key}” settings (${ops.map((o) => o.path.split('/')[1]).filter((v, i, a) => a.indexOf(v) === i).join(', ')}).`;
   }
 
   private async flagEnv(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'update_flag_env' }>): Promise<string> {
-    const flag = await this.c.getFlag(this.p, s.key);
+    const flag = await this.c.getFlag(this.p, s.key, this.signal);
     if (!flag) {
       if (run.dryRun) return `Would set targeting in ${s.ldEnv}: ${envSummary(s.desired, s.variations)}.`;
       throw new Error(`Flag “${s.key}” doesn't exist (its settings step didn't run).`);
@@ -421,20 +464,20 @@ export class Executor {
     if (d.prerequisites.length || prev.length) {
       const prerequisites = [];
       for (const p of d.prerequisites) {
-        const pf = this.flags.get(p.key) ?? (await this.c.getFlag(this.p, p.key));
+        const pf = this.flags.get(p.key) ?? (await this.c.getFlag(this.p, p.key, this.signal));
         if (!pf) throw new Error(`Prerequisite flag “${p.key}” doesn't exist.`);
         prerequisites.push({ key: p.key, variationId: variationIds(pf, [true, false])(p.variation) });
       }
       instructions.push({ kind: 'replacePrerequisites', prerequisites });
     }
-    const res = await this.c.patchFlagSemantic(this.p, s.key, { environmentKey: s.ldEnv, comment: this.comment(run, s), instructions }, { dryRun: run.dryRun });
+    const res = await this.c.patchFlagSemantic(this.p, s.key, { environmentKey: s.ldEnv, comment: this.comment(run, s), instructions }, { dryRun: run.dryRun, signal: this.signal });
     rec.ldVersion = res.environments?.[s.ldEnv]?.version ?? undefined;
     // Provenance, `statsig.sync.<env>` (PLAN §3.3). LD refuses custom-property instructions in a
     // patch with environment instructions, so it's a second write; it runs only after targeting
     // succeeded, so LD never claims a sync that didn't happen.
     const prop = syncPropertyKey(s.ldEnv);
     const value = [s.provenance.statsigFingerprint, String(s.provenance.statsigVersion ?? ''), this.now().toISOString(), s.provenance.decisionSetHash];
-    await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: { name: `StatSig sync (${s.ldEnv})`, value } }], { comment: this.comment(run, s), dryRun: run.dryRun });
+    await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: { name: `StatSig sync (${s.ldEnv})`, value } }], { comment: this.comment(run, s), dryRun: run.dryRun, signal: this.signal });
     return `${run.dryRun ? 'Would set' : 'Set'} targeting in ${s.ldEnv}: ${envSummary(d, s.variations)}.`;
   }
 
@@ -448,10 +491,10 @@ export class Executor {
     switch (s.op) {
       case 'ensure_context_kind':
         // Context kinds can't be deleted; archiving hides them from targeting.
-        if (rec.created) await this.c.putContextKind(this.p, s.key, { name: s.name, archived: true });
+        if (rec.created) await this.c.putContextKind(this.p, s.key, { name: s.name, archived: true }, this.signal);
         return;
       case 'upsert_segment': {
-        if (rec.created) return this.c.deleteSegment(this.p, s.ldEnv, s.key);
+        if (rec.created) return this.c.deleteSegment(this.p, s.ldEnv, s.key, this.signal);
         const pre = rec.preImage as LdSegment | undefined;
         if (!pre) return;
         await this.c.patchSegmentJson(
@@ -465,7 +508,7 @@ export class Executor {
             { op: 'add', path: '/description', value: pre.description ?? '' },
             { op: 'add', path: '/tags', value: pre.tags ?? [] },
           ],
-          { comment },
+          { comment, signal: this.signal },
         );
         return;
       }
@@ -484,32 +527,32 @@ export class Executor {
             { op: 'replace', path: '/customProperties', value: pre.customProperties ?? {} },
             ...(pre.clientSideAvailability ? [{ op: 'replace' as const, path: '/clientSideAvailability', value: pre.clientSideAvailability }] : []),
           ],
-          { comment },
+          { comment, signal: this.signal },
         );
         return;
       }
       case 'ensure_randomization_unit': {
         const pre = rec.preImage as LdExperimentationSettings | undefined;
         if (!rec.created || !pre) return;
-        await this.c.putExperimentationSettings(this.p, { randomizationUnits: (pre.randomizationUnits ?? []).map((u) => ({ randomizationUnit: u.randomizationUnit, ...(u.default ? { default: true } : {}) })) });
+        await this.c.putExperimentationSettings(this.p, { randomizationUnits: (pre.randomizationUnits ?? []).map((u) => ({ randomizationUnit: u.randomizationUnit, ...(u.default ? { default: true } : {}) })) }, this.signal);
         return;
       }
       case 'upsert_metric': {
         if (rec.created) {
-          await this.c.deleteMetric(this.p, s.key).catch((e) => {
+          await this.c.deleteMetric(this.p, s.key, this.signal).catch((e) => {
             if (!(e instanceof LdWriteError && e.status === 404)) throw e;
           });
           return;
         }
         const pre = rec.preImage as LdMetric | undefined;
         if (!pre) return;
-        await this.c.patchMetricJson(this.p, s.key, [{ op: 'replace', path: '/tags', value: pre.tags ?? [] }, ...(pre.eventKey ? [{ op: 'replace' as const, path: '/eventKey', value: pre.eventKey }] : [])], { comment });
+        await this.c.patchMetricJson(this.p, s.key, [{ op: 'replace', path: '/tags', value: pre.tags ?? [] }, ...(pre.eventKey ? [{ op: 'replace' as const, path: '/eventKey', value: pre.eventKey }] : [])], { comment, signal: this.signal });
         return;
       }
       case 'create_bandit': {
         // Experiments can't be deleted: archiving hides a draft this run created. An adopted
         // experiment keeps the replaced draft (LD has no way to restore an iteration).
-        if (rec.created) await this.c.patchExperimentSemantic(this.p, s.ldEnv, s.key, { comment, instructions: [{ kind: 'archiveExperiment' }] });
+        if (rec.created) await this.c.patchExperimentSemantic(this.p, s.ldEnv, s.key, { comment, instructions: [{ kind: 'archiveExperiment' }] }, this.signal);
         return;
       }
       case 'update_flag_env': {
@@ -520,19 +563,19 @@ export class Executor {
         const pre = rec.preImage as LdFlag | undefined;
         const env = pre?.environments?.[s.ldEnv];
         if (!pre || !env) return;
-        const current = await this.c.getFlag(this.p, s.key);
+        const current = await this.c.getFlag(this.p, s.key, this.signal);
         if (!current) return;
         const prop = syncPropertyKey(s.ldEnv);
         const prereqs = [];
         for (const p of env.prerequisites ?? []) {
-          const pf = await this.c.getFlag(this.p, p.key);
+          const pf = await this.c.getFlag(this.p, p.key, this.signal);
           const id = pf?.variations[p.variation]?._id;
           if (id) prereqs.push({ key: p.key, variationId: id });
         }
-        await this.c.patchFlagSemantic(this.p, s.key, { environmentKey: s.ldEnv, comment, instructions: restoreInstructions(pre, env, current, current.environments?.[s.ldEnv], prereqs) });
+        await this.c.patchFlagSemantic(this.p, s.key, { environmentKey: s.ldEnv, comment, instructions: restoreInstructions(pre, env, current, current.environments?.[s.ldEnv], prereqs) }, { signal: this.signal });
         const before = pre.customProperties?.[prop];
-        if (before) await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: before }], { comment });
-        else if (current.customProperties?.[prop]) await this.c.patchFlagJson(this.p, s.key, [{ op: 'remove', path: `/customProperties/${pointer(prop)}` }], { comment });
+        if (before) await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: before }], { comment, signal: this.signal });
+        else if (current.customProperties?.[prop]) await this.c.patchFlagJson(this.p, s.key, [{ op: 'remove', path: `/customProperties/${pointer(prop)}` }], { comment, signal: this.signal });
         return;
       }
     }
@@ -542,7 +585,7 @@ export class Executor {
 
   private async deleteCreatedFlag(key: string, createdFlags: Set<string>): Promise<void> {
     if (!createdFlags.has(key) || this.deleted.has(key)) return;
-    await this.c.deleteFlag(this.p, key).catch((e) => {
+    await this.c.deleteFlag(this.p, key, this.signal).catch((e) => {
       if (!(e instanceof LdWriteError && e.status === 404)) throw e;
     });
     this.deleted.add(key);

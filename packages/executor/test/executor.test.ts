@@ -195,6 +195,93 @@ describe('Executor', () => {
     expect(ld.calls.filter((c) => c.startsWith('delete'))).toEqual(['delete b', 'delete a']);
   });
 
+  describe('cancel (AbortSignal)', () => {
+    const aborted = () => new DOMException('Cancelled by the user.', 'AbortError');
+
+    it('a signal aborted before the run starts leaves every step pending and records the run as stopped, not failed', async () => {
+      const ld = fakeLd();
+      const { ex, run } = setup(ld.client, [shell('a'), env('a')]);
+      const ctrl = new AbortController();
+      ctrl.abort(aborted());
+      const out = await ex.run(run, ctrl.signal);
+      expect(out.status).toBe('stopped');
+      expect(out.steps.map((s) => s.status)).toEqual(['pending', 'pending']);
+      expect(out.stopReason).toMatch(/^Cancelled before “Flag “a” \(project settings\)”; 2 steps still pending/);
+      expect(ld.calls).toEqual([]);
+    });
+
+    it('a cancel between steps finishes the current step, leaves the later ones pending, and the run resumes from there', async () => {
+      const ctrl = new AbortController();
+      const ld = fakeLd();
+      const createFlag = ld.client.createFlag;
+      // The user clicks Cancel while the first write is on the wire; LD still applies it.
+      ld.client.createFlag = async (p, body) => {
+        const f = await createFlag(p, body);
+        ctrl.abort(aborted());
+        return f;
+      };
+      const { ex, run, saved } = setup(ld.client, [shell('a'), env('a'), shell('b')]);
+      const out = await ex.run(run, ctrl.signal);
+      expect(out.status).toBe('stopped');
+      expect(out.steps.map((s) => s.status)).toEqual(['done', 'pending', 'pending']);
+      expect(out.steps[1]!.message).toBe('Cancelled before it started.');
+      expect(out.stopReason).toMatch(/Cancelled before “Flag “a” targeting in test”; 2 steps still pending\. Resume from Runs/);
+      expect(saved.at(-1)!.status).toBe('stopped');
+      expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a']);
+
+      // Resume (RunsView): a fresh executor on the journaled record, no signal this time.
+      const { ex: again } = setup(ld.client, []);
+      const resumed = await again.run(structuredClone(out));
+      expect(resumed.status).toBe('done');
+      expect(resumed.stopReason).toBeUndefined();
+      expect(resumed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done']);
+      expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'semantic a test', 'json a /customProperties/statsig.sync.test', 'create b']);
+    });
+
+    it('a write aborted in flight puts its step back to pending (not failed) so a resume re-checks it', async () => {
+      const ctrl = new AbortController();
+      const ld = fakeLd({
+        patchFlagSemantic: async () => {
+          // The transport rejects with the abort reason once the signal fires mid-request.
+          ctrl.abort(aborted());
+          throw aborted();
+        },
+      });
+      const { ex, run } = setup(ld.client, [shell('a'), env('a'), shell('b')]);
+      const out = await ex.run(run, ctrl.signal);
+      expect(out.status).toBe('stopped');
+      expect(out.steps.map((s) => s.status)).toEqual(['done', 'pending', 'pending']);
+      expect(out.steps[1]).toMatchObject({ message: 'Cancelled while in flight; resuming re-checks what LaunchDarkly received.' });
+      expect(out.steps[1]!.error).toBeUndefined();
+      expect(out.steps[1]!.startedAt).toBeUndefined();
+      expect(out.stopReason).toMatch(/Cancelled during “Flag “a” targeting in test”/);
+    });
+
+    it('a cancelled undo stops after the step in flight, keeps the rest as done, and can be undone again', async () => {
+      const ld = fakeLd();
+      const { ex, run } = setup(ld.client, [shell('a'), shell('b'), env('a'), env('b', ['shell:b', 'env:test:a'])]);
+      await ex.run(run);
+      const ctrl = new AbortController();
+      const deleteFlag = ld.client.deleteFlag;
+      ld.client.deleteFlag = async (p, key) => {
+        await deleteFlag(p, key);
+        ctrl.abort(aborted());
+      };
+      const out = await ex.undo(structuredClone(run), ctrl.signal);
+      expect(out.status).toBe('undo_failed');
+      expect(out.stopReason).toMatch(/^Undo cancelled before/);
+      expect(out.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'undone']);
+      expect(out.steps.every((s) => !s.error)).toBe(true);
+      expect(ld.flags.has('b')).toBe(false);
+      expect(ld.flags.has('a')).toBe(true);
+
+      const again = await setup(ld.client, []).ex.undo(structuredClone(out));
+      expect(again.status).toBe('undone');
+      expect(again.stopReason).toBeUndefined();
+      expect(ld.flags.size).toBe(0);
+    });
+  });
+
   it('a dry run writes nothing for new flags and passes dryRun for existing ones', async () => {
     const ld = fakeLd();
     const { ex } = setup(ld.client, []);

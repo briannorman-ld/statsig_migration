@@ -174,6 +174,49 @@ describe('Transport retry policy by method', () => {
 });
 
 describe('rate budget pacing events', () => {
+  it('rejects at once with the abort reason when the signal is already aborted: no attempt, no retry', async () => {
+    const { clock, delays } = instantClock();
+    let fetches = 0;
+    const events: TransportEvent[] = [];
+    const t = new Transport({ clock, fetch: async () => (fetches++, jsonResponse(500)), onEvent: (e) => events.push(e) });
+    const ctrl = new AbortController();
+    const reason = new DOMException('Cancelled by the user.', 'AbortError');
+    ctrl.abort(reason);
+    await expect(t.request({ method: 'POST', url: 'https://x.test/a', body: {}, signal: ctrl.signal })).rejects.toBe(reason);
+    expect(fetches).toBe(0);
+    expect(delays).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('an abort during the retry backoff ends the request instead of retrying', async () => {
+    const ctrl = new AbortController();
+    let fetches = 0;
+    const events: TransportEvent[] = [];
+    // Real clock, tiny delays: the first 429 schedules a backoff, and the cancel lands inside it.
+    const t = new Transport({ retry: { baseDelayMs: 200, maxDelayMs: 200 }, random: () => 1, fetch: async () => (fetches++, jsonResponse(429)), onEvent: (e) => events.push(e) });
+    const req = t.request({ method: 'GET', url: 'https://x.test/a', signal: ctrl.signal });
+    setTimeout(() => ctrl.abort(new DOMException('Cancelled by the user.', 'AbortError')), 10);
+    await expect(req).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetches).toBe(1);
+    expect(events.filter((e) => e.type === 'request')).toHaveLength(1);
+  });
+
+  it('an abort while fetch is pending surfaces as the abort reason, never as an unreachable error', async () => {
+    const ctrl = new AbortController();
+    // What a real fetch does: never resolves, rejects with the reason as soon as the signal aborts.
+    const t = new Transport({
+      fetch: (_url, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = init!.signal!;
+          if (signal.aborted) reject(signal.reason);
+          else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    });
+    const req = t.request({ method: 'DELETE', url: 'https://x.test/a', signal: ctrl.signal });
+    ctrl.abort(new DOMException('Cancelled by the user.', 'AbortError'));
+    await expect(req).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('reports when our own budget holds a request back, before waiting', async () => {
     const { clock, delays } = instantClock();
     const events: TransportEvent[] = [];

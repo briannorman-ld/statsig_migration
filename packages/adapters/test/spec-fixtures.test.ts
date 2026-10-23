@@ -2,9 +2,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { allEntities, effectiveTargeting } from '@sslm/canonical';
-import { normalizeSpec, parseSpecBytes, SpecRejectedError } from '../src/index.ts';
+import { classifySpec, normalizeSpec, parseSpecBytes, SpecRejectedError } from '../src/index.ts';
 
 const DIR = fileURLToPath(new URL('../../../reference/statsig/dcs-fixtures/', import.meta.url));
+const DEMO = fileURLToPath(new URL('../../demo-fixtures/generated/acme-web/', import.meta.url));
 const SOURCE = { sourceId: 'spec', sourceKind: 'config_spec' as const, alias: 'spec' };
 const load = (rel: string) => parseSpecBytes(new Uint8Array(readFileSync(DIR + rel)), rel);
 const normalize = async (rel: string) => normalizeSpec(await load(rel), { source: SOURCE, takenAt: '2026-10-01T00:00:00Z' });
@@ -137,5 +138,108 @@ describe('config-spec adapter against real StatSig SDK fixtures', () => {
     const err = await parseSpecBytes(new TextEncoder().encode('{"has_updates": false}')).catch((e) => e);
     expect(err.reason).toBe('no_updates');
     expect(err.message).toMatch(/download_config_specs/);
+  });
+});
+
+describe('config-spec schema validation (lenient, like the Console API path)', () => {
+  const demo = (v: 1 | 2, mutate?: (json: Record<string, any>) => void) => {
+    const json = JSON.parse(readFileSync(`${DEMO}download_config_specs.v${v}.json`, 'utf8'));
+    mutate?.(json);
+    return normalizeSpec(classifySpec(json), { source: SOURCE, takenAt: 'x' });
+  };
+  const mismatches = (snap: ReturnType<typeof demo>) => snap.warnings.filter((w) => w.code === 'schema_mismatch');
+
+  it.each([1, 2] as const)('the demo v%i spec validates without a single schema_mismatch warning', (v) => {
+    const snap = demo(v);
+    expect(mismatches(snap)).toEqual([]);
+    expect(snap.gates.length).toBeGreaterThan(10);
+    expect(snap.configs.length + snap.experiments.length + snap.autotunes.length).toBeGreaterThan(10);
+  });
+
+  it.each(all.filter((f) => !(f in REJECTED)))('%s validates without schema_mismatch warnings', async (rel) => {
+    const snap = normalizeSpec(await load(rel), { source: SOURCE, takenAt: 'x' });
+    expect(snap.warnings.filter((w) => w.code === 'schema_mismatch')).toEqual([]);
+  });
+
+  it('a v2 entity with a malformed rule is skipped with a warning naming it; every other entity survives', () => {
+    const clean = demo(2);
+    const snap = demo(2, (j) => {
+      j.feature_gates.dark_mode.rules[0].passPercentage = 'all of them';
+      j.feature_gates.dark_mode.rules.push('not a rule');
+    });
+    expect(mismatches(snap)).toEqual([{ code: 'schema_mismatch', path: 'feature_gates[dark_mode]', message: 'Skipped: rules[0]: passPercentage: Invalid input: expected number, received string' }]);
+    expect(snap.gates.some((g) => g.id === 'dark_mode')).toBe(false);
+    expect(snap.gates.length).toBe(clean.gates.length - 1);
+    expect(snap.configs.length).toBe(clean.configs.length);
+    // The warning never carries the offending value (it may be PII).
+    expect(JSON.stringify(snap.warnings)).not.toContain('all of them');
+  });
+
+  it('a condition without a type (inline, or via condition_map) skips its entity rather than dropping the condition', () => {
+    const v2 = demo(2, (j) => {
+      const id = j.feature_gates.new_checkout_flow.rules[0].conditions[0];
+      delete j.condition_map[id].type;
+    });
+    expect(mismatches(v2).map((w) => w.path)).toEqual(['feature_gates[new_checkout_flow]']);
+    expect(mismatches(v2)[0]!.message).toMatch(/^Skipped: rules\[0\]\.conditions\[0\] \(condition_map\[\d+\]\): type: /);
+    expect(v2.gates.some((g) => g.id === 'new_checkout_flow')).toBe(false);
+
+    const v1 = demo(1, (j) => {
+      j.feature_gates[0].rules[0].conditions[0] = { targetValue: ['x'], operator: 'any' };
+    });
+    expect(mismatches(v1)).toHaveLength(1);
+    expect(mismatches(v1)[0]!.path).toBe('feature_gates[new_checkout_flow]');
+    expect(v1.gates.some((g) => g.id === 'new_checkout_flow')).toBe(false);
+  });
+
+  it('an entity that is not an object, or lacks `enabled` / `rules`, is skipped by name or index', () => {
+    const v2 = demo(2, (j) => {
+      j.dynamic_configs.shipping_thresholds = 'oops';
+      delete j.feature_gates.dark_mode.enabled;
+    });
+    expect(mismatches(v2).map((w) => [w.path, w.message])).toEqual([
+      ['feature_gates[dark_mode]', 'Skipped: enabled: Invalid input: expected boolean, received undefined'],
+      ['dynamic_configs[shipping_thresholds]', 'Skipped: (root): Invalid input: expected object, received string'],
+    ]);
+    expect(v2.configs.some((c) => c.id === 'shipping_thresholds')).toBe(false);
+
+    const v1 = demo(1, (j) => {
+      j.feature_gates[3] = 42;
+    });
+    expect(mismatches(v1).map((w) => w.path)).toEqual(['feature_gates[3]']);
+  });
+
+  it('a whole section of the wrong shape is ignored with one warning, and the rest of the file still normalizes', () => {
+    const snap = demo(2, (j) => {
+      j.param_stores = ['not', 'a', 'map'];
+      j.experiment_to_layer = { search_ranking_v3: ['layer'] };
+      j.layer_configs = 'nope';
+    });
+    expect(mismatches(snap).map((w) => [w.path, w.message.split(':')[0]])).toEqual([
+      ['layer_configs', 'Section ignored'],
+      ['experiment_to_layer', 'Section ignored'],
+      ['param_stores', 'Section ignored'],
+    ]);
+    expect(snap.layers).toEqual([]);
+    expect(snap.paramStores).toEqual([]);
+    expect(snap.gates.length).toBeGreaterThan(10);
+    expect(snap.experiments.length).toBeGreaterThan(0);
+  });
+
+  it('one malformed param store skips only itself', () => {
+    const snap = demo(2, (j) => {
+      const name = Object.keys(j.param_stores)[0]!;
+      j.param_stores.broken = { parameters: { p: { ref_type: 'static' } } };
+      j.param_stores.fine = j.param_stores[name];
+    });
+    expect(mismatches(snap).map((w) => w.path)).toEqual(['param_stores[broken]']);
+    expect(snap.paramStores.map((p) => p.id).sort()).toEqual(expect.arrayContaining(['fine']));
+    expect(snap.paramStores.some((p) => p.id === 'broken')).toBe(false);
+  });
+
+  it('a malformed v1 `layers` map never throws out of the normalizer', () => {
+    expect(() => demo(1, (j) => (j.layers = { l: 'not-an-array' }))).not.toThrow();
+    expect(() => demo(1, (j) => (j.id_lists = 7))).not.toThrow();
+    expect(() => demo(2, (j) => (j.condition_map = null))).not.toThrow();
   });
 });
