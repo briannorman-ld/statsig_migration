@@ -890,8 +890,9 @@ export function acmeWeb(): ProjectSeed {
     ],
     autotunes: [
       {
+        // 11.8: running in StatSig → autotune_running decision (wait or pre-stage); 11.9: 33/33/33 sums to 99.
         id: 'promo_banner_autotune',
-        description: 'Bandit over promo banner copy.',
+        description: 'Bandit over promo banner copy (running: wait for a winner, or pre-stage).',
         owner: P.marco,
         successEvent: 'promo_click',
         isStarted: true,
@@ -899,6 +900,69 @@ export function acmeWeb(): ProjectSeed {
           { name: 'Ten off', json: { copy: '10% off today' } },
           { name: 'Free ship', json: { copy: 'Free shipping on everything' } },
           { name: 'BOGO', json: { copy: 'Buy one get one' } },
+        ],
+      },
+      {
+        // 11.8: not started → JSON flag (off) + metric + drafted bandit.
+        id: 'hero_image_autotune',
+        description: 'Not started yet: homepage hero image candidates (drafted as an LD bandit).',
+        owner: P.marco,
+        successEvent: 'hero_click',
+        isStarted: false,
+        tags: ['homepage'],
+        variants: [
+          { name: 'Lifestyle', json: { image: 'hero-lifestyle.jpg' }, size: 50 },
+          { name: 'Product', json: { image: 'hero-product.jpg' }, size: 50 },
+        ],
+      },
+      {
+        // 11.10: concluded → the flag serves the winner at 100%, no bandit.
+        id: 'pricing_page_autotune',
+        description: 'Concluded: StatSig picked “Annual first” (the flag serves the winner at 100%).',
+        owner: P.dana,
+        successEvent: 'plan_selected',
+        isStarted: true,
+        winner: 'Annual first',
+        variants: [
+          { name: 'Monthly first', json: { order: ['monthly', 'annual'] } },
+          { name: 'Annual first', json: { order: ['annual', 'monthly'] } },
+        ],
+      },
+      {
+        // 11.11: no success event → missing_metric decision (flag only, or skip).
+        id: 'cart_upsell_autotune',
+        description: 'No success event configured: nothing for a bandit to optimize.',
+        owner: P.bob,
+        isStarted: false,
+        variants: [
+          { name: 'Accessories', json: { upsell: 'accessories' } },
+          { name: 'Warranty', json: { upsell: 'warranty' } },
+        ],
+      },
+      {
+        // 11.12: two variants with identical JSON → duplicate_variant_value (merge or skip).
+        id: 'free_shipping_copy_autotune',
+        description: 'Two variants return the same JSON (LD variations must be distinct).',
+        owner: P.marco,
+        successEvent: 'checkout_start',
+        isStarted: false,
+        variants: [
+          { name: 'Short', json: { copy: 'Free shipping' } },
+          { name: 'Short again', json: { copy: 'Free shipping' } },
+          { name: 'Long', json: { copy: 'Free shipping on every order' } },
+        ],
+      },
+      {
+        // 11.13: companyID autotune → bandit randomized by the “company” context kind (randomization unit).
+        id: 'b2b_pricing_autotune',
+        description: 'Randomized by companyID: the LD bandit needs “company” as a randomization unit.',
+        owner: P.dana,
+        successEvent: 'quote_requested',
+        isStarted: false,
+        idType: 'companyID',
+        variants: [
+          { name: 'Volume tiers', json: { pricing: 'tiers' } },
+          { name: 'Flat rate', json: { pricing: 'flat' } },
         ],
       },
     ],

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { LdAuthError, LdClient, probeCapabilities, type CapabilityMatrix, type LdCallerIdentity, type LdFlagSummary, type LdInstanceId, type LdProject, type LdSegment } from '@sslm/ld-client';
+import { LdAuthError, LdClient, LdWriteError, probeCapabilities, TAG_MIGRATED_ENV, type CapabilityMatrix, type LdCallerIdentity, type LdExperiment, type LdFlagSummary, type LdInstanceId, type LdMetric, type LdProject, type LdSegment } from '@sslm/ld-client';
 import { secrets } from './secrets.ts';
 import { store } from './store.ts';
 
@@ -21,6 +21,12 @@ export interface LdSession {
   contextKinds?: string[];
   /** Segments per LD environment, loaded when a plan needs them. */
   segments?: Record<string, LdSegment[]>;
+  /** Project metrics; undefined until read, or when the plan has no Experimentation. */
+  metrics?: LdMetric[];
+  /** Experiments (bandits included) per LD environment, loaded with the segments. */
+  experiments?: Record<string, LdExperiment[]>;
+  /** Context kinds enabled as randomization units; undefined when unreadable. */
+  randomizationUnits?: string[];
   error?: string;
 }
 
@@ -89,21 +95,67 @@ export async function chooseProject(workspaceId: string, projectKey: string): Pr
   }
 }
 
+/**
+ * Create an LD environment for a StatSig environment that has no counterpart (Mapping page). A
+ * user-triggered write outside the executor: it is additive, idempotent on 409, and followed by a
+ * re-probe so the new environment shows up in the capability matrix and the mapping lists.
+ */
+export async function createLdEnvironment(workspaceId: string, input: { key: string; name: string; critical?: boolean }): Promise<void> {
+  const s = sessions.get(workspaceId);
+  if (!s?.projectKey) throw new Error('Choose an LD project first.');
+  const c = client(workspaceId);
+  const color = ENV_COLORS[Math.abs([...input.key].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) | 0, 0)) % ENV_COLORS.length]!;
+  try {
+    await c.createEnvironment(s.projectKey, { key: input.key, name: input.name, color, ...(input.critical ? { critical: true } : {}), tags: [TAG_MIGRATED_ENV] });
+  } catch (e) {
+    if (!(e instanceof LdWriteError && e.status === 409)) throw e;
+  }
+  await chooseProject(workspaceId, s.projectKey);
+}
+
+/** LD's own environment palette (hex without `#`), picked deterministically per key. */
+const ENV_COLORS = ['417505', 'F5A623', '7B4DFF', '00A3BF', 'E8367D', '2B6CB0', 'D97706', '0F766E'];
+
 export async function reprobe(workspaceId: string): Promise<void> {
   const s = sessions.get(workspaceId);
   if (s?.projectKey) await chooseProject(workspaceId, s.projectKey);
 }
 
-/** Re-read flags (all environments) and context kinds: after connecting and after every run. */
+/**
+ * Re-read flags (all environments) and context kinds: after connecting and after every run.
+ * `segmentEnvs` also loads segments and experiments in those environments (what a plan needs).
+ * Experimentation reads (metrics, experiments, randomization units) are optional: plans without
+ * the add-on answer 403, which must not hide the flags.
+ */
 export async function refreshLdState(workspaceId: string, opts: { segmentEnvs?: string[] } = {}): Promise<void> {
   const s = sessions.get(workspaceId);
   if (!s?.projectKey) return;
   const c = client(workspaceId);
+  const p = s.projectKey;
+  const optional = async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      return await fn();
+    } catch {
+      return undefined;
+    }
+  };
   try {
-    const [items, kinds] = await Promise.all([c.listFlags(s.projectKey), c.listContextKinds(s.projectKey)]);
+    const [items, kinds, metrics, settings] = await Promise.all([c.listFlags(p), c.listContextKinds(p), optional(() => c.listMetrics(p)), optional(() => c.getExperimentationSettings(p))]);
     const segments = { ...(sessions.get(workspaceId)?.segments ?? {}) };
-    for (const env of opts.segmentEnvs ?? Object.keys(segments)) segments[env] = await c.listSegments(s.projectKey, env);
-    set(workspaceId, { flags: { items, loadedAt: new Date().toISOString() }, contextKinds: kinds.items.filter((k) => !k.archived).map((k) => k.key), segments });
+    const experiments = { ...(sessions.get(workspaceId)?.experiments ?? {}) };
+    for (const env of opts.segmentEnvs ?? Object.keys(segments)) {
+      segments[env] = await c.listSegments(p, env);
+      const ex = await optional(() => c.listExperiments(p, env));
+      if (ex) experiments[env] = ex;
+    }
+    set(workspaceId, {
+      flags: { items, loadedAt: new Date().toISOString() },
+      contextKinds: kinds.items.filter((k) => !k.archived).map((k) => k.key),
+      segments,
+      experiments,
+      ...(metrics ? { metrics } : {}),
+      ...(settings ? { randomizationUnits: (settings.randomizationUnits ?? []).map((u) => u.randomizationUnit) } : {}),
+    });
   } catch (e) {
     set(workspaceId, { error: `Could not read the LD project: ${(e as Error).message}` });
   }

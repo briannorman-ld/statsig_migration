@@ -24,6 +24,9 @@ export const TYPE_LABEL: Record<string, string> = {
   client_side_availability: 'Client-side availability',
   unsupported_condition: 'No LD equivalent',
   rule_expansion: 'Rule expansion',
+  autotune_running: 'Autotune running in StatSig',
+  missing_metric: 'No success event for the bandit',
+  duplicate_variant_value: 'Variants with identical values',
 };
 
 /**

@@ -436,16 +436,23 @@ export interface AutotuneSeed {
   id: string;
   description: string;
   owner: Person;
-  successEvent: string;
-  variants: { name: string; json: JsonObject }[];
+  /** Absent = no success event (KNOWN-EDGE-CASES 11.11). */
+  successEvent?: string;
+  /** `size` defaults to an equal split rounded down (so three arms sum to 99, as StatSig does). */
+  variants: { name: string; json: JsonObject; size?: number }[];
   isStarted: boolean;
+  /** Name of the winning variant once StatSig concluded (11.10). */
+  winner?: string;
+  idType?: string;
+  tags?: string[];
 }
 
 export function autotune(ctx: BuildContext, s: AutotuneSeed): JsonObject {
+  const variantId = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, '_');
   return {
     description: s.description,
-    variants: s.variants.map((v) => ({ name: v.name, json: v.json, size: Math.round(100 / s.variants.length), id: v.name.toLowerCase().replace(/[^a-z0-9]+/g, '_') })),
-    successEvent: s.successEvent,
+    variants: s.variants.map((v) => ({ name: v.name, json: v.json, size: v.size ?? Math.floor(100 / s.variants.length), id: variantId(v.name) })),
+    successEvent: s.successEvent ?? '',
     successEventValue: '',
     explorationWindow: '24hr',
     attributionWindow: '1hr',
@@ -454,16 +461,16 @@ export function autotune(ctx: BuildContext, s: AutotuneSeed): JsonObject {
     inlineTargetingRules: [],
     id: s.id,
     name: s.id,
-    idType: 'userID',
+    idType: s.idType ?? 'userID',
     ...audit(ctx, s.owner, 40, 2),
-    tags: [],
+    tags: s.tags ?? [],
     targetApps: [],
     holdoutIDs: [],
     team: null,
     teamID: null,
     version: 2,
     isStarted: s.isStarted,
-    winner: null,
+    winner: s.winner ? { id: variantId(s.winner), name: s.winner } : null,
   };
 }
 

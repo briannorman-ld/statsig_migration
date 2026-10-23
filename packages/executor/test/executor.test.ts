@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { LdAuthError, LdWriteError, type LdFlag } from '@sslm/ld-client';
+import { LdAuthError, LdWriteError, type LdExperiment, type LdFlag, type LdMetric } from '@sslm/ld-client';
 import type { PlanStep } from '@sslm/planner';
 import { Executor, footer, newRun, parseFooter, withFooter, type LdWriter, type RunRecord } from '../src/index.ts';
 
 /** Minimal in-memory LD: enough state for the executor's control flow, not LD's semantics. */
 function fakeLd(over: Partial<Record<keyof LdWriter, (...a: never[]) => unknown>> = {}) {
   const flags = new Map<string, LdFlag>();
+  const metrics = new Map<string, LdMetric>();
+  const experiments = new Map<string, LdExperiment & { iteration?: unknown }>();
+  const units: string[] = ['user'];
   const calls: string[] = [];
   const flag = (key: string, body: Record<string, unknown> = {}): LdFlag => ({
     key,
@@ -35,8 +38,32 @@ function fakeLd(over: Partial<Record<keyof LdWriter, (...a: never[]) => unknown>
     patchSegmentJson: async (_p, _e, key) => ({ key, name: key }),
     deleteSegment: async () => undefined,
     putContextKind: async () => undefined,
+    getMetric: async (_p, key) => (calls.push(`get metric ${key}`), metrics.get(key) ?? null),
+    createMetric: async (_p, body) => {
+      calls.push(`create metric ${body.key}`);
+      const m = { key: body.key as string, name: body.name as string, kind: 'custom', eventKey: body.eventKey as string, tags: (body.tags as string[]) ?? [] };
+      metrics.set(m.key, m);
+      return m;
+    },
+    patchMetricJson: async (_p, key, ops) => (calls.push(`json metric ${key} ${ops.map((o) => o.path).join(',')}`), metrics.get(key)!),
+    deleteMetric: async (_p, key) => void (calls.push(`delete metric ${key}`), metrics.delete(key)),
+    getExperiment: async (_p, env, key) => (calls.push(`get experiment ${env}/${key}`), experiments.get(`${env}/${key}`) ?? null),
+    createExperiment: async (_p, env, body) => {
+      calls.push(`create experiment ${env}/${body.key}`);
+      const e = { key: body.key as string, name: body.name as string, type: body.type as string, tags: (body.tags as string[]) ?? [], draftIteration: { status: 'not_started', hypothesis: '' }, iteration: body.iteration };
+      experiments.set(`${env}/${e.key}`, e);
+      return e;
+    },
+    createIteration: async (_p, env, key, body) => (calls.push(`iteration ${env}/${key}`), { ...experiments.get(`${env}/${key}`)!, iteration: body }),
+    patchExperimentSemantic: async (_p, env, key, patch) => (calls.push(`semantic experiment ${env}/${key} ${patch.instructions.map((i) => i.kind).join(',')}`), experiments.get(`${env}/${key}`)!),
+    getExperimentationSettings: async () => (calls.push('get settings'), { randomizationUnits: units.map((u) => ({ randomizationUnit: u })) }),
+    putExperimentationSettings: async (_p, body) => {
+      calls.push(`put settings ${body.randomizationUnits.map((u) => u.randomizationUnit).join(',')}`);
+      units.splice(0, units.length, ...body.randomizationUnits.map((u) => u.randomizationUnit));
+      return { randomizationUnits: body.randomizationUnits };
+    },
   };
-  return { client: { ...base, ...over } as LdWriter, flags, calls, flag };
+  return { client: { ...base, ...over } as LdWriter, flags, metrics, experiments, units, calls, flag };
 }
 
 const desiredEnv = { ldEnv: 'test', statsigEnv: 'staging', on: true, offVariation: 1, fallthrough: { variation: 0 }, rules: [], targets: [], prerequisites: [] };
@@ -171,6 +198,129 @@ describe('Executor', () => {
 });
 
 describe('segment provenance footer', () => {
+  describe('autotunes → bandits', () => {
+    const jsonShell = (key: string): PlanStep => ({
+      ...(shell(key) as Extract<PlanStep, { op: 'upsert_flag_shell' }>),
+      desired: {
+        ...(shell(key) as Extract<PlanStep, { op: 'upsert_flag_shell' }>).desired,
+        variations: [
+          { value: { copy: 'A' }, name: 'A' },
+          { value: { copy: 'B' }, name: 'B' },
+        ],
+        customProperties: { 'statsig.id': { name: 'StatSig ID', value: [key] }, 'statsig.type': { name: 'StatSig type', value: ['autotune'] }, 'statsig.source': { name: 'StatSig source', value: ['web'] } },
+      },
+    });
+    const metric: PlanStep = {
+      id: 'metric:promo_click',
+      deps: [],
+      op: 'upsert_metric',
+      key: 'promo_click',
+      exists: false,
+      adopt: false,
+      desired: { key: 'promo_click', name: 'promo_click', description: '', kind: 'custom', eventKey: 'promo_click', isNumeric: false, successCriteria: 'HigherThanBaseline', tags: ['statsig-migrated', 'statsig-src-web'], analysisUnits: ['user'] },
+      provenance: { sourceAlias: 'web', statsigType: 'metric', statsigId: 'promo_click', statsigFingerprint: 'fp', decisionSetHash: 'dh' },
+    };
+    const unit: PlanStep = { id: 'randomization_unit:company', deps: [], op: 'ensure_randomization_unit', key: 'company' };
+    const bandit = (key: string): PlanStep => ({
+      id: `bandit:test:${key}`,
+      deps: [`env:test:${key}`, 'metric:promo_click'],
+      op: 'create_bandit',
+      key,
+      ldEnv: 'test',
+      statsigEnv: 'staging',
+      flagKey: key,
+      exists: false,
+      adopt: false,
+      desired: {
+        key,
+        ldEnv: 'test',
+        statsigEnv: 'staging',
+        name: key,
+        description: 'Bandit',
+        hypothesis: 'h',
+        flagKey: key,
+        ruleId: 'fallthrough',
+        treatments: [
+          { name: 'A', baseline: true, allocationPercent: '50', variation: 0 },
+          { name: 'B', baseline: false, allocationPercent: '50', variation: 1 },
+        ],
+        metricKey: 'promo_click',
+        randomizationUnit: 'user',
+        reallocationFrequencyMillis: 3_600_000,
+        tags: ['statsig-migrated', 'statsig-src-web'],
+      },
+      provenance: { sourceAlias: 'web', statsigType: 'autotune', statsigId: key, statsigVersion: 2, statsigFingerprint: 'fp', decisionSetHash: 'dh' },
+    });
+    const jsonFlag = (ld: ReturnType<typeof fakeLd>, key: string): LdFlag => ({
+      ...ld.flag(key, { tags: ['statsig-migrated', 'statsig-src-web'], customProperties: { 'statsig.id': { name: 'StatSig ID', value: [key] }, 'statsig.source': { name: 'StatSig source', value: ['web'] } } }),
+      variations: [
+        { _id: `${key}-a`, value: { copy: 'A' } },
+        { _id: `${key}-b`, value: { copy: 'B' } },
+      ],
+      environments: { test: { on: false, offVariation: 0, fallthrough: { variation: 0 }, rules: [], targets: [], version: 7 } },
+    });
+
+    it('creates the metric, the randomization unit and a drafted mab experiment with variation IDs and the flag version', async () => {
+      const ld = fakeLd();
+      ld.flags.set('promo', jsonFlag(ld, 'promo'));
+      const jsonEnv: PlanStep = {
+        ...(env('promo') as Extract<PlanStep, { op: 'update_flag_env' }>),
+        variations: [{ copy: 'A' }, { copy: 'B' }],
+        desired: { ...desiredEnv, on: false, offVariation: 0, fallthrough: { rollout: { contextKind: 'user', variations: [{ variation: 0, weight: 50_000 }, { variation: 1, weight: 50_000 }] } } },
+      };
+      const { ex, run } = setup(ld.client, [unit, metric, { ...(jsonShell('promo') as Extract<PlanStep, { op: 'upsert_flag_shell' }>), exists: true }, jsonEnv, bandit('promo')]);
+      const out = await ex.run(run);
+      expect(out.steps.map((s) => s.error ?? '')).toEqual(['', '', '', '', '']);
+      expect(out.status).toBe('done');
+      expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual([
+        'put settings user,company',
+        'create metric promo_click',
+        'json promo /clientSideAvailability,/customProperties/statsig.type',
+        'semantic promo test',
+        'json promo /customProperties/statsig.sync.test',
+        'create experiment test/promo',
+      ]);
+      const created = ld.experiments.get('test/promo')!;
+      expect(created.type).toBe('mab');
+      expect(created.iteration).toMatchObject({
+        primarySingleMetricKey: 'promo_click',
+        randomizationUnit: 'user',
+        reallocationFrequencyMillis: 3_600_000,
+        treatments: [
+          { name: 'A', baseline: true, allocationPercent: '50', parameters: [{ flagKey: 'promo', variationId: 'promo-a' }] },
+          { name: 'B', baseline: false, allocationPercent: '50', parameters: [{ flagKey: 'promo', variationId: 'promo-b' }] },
+        ],
+        flags: { promo: { ruleId: 'fallthrough', flagConfigVersion: 7, notInExperimentVariationId: 'promo-a' } },
+      });
+      expect(out.steps.map((s) => s.created ?? false)).toEqual([true, true, false, false, true]);
+    });
+
+    it('replaces a draft iteration on re-sync, leaves a running one alone, and reuses a same-event metric', async () => {
+      const ld = fakeLd();
+      ld.flags.set('promo', jsonFlag(ld, 'promo'));
+      ld.metrics.set('promo_click', { key: 'promo_click', kind: 'custom', eventKey: 'promo_click', tags: ['other'] });
+      ld.experiments.set('test/promo', { key: 'promo', name: 'promo', type: 'mab', tags: ['statsig-migrated', 'statsig-src-web'], draftIteration: { status: 'not_started', hypothesis: '' } });
+      const { ex, run } = setup(ld.client, [metric, bandit('promo')]);
+      const out = await ex.run(run);
+      expect(out.status).toBe('done');
+      expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['json metric promo_click /tags', 'iteration test/promo']);
+      ld.experiments.set('test/promo', { key: 'promo', name: 'promo', type: 'mab', tags: ['statsig-migrated', 'statsig-src-web'], currentIteration: { status: 'running', hypothesis: '' } });
+      const again = await ex.run(newRun({ id: 'run-2', workspaceId: 'w', projectKey: 'p', label: 't', dryRun: false, steps: [bandit('promo')], now: new Date() }));
+      expect(again.steps[0]!.message).toMatch(/running iteration; left as is/);
+    });
+
+    it('undo archives the experiment it created, deletes its metric and restores the randomization units', async () => {
+      const ld = fakeLd();
+      ld.flags.set('promo', jsonFlag(ld, 'promo'));
+      const { ex, run } = setup(ld.client, [unit, metric, bandit('promo')]);
+      const done = await ex.run(run);
+      ld.calls.length = 0;
+      const undone = await ex.undo(done);
+      expect(undone.status).toBe('undone');
+      expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['semantic experiment test/promo archiveExperiment', 'delete metric promo_click', 'put settings user']);
+    });
+  });
+
   it('round-trips and replaces an old footer', () => {
     const f = footer({ sourceAlias: 'web', statsigId: 'vip', statsigFingerprint: 'abc', decisionSetHash: 'd' }, new Date('2026-10-22T00:00:00Z'));
     const once = withFooter('VIPs', f);

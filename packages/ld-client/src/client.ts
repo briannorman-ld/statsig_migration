@@ -6,7 +6,12 @@ import {
   ContextKindsSchema,
   EnvironmentSchema,
   EnvironmentsSchema,
+  ExperimentSchema,
+  ExperimentsSchema,
+  ExperimentationSettingsSchema,
   FlagSchema,
+  MetricSchema,
+  MetricsSchema,
   FlagsSchema,
   ProjectSchema,
   SegmentSchema,
@@ -15,12 +20,18 @@ import {
   TokenSchema,
   type LdCallerIdentity,
   type LdEnvironment,
+  type LdExperiment,
+  type LdExperimentationSettings,
   type LdFlag,
+  type LdMetric,
   type LdFlagSummary,
   type LdProject,
   type LdSegment,
   type LdToken,
 } from './schemas.ts';
+
+/** Tag on LD environments this app created (Mapping page), so a project reset removes only those. */
+export const TAG_MIGRATED_ENV = 'statsig-migrated';
 
 export interface LdSchemaIssue {
   path: string;
@@ -177,7 +188,101 @@ export class LdClient {
     }
   }
 
+  // --- Experimentation reads ---------------------------------------------------------------------
+
+  /** Every metric in the project (key, kind, event key, tags). 403 on plans without Experimentation. */
+  async listMetrics(projectKey: string, signal?: AbortSignal): Promise<LdMetric[]> {
+    const out: LdMetric[] = [];
+    for (let offset = 0; offset < 100_000; offset += 50) {
+      const page = await this.get(`/metrics/${encodeURIComponent(projectKey)}`, MetricsSchema, { query: { limit: '50', offset: String(offset) }, signal });
+      const items = page.items ?? [];
+      out.push(...items);
+      if (items.length < 50 || (page.totalCount != null && out.length >= page.totalCount)) break;
+    }
+    return out;
+  }
+
+  async getMetric(projectKey: string, key: string, signal?: AbortSignal): Promise<LdMetric | null> {
+    try {
+      return await this.get(`/metrics/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, MetricSchema, { signal });
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  /** Experiments (including bandits) in one environment, active and archived. */
+  async listExperiments(projectKey: string, envKey: string, signal?: AbortSignal): Promise<LdExperiment[]> {
+    const out: LdExperiment[] = [];
+    for (let offset = 0; offset < 100_000; offset += 50) {
+      const page = await this.get(`/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments`, ExperimentsSchema, {
+        query: { limit: '50', offset: String(offset), lifecycleState: 'active,archived' },
+        signal,
+      });
+      out.push(...page.items);
+      const total = page.total_count ?? page.totalCount;
+      if (page.items.length < 50 || (total != null && out.length >= total)) break;
+    }
+    return out;
+  }
+
+  async getExperiment(projectKey: string, envKey: string, key: string, signal?: AbortSignal): Promise<LdExperiment | null> {
+    try {
+      return await this.get(`/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments/${encodeURIComponent(key)}`, ExperimentSchema, { signal });
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  getExperimentationSettings(projectKey: string, signal?: AbortSignal): Promise<LdExperimentationSettings> {
+    return this.get(`/projects/${encodeURIComponent(projectKey)}/experimentation-settings`, ExperimentationSettingsSchema, { signal });
+  }
+
   // --- Writes ---------------------------------------------------------------------------------
+
+  /** POST /projects/{p}/environments (reference/launchdarkly/openapi.json EnvironmentPost: name, key, color required). */
+  createEnvironment(projectKey: string, body: { key: string; name: string; color: string; critical?: boolean; tags?: string[] }): Promise<LdEnvironment> {
+    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments`, body, EnvironmentSchema);
+  }
+
+  async deleteEnvironment(projectKey: string, envKey: string): Promise<void> {
+    await this.write('DELETE', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}`, undefined, null);
+  }
+
+  createMetric(projectKey: string, body: Record<string, unknown>): Promise<LdMetric> {
+    return this.write('POST', `/metrics/${encodeURIComponent(projectKey)}`, body, MetricSchema);
+  }
+
+  patchMetricJson(projectKey: string, key: string, patch: JsonPatchOp[], opts: { comment?: string } = {}): Promise<LdMetric> {
+    return this.write('PATCH', `/metrics/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, { patch, ...(opts.comment ? { comment: opts.comment } : {}) }, MetricSchema);
+  }
+
+  async deleteMetric(projectKey: string, key: string): Promise<void> {
+    await this.write('DELETE', `/metrics/${encodeURIComponent(projectKey)}/${encodeURIComponent(key)}`, undefined, null);
+  }
+
+  /** POST an experiment with its first iteration as a draft (`type: mab` for a bandit). */
+  createExperiment(projectKey: string, envKey: string, body: Record<string, unknown>): Promise<LdExperiment> {
+    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments`, body, ExperimentSchema);
+  }
+
+  /** Replaces the experiment's draft iteration. */
+  createIteration(projectKey: string, envKey: string, key: string, body: Record<string, unknown>): Promise<LdExperiment> {
+    return this.write('POST', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments/${encodeURIComponent(key)}/iterations`, body, ExperimentSchema);
+  }
+
+  /** Experiments only take semantic patches (`archiveExperiment`, `updateExperimentFields`, …). */
+  patchExperimentSemantic(projectKey: string, envKey: string, key: string, patch: SemanticPatch): Promise<LdExperiment> {
+    return this.write('PATCH', `/projects/${encodeURIComponent(projectKey)}/environments/${encodeURIComponent(envKey)}/experiments/${encodeURIComponent(key)}`, patch, ExperimentSchema, {
+      contentType: 'application/json; domain-model=launchdarkly.semanticpatch',
+    });
+  }
+
+  /** PUT replaces the whole list of randomization units. */
+  putExperimentationSettings(projectKey: string, body: { randomizationUnits: { randomizationUnit: string; default?: boolean }[] }): Promise<LdExperimentationSettings> {
+    return this.write('PUT', `/projects/${encodeURIComponent(projectKey)}/experimentation-settings`, body, ExperimentationSettingsSchema);
+  }
 
   createFlag(projectKey: string, body: Record<string, unknown>): Promise<LdFlag> {
     return this.write('POST', `/flags/${encodeURIComponent(projectKey)}`, body, FlagSchema);

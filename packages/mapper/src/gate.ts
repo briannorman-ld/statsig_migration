@@ -329,35 +329,9 @@ function flagShell(ctx: ConditionContext, gate: Gate, alias: string, key: string
   const renamed = gate.tags.filter((t) => sanitizeTag(t) !== t);
   if (renamed.length) ctx.fidelity.push({ fidelity: 'full', message: `Tag${renamed.length === 1 ? '' : 's'} ${renamed.map((t) => `“${t}”`).join(', ')} renamed to fit LD's tag format.` });
 
-  const csa = ctx.decisions.choose(
-    {
-      type: 'client_side_availability',
-      severity: 'choice',
-      subject: { ...ctx.subject, location: 'flag settings' },
-      path: 'client_side_availability',
-      title: 'Client-side availability',
-      explanation: 'StatSig client SDKs can evaluate every gate. LD flags are only sent to client-side and mobile SDKs when you allow it.',
-      sourceFragment: { targetApps: gate.targetApps },
-      fingerprintOf: {},
-      options: [
-        { key: 'both', label: 'Client-side and mobile SDKs', explanation: 'Mirrors StatSig: any SDK can evaluate the flag.', resultingFidelity: 'full' },
-        { key: 'mobile', label: 'Mobile SDKs only', explanation: 'Browser SDKs using the client-side ID won’t see the flag.', resultingFidelity: 'partial' },
-        { key: 'server', label: 'Server-side SDKs only', explanation: 'Client and mobile SDKs won’t see the flag.', resultingFidelity: 'partial' },
-      ],
-      recommended: 'both',
-    },
-    'both',
-  );
-  const clientSideAvailability: ClientSideAvailability = { usingEnvironmentId: csa === 'both', usingMobileKey: csa !== 'server' };
+  const clientSideAvailability = chooseClientSideAvailability(ctx, gate.targetApps);
 
-  const props: Record<string, CustomProperty> = {
-    'statsig.id': { name: 'StatSig ID', value: [gate.id] },
-    'statsig.type': { name: 'StatSig type', value: ['gate'] },
-    'statsig.source': { name: 'StatSig source', value: [alias] },
-  };
-  if (gate.version !== undefined) props['statsig.version'] = { name: 'StatSig version', value: [String(gate.version)] };
-  if (gate.owner?.email) props['statsig.owner'] = { name: 'StatSig owner', value: [gate.owner.email] };
-  if (gate.permalink) props['statsig.permalink'] = { name: 'StatSig link', value: [gate.permalink] };
+  const props = provenanceProperties(gate, alias, 'gate');
 
   return {
     key,
@@ -374,6 +348,43 @@ function flagShell(ctx: ConditionContext, gate: Gate, alias: string, key: string
     clientSideAvailability,
     customProperties: props,
   };
+}
+
+/** PLAN §10.1: StatSig client SDKs see every config; LD flags are opt-in per SDK type. Shared by every flag-producing mapper. */
+export function chooseClientSideAvailability(ctx: ConditionContext, targetApps: string[]): ClientSideAvailability {
+  const csa = ctx.decisions.choose(
+    {
+      type: 'client_side_availability',
+      severity: 'choice',
+      subject: { ...ctx.subject, location: 'flag settings' },
+      path: 'client_side_availability',
+      title: 'Client-side availability',
+      explanation: 'StatSig client SDKs can evaluate every gate. LD flags are only sent to client-side and mobile SDKs when you allow it.',
+      sourceFragment: { targetApps },
+      fingerprintOf: {},
+      options: [
+        { key: 'both', label: 'Client-side and mobile SDKs', explanation: 'Mirrors StatSig: any SDK can evaluate the flag.', resultingFidelity: 'full' },
+        { key: 'mobile', label: 'Mobile SDKs only', explanation: 'Browser SDKs using the client-side ID won’t see the flag.', resultingFidelity: 'partial' },
+        { key: 'server', label: 'Server-side SDKs only', explanation: 'Client and mobile SDKs won’t see the flag.', resultingFidelity: 'partial' },
+      ],
+      recommended: 'both',
+    },
+    'both',
+  );
+  return { usingEnvironmentId: csa === 'both', usingMobileKey: csa !== 'server' };
+}
+
+/** Provenance custom properties (PLAN §3.3) minus the per-environment sync entries. */
+export function provenanceProperties(entity: { id: string; version?: number; owner?: { email?: string }; permalink?: string }, alias: string, statsigType: string): Record<string, CustomProperty> {
+  const props: Record<string, CustomProperty> = {
+    'statsig.id': { name: 'StatSig ID', value: [entity.id] },
+    'statsig.type': { name: 'StatSig type', value: [statsigType] },
+    'statsig.source': { name: 'StatSig source', value: [alias] },
+  };
+  if (entity.version !== undefined) props['statsig.version'] = { name: 'StatSig version', value: [String(entity.version)] };
+  if (entity.owner?.email) props['statsig.owner'] = { name: 'StatSig owner', value: [entity.owner.email] };
+  if (entity.permalink) props['statsig.permalink'] = { name: 'StatSig link', value: [entity.permalink] };
+  return props;
 }
 
 const RANK: Record<Fidelity, number> = { full: 0, partial: 1, manual: 2, skipped: 3 };

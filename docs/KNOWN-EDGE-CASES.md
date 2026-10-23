@@ -190,8 +190,14 @@ Decision types referenced below are defined in `packages/mapper/src/types.ts` (`
 | 11.5 | Targeting gate | `targetingGateID`. | Audience = flag targeting rules. | 📅 inline or prerequisite as in §7. | `search_ranking_v3` → `checkout_targeting_gate` |
 | 11.6 | Explicit layer with shared parameters | `getLayer().get()`. | LD layers; one flag per experiment. | 📅 `layer_parameters`. Implicit layers are dropped. | `checkout_layer`; `checkout_button_color_layer` (implicit) |
 | 11.7 | Holdouts | Global or attached to gates / experiments. | New holdout populations per environment. | 📅; see 4.8 for gates. | `global_holdout`, `checkout_holdout`, mobile `mobile_global_holdout` |
-| 11.8 | Autotune | Bandit with a success event. | `type: mab` bandit, drafted. | 📅. | `promo_banner_autotune` |
-| 11.9 | Group sizes | Percent of allocation; may be unequal. | Thousandths of a percent. | 📅 rounding as 4.11. | mobile `onboarding_carousel` (34/33/33) |
+| 11.8 | Autotune | Bandit with a success event; variants return JSON. | JSON multivariate flag (a variation per arm) + custom metric for the success event + experiment `type: mab` created as a **draft** on the flag's default rule. Flag is off until the bandit is started in LD. | ⚙️ Static for a not-started autotune. ✅ Decision `autotune_running` while it runs (default **wait**; or pre-stage: the LD bandit relearns from equal traffic). ❓ Verify: a draft iteration on an off flag. | `hero_image_autotune` (not started), `promo_banner_autotune` (running) |
+| 11.9 | Group sizes | Percent of allocation; may be unequal, and StatSig rounds autotune arms down (33/33/33 = 99). | Thousandths of a percent summing to 100 000; `allocationPercent` strings. | 📝 Normalized, remainder on the first arm; noted when sizes don't sum to 100. Experiments: 📅. | `promo_banner_autotune`; mobile `onboarding_carousel` (34/33/33) |
+| 11.10 | Concluded autotune | `winner` set: StatSig serves the winner. | Flag serves the winner at 100 %; no bandit (LD can't import a finished bandit). | 📝 Note. | `pricing_page_autotune` |
+| 11.11 | Autotune without a success event | Possible via the API; config specs never carry it. | A bandit needs a primary metric. | ✅ Decision `missing_metric` (blocking): flag only (manual) or skip. | `cart_upsell_autotune` |
+| 11.12 | Variants with identical values | Allowed. | Flag variations must be distinct. | ✅ Decision `duplicate_variant_value`: merge into one arm (partial) or skip. | `free_shipping_copy_autotune` |
+| 11.13 | Autotune on a custom unit ID | `idType: companyID`. | Bandit randomized by the mapped context kind, which must be enabled as a randomization unit in the project's experimentation settings. | ⚙️ Static: `ensure_randomization_unit` step (PUT experimentation-settings, additive; undone with the run). | `b2b_pricing_autotune` |
+| 11.14 | Baseline arm | No control concept. | A bandit needs one `baseline` treatment. | 📝 First variant is the baseline. | every autotune |
+| 11.15 | Existing LD metric under the success event's key | — | Metric keys are project-wide. | ⚙️ Reused silently when it is a custom metric on the same event; ✅ `key_collision` otherwise. | — |
 
 ## 12. Metrics
 

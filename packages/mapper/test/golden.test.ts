@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { CanonicalSnapshot } from '@sslm/canonical';
-import { mapGate, mapSegment } from '../src/index.ts';
+import { mapAutotune, mapGate, mapSegment } from '../src/index.ts';
 import { acmeSnapshot, CAPS, NOW, profileFor, server } from './fixtures.ts';
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
@@ -41,7 +41,24 @@ function golden(snap: CanonicalSnapshot, statsig: string, ld: string) {
       includedContexts: r.desired?.includedContexts.map((c) => `${c.contextKind}: ${c.values.length}`),
     };
   });
-  return { gates, segments };
+  const autotunes = snap.autotunes.map((a) => {
+    const r = mapAutotune({ ...args, entity: a });
+    return {
+      autotune: a.id,
+      state: r.state,
+      flagKey: r.flagKey,
+      ...(r.skipped ? { skipped: r.skipped } : {}),
+      fidelity: r.fidelity.overall,
+      notes: r.fidelity.notes.map((n) => `${n.fidelity}: ${n.message}`),
+      decisions: r.unresolved.map((d) => `${d.severity} ${d.type} (${d.subject.location ?? d.subject.id}) → ${d.recommended ?? 'no default'}`),
+      dependencies: r.dependencies.map((d) => `${d.kind}:${d.key}`),
+      variations: r.skipped ? undefined : r.shell.variations.map((v) => v.name),
+      env: r.skipped ? undefined : r.env,
+      metric: r.metric ? `${r.metric.key} (${r.metric.eventKey})` : null,
+      bandit: r.bandit ? { treatments: r.bandit.treatments.map((t) => `${t.name}${t.baseline ? ' (baseline)' : ''} ${t.allocationPercent}%`), metricKey: r.bandit.metricKey, randomizationUnit: r.bandit.randomizationUnit } : null,
+    };
+  });
+  return { gates, segments, autotunes };
 }
 
 describe('mapper golden files', () => {

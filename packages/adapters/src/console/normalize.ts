@@ -206,7 +206,7 @@ export function normalizeConsoleSnapshot(raw: RawConsoleSnapshot, opts: Normaliz
       archived: false,
       idType: a.idType ?? 'userID',
       variants: a.variants.map((v) => ({ id: v.id ?? v.name, name: v.name, json: v.json, size: v.size ?? undefined })),
-      successEvent: a.successEvent ?? undefined,
+      successEvent: a.successEvent || undefined,
       isStarted: a.isStarted ?? false,
       winner: a.winner ?? null,
     });

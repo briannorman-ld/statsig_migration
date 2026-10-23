@@ -1,19 +1,24 @@
 /**
- * The planner (PLAN §9 "Migrate flow" step 2, §10.4): selected gates × LD environments →
- * dependency closure (segments, context kinds, prerequisite gates), collision checks against
- * what's already in LD, and an ordered list of idempotent steps. Pure: LD state is an input.
+ * The planner (PLAN §9 "Migrate flow" step 2, §10.4, §11): selected gates and autotunes × LD
+ * environments → dependency closure (segments, context kinds, prerequisite gates, metrics,
+ * randomization units), collision checks against what's already in LD, and an ordered list of
+ * idempotent steps. Pure: LD state is an input.
  */
-import type { CanonicalSnapshot, Gate } from '@sslm/canonical';
+import type { Autotune, CanonicalSnapshot, Gate } from '@sslm/canonical';
 import {
   decisionPoint,
   lookupResolution,
+  mapAutotune,
   mapGate,
   mapSegment,
   sourceTag,
   TAG_MIGRATED,
+  type AutotuneMapResult,
   type DecisionPoint,
+  type DesiredBandit,
   type DesiredFlagEnv,
   type DesiredFlagShell,
+  type DesiredMetric,
   type DesiredSegment,
   type FidelityReport,
   type GateMapResult,
@@ -38,6 +43,22 @@ export interface LdSegmentState {
   tags: string[];
 }
 
+export interface LdMetricState {
+  key: string;
+  tags: string[];
+  eventKey?: string | null;
+  kind?: string | null;
+}
+
+export interface LdExperimentState {
+  key: string;
+  tags: string[];
+  type?: string | null;
+  archived?: boolean;
+  /** Status of the iteration a new draft would replace: `not_started`, `running` or `stopped`. */
+  iterationStatus?: string | null;
+}
+
 /** What the planner needs to know about the LD project (read by the app before planning). */
 export interface LdProjectState {
   flags: ReadonlyMap<string, LdFlagState>;
@@ -46,11 +67,19 @@ export interface LdProjectState {
   contextKinds: string[];
   /** LD environments that need a typed confirmation (`critical`, or production). */
   criticalEnvs: string[];
+  /** Project-level metrics; absent when the LD plan has no Experimentation (or they weren't read). */
+  metrics?: ReadonlyMap<string, LdMetricState>;
+  /** Experiments (including bandits) per LD environment key. */
+  experiments?: Readonly<Record<string, ReadonlyMap<string, LdExperimentState>>>;
+  /** Context kinds enabled as experiment randomization units. Absent = unknown (`user` assumed). */
+  randomizationUnits?: string[];
 }
 
 export interface PlanRequest {
   /** Gate uids to migrate. */
   gates: string[];
+  /** Autotune uids to migrate (PLAN §11: flag + metric + drafted bandit). */
+  autotunes?: string[];
   ldEnvs: string[];
   snapshots: CanonicalSnapshot[];
   idLists?: IdLists;
@@ -63,7 +92,7 @@ export interface PlanRequest {
 
 export interface Provenance {
   sourceAlias: string;
-  statsigType: 'gate';
+  statsigType: 'gate' | 'autotune';
   statsigId: string;
   statsigVersion?: number;
   statsigFingerprint: string;
@@ -74,6 +103,9 @@ export type PlanStep =
   | { id: string; deps: string[]; op: 'ensure_context_kind'; key: string; name: string; unitType: string }
   | { id: string; deps: string[]; op: 'upsert_segment'; ldEnv: string; key: string; exists: boolean; adopt: boolean; desired: DesiredSegment; provenance: Omit<Provenance, 'statsigType'> & { statsigType: 'segment' } }
   | { id: string; deps: string[]; op: 'upsert_flag_shell'; key: string; exists: boolean; adopt: boolean; desired: DesiredFlagShell }
+  | { id: string; deps: string[]; op: 'ensure_randomization_unit'; key: string }
+  | { id: string; deps: string[]; op: 'upsert_metric'; key: string; exists: boolean; adopt: boolean; desired: DesiredMetric; provenance: Omit<Provenance, 'statsigType'> & { statsigType: 'metric' } }
+  | { id: string; deps: string[]; op: 'create_bandit'; key: string; ldEnv: string; statsigEnv: string; flagKey: string; exists: boolean; adopt: boolean; desired: DesiredBandit; provenance: Provenance }
   | {
       id: string;
       deps: string[];
@@ -91,7 +123,7 @@ export type ItemStatus = 'ready' | 'blocked' | 'skipped' | 'error';
 
 export interface PlanItem {
   uid: string;
-  kind: 'gate' | 'segment';
+  kind: 'gate' | 'segment' | 'autotune' | 'metric';
   entityId: string;
   sourceId: string;
   ldKey: string;
@@ -153,14 +185,18 @@ export function planMigration(req: PlanRequest): Plan {
     for (const s of st) stale.set(s.decision.id, s);
   };
 
-  const collision = (item: PlanItem, subject: DecisionPoint['subject'], ldKey: string, what: 'flag' | 'segment', where: string): 'adopt' | 'skip' | 'open' => {
+  const collision = (item: PlanItem, subject: DecisionPoint['subject'], ldKey: string, what: 'flag' | 'segment' | 'metric' | 'bandit', where: string): 'adopt' | 'skip' | 'open' => {
+    const overwrites = what === 'flag' ? 'targeting in the migrated environments' : what === 'segment' ? 'rules and targets' : what === 'metric' ? 'event key, success criteria and tags' : 'draft iteration';
     const dp = decisionPoint({
       type: 'key_collision',
       severity: 'blocking',
       subject: { ...subject, location: where },
-      path: `${what}:${ldKey}${what === 'segment' ? `:${where}` : ''}`,
-      title: `LD ${what} “${ldKey}” already exists`,
-      explanation: `A ${what} with this key exists in LD and wasn't created by this app. Adopting it overwrites its ${what === 'flag' ? 'targeting in the migrated environments' : 'rules and targets'} on every sync; the current state is saved first so the run can be undone.`,
+      path: `${what}:${ldKey}${what === 'segment' || what === 'bandit' ? `:${where}` : ''}`,
+      title: `LD ${what === 'bandit' ? 'experiment' : what} “${ldKey}” already exists`,
+      explanation:
+        what === 'bandit'
+          ? `An experiment with this key exists in ${where} and wasn't created by this app. Adopting it replaces its draft iteration with the bandit's; an iteration that already ran is left alone.`
+          : `A ${what} with this key exists in LD and wasn't created by this app. Adopting it overwrites its ${overwrites} on every sync; the current state is saved first so the run can be undone.`,
       sourceFragment: { key: ldKey, kind: what },
       options: [
         { key: 'adopt', label: 'Adopt it (link and overwrite on sync)', explanation: 'The existing LD resource becomes the migration target. A pre-image is kept for undo.', resultingFidelity: 'full' },
@@ -321,6 +357,148 @@ export function planMigration(req: PlanRequest): Plan {
     return { ok: true, stepId };
   };
 
+  // Metrics are project-level, like flag shells: one step per key, shared across environments.
+  const planMetric = (snapshot: CanonicalSnapshot, desired: DesiredMetric, owner: AutotuneMapResult, requiredBy: PlanItem): { ok: boolean; stepId?: string; reason?: string } => {
+    const stepId = `metric:${desired.key}`;
+    const itemKey = `metric:${desired.key}`;
+    const existing = items.get(itemKey);
+    if (existing) {
+      existing.requiredBy.push(requiredBy.uid);
+      return existing.status === 'ready' ? { ok: true, stepId } : { ok: false, reason: `metric “${desired.key}” is ${existing.status}` };
+    }
+    const ldMetric = req.ld.metrics?.get(desired.key);
+    const item: PlanItem = { uid: `${snapshot.source.sourceId}/metric/${desired.key}`, kind: 'metric', entityId: desired.eventKey, sourceId: snapshot.source.sourceId, ldKey: desired.key, ldEnv: '', status: 'ready', dependency: true, requiredBy: [requiredBy.uid], decisions: [], exists: !!ldMetric };
+    items.set(itemKey, item);
+    let adopt = false;
+    if (ldMetric && !ownsSegment(ldMetric, snapshot.source.alias)) {
+      // Same event key under the same metric key: that *is* the metric; reuse it without a question.
+      if (ldMetric.kind === 'custom' && ldMetric.eventKey === desired.eventKey) adopt = true;
+      else {
+        const c = collision(item, { sourceId: owner.sourceId, kind: 'autotune', uid: owner.uid, id: owner.entityId }, desired.key, 'metric', 'metric key');
+        if (c === 'skip') return finishItem(item, 'skipped', `LD metric “${desired.key}” exists and was not adopted`);
+        if (c === 'open') return finishItem(item, 'blocked', `LD metric “${desired.key}” already exists`);
+        adopt = true;
+      }
+    }
+    steps.set(stepId, {
+      id: stepId,
+      deps: desired.analysisUnits.filter((u) => u !== 'user').flatMap((u) => ensureRandomizationUnit(u) ?? []),
+      op: 'upsert_metric',
+      key: desired.key,
+      exists: !!ldMetric,
+      adopt,
+      desired,
+      provenance: { sourceAlias: snapshot.source.alias, statsigType: 'metric', statsigId: desired.eventKey, statsigFingerprint: owner.statsigFingerprint, decisionSetHash: owner.decisionSetHash },
+    });
+    return { ok: true, stepId };
+  };
+
+  /** The step enabling `kind` as a randomization unit, or null when the project already has it. */
+  const ensureRandomizationUnit = (kind: string): string | null => {
+    if ((req.ld.randomizationUnits ?? ['user']).includes(kind)) return null;
+    const id = `randomization_unit:${kind}`;
+    if (!steps.has(id)) {
+      const ck = `context_kind:${kind}`;
+      steps.set(id, { id, deps: steps.has(ck) ? [ck] : [], op: 'ensure_randomization_unit', key: kind });
+    }
+    return id;
+  };
+
+  const planAutotune = (a: Autotune, ldEnv: string): void => {
+    const itemKey = `${a.uid}|${ldEnv}`;
+    if (items.has(itemKey)) return;
+    const snapshot = snapshotOf.get(a.source.sourceId)!;
+    const statsigEnv = envFor(a.source.sourceId, ldEnv);
+    const item: PlanItem = { uid: a.uid, kind: 'autotune', entityId: a.id, sourceId: a.source.sourceId, ldKey: a.id, ldEnv, status: 'ready', dependency: false, requiredBy: [], decisions: [], exists: false };
+    items.set(itemKey, item);
+    if (!statsigEnv) {
+      finishItem(item, 'error', `no StatSig environment of ${snapshot.source.alias} is mapped to LD “${ldEnv}”`);
+      return;
+    }
+    item.statsigEnv = statsigEnv;
+    const r = mapAutotune({ canonical: { snapshot, idLists: req.idLists }, entity: a, profile: req.profile, resolutions: req.resolutions, capabilities: req.capabilities, env: { statsig: statsigEnv, ld: ldEnv }, now: req.now });
+    item.ldKey = r.flagKey;
+    item.fidelity = r.fidelity;
+    addDecisions(item, r.unresolved, r.stale);
+    if (r.skipped) {
+      // "Skipped" only once the user said so: a preview skipped by a recommended-but-unanswered
+      // decision (a running autotune defaults to "wait") is still a question.
+      if (r.unresolved.length) finishItem(item, 'blocked', `${r.unresolved.length} open decision${r.unresolved.length === 1 ? '' : 's'}`);
+      else finishItem(item, 'skipped', r.skipped);
+      return;
+    }
+
+    const ldFlag = req.ld.flags.get(r.flagKey);
+    item.exists = !!ldFlag;
+    let adopt = false;
+    const other = shellOwner.get(r.flagKey);
+    if (other && other !== a.uid) {
+      finishItem(item, 'error', `two StatSig items both produce LD key “${r.flagKey}” (consolidation arrives in M8; migrate one source at a time)`);
+      return;
+    }
+    shellOwner.set(r.flagKey, a.uid);
+    if (ldFlag) {
+      const owner = flagOwner(ldFlag);
+      if (owner && (owner.id !== a.id || owner.source !== snapshot.source.alias)) {
+        finishItem(item, 'error', `LD flag “${r.flagKey}” was migrated from ${owner.source}/${owner.id}; consolidation arrives in M8`);
+        return;
+      }
+      if (ldFlag.kind && ldFlag.kind !== 'multivariate') {
+        finishItem(item, 'error', `LD flag “${r.flagKey}” exists and is not a multivariate (JSON) flag`);
+        return;
+      }
+      if (!owner) {
+        const c = collision(item, { sourceId: a.source.sourceId, kind: 'autotune', uid: a.uid, id: a.id }, r.flagKey, 'flag', 'flag key');
+        if (c === 'skip') return void finishItem(item, 'skipped', `LD flag “${r.flagKey}” exists and was not adopted`);
+        if (c === 'open') return void finishItem(item, 'blocked', `LD flag “${r.flagKey}” already exists`);
+        adopt = true;
+      }
+    }
+
+    const depSteps: string[] = ensureKinds(r.dependencies);
+    const depProblems: string[] = [];
+    if (r.metric) {
+      const m = planMetric(snapshot, r.metric, r, item);
+      if (m.ok && m.stepId) depSteps.push(m.stepId);
+      else depProblems.push(m.reason ?? `metric ${r.metric.key}`);
+    }
+    for (const d of r.dependencies) {
+      if (d.kind !== 'randomization_unit') continue;
+      const id = ensureRandomizationUnit(d.key);
+      if (id) depSteps.push(id);
+    }
+
+    // An existing experiment under the bandit's key.
+    let banditExists = false;
+    let banditAdopt = false;
+    if (r.bandit) {
+      const ex = req.ld.experiments?.[ldEnv]?.get(r.bandit.key);
+      if (ex) {
+        banditExists = true;
+        if (!ownsSegment(ex, snapshot.source.alias)) {
+          const c = collision(item, { sourceId: a.source.sourceId, kind: 'autotune', uid: a.uid, id: a.id }, r.bandit.key, 'bandit', ldEnv);
+          if (c === 'skip') return void finishItem(item, 'skipped', `LD experiment “${r.bandit.key}” exists in ${ldEnv} and was not adopted`);
+          if (c === 'open') return void finishItem(item, 'blocked', `LD experiment “${r.bandit.key}” already exists in ${ldEnv}`);
+          banditAdopt = true;
+        }
+      }
+    }
+
+    if (r.unresolved.length) return void finishItem(item, 'blocked', `${r.unresolved.length} open decision${r.unresolved.length === 1 ? '' : 's'}`);
+    if (depProblems.length) return void finishItem(item, 'blocked', `depends on: ${depProblems.join('; ')}`);
+
+    const provenance: Provenance = { sourceAlias: snapshot.source.alias, statsigType: 'autotune', statsigId: a.id, ...(a.version !== undefined ? { statsigVersion: a.version } : {}), statsigFingerprint: r.statsigFingerprint, decisionSetHash: r.decisionSetHash };
+    const shellId = `shell:${r.flagKey}`;
+    if (!steps.has(shellId)) steps.set(shellId, { id: shellId, deps: [], op: 'upsert_flag_shell', key: r.flagKey, exists: !!ldFlag, adopt, desired: r.shell });
+    const envId = `env:${ldEnv}:${r.flagKey}`;
+    steps.set(envId, { id: envId, deps: [shellId, ...depSteps.filter((d) => d.startsWith('context_kind:'))], op: 'update_flag_env', key: r.flagKey, ldEnv, statsigEnv, variations: r.shell.variations.map((v) => v.value), desired: r.env, provenance });
+    if (r.bandit) {
+      const banditId = `bandit:${ldEnv}:${r.bandit.key}`;
+      steps.set(banditId, { id: banditId, deps: [envId, ...depSteps], op: 'create_bandit', key: r.bandit.key, ldEnv, statsigEnv, flagKey: r.flagKey, exists: banditExists, adopt: banditAdopt, desired: r.bandit, provenance });
+    }
+  };
+
+  const autotunesByUid = new Map(req.snapshots.flatMap((s) => s.autotunes.map((a) => [a.uid, a] as const)));
   for (const ldEnv of req.ldEnvs) {
     for (const uid of req.gates) {
       const gate = gatesByUid.get(uid);
@@ -329,6 +507,14 @@ export function planMigration(req: PlanRequest): Plan {
         continue;
       }
       planGate(gate, ldEnv, null, []);
+    }
+    for (const uid of req.autotunes ?? []) {
+      const a = autotunesByUid.get(uid);
+      if (!a) {
+        errors.push(`Autotune ${uid} is not in the current snapshots.`);
+        continue;
+      }
+      planAutotune(a, ldEnv);
     }
   }
 
@@ -349,7 +535,7 @@ export function planMigration(req: PlanRequest): Plan {
   while (changed) {
     changed = false;
     for (const [id, s] of steps) {
-      if (s.op === 'update_flag_env' || [...steps.values()].some((x) => x.deps.includes(id))) continue;
+      if (s.op === 'update_flag_env' || s.op === 'create_bandit' || [...steps.values()].some((x) => x.deps.includes(id))) continue;
       steps.delete(id);
       changed = true;
     }
@@ -371,13 +557,13 @@ export function planMigration(req: PlanRequest): Plan {
 }
 
 /** Writes per step, including the reads that capture pre-images. */
-const REQUESTS: Record<PlanStep['op'], number> = { ensure_context_kind: 1, upsert_segment: 3, upsert_flag_shell: 2, update_flag_env: 2 };
+const REQUESTS: Record<PlanStep['op'], number> = { ensure_context_kind: 1, upsert_segment: 3, upsert_flag_shell: 2, update_flag_env: 2, ensure_randomization_unit: 2, upsert_metric: 2, create_bandit: 3 };
 
 /** Kahn's algorithm, stable by step id. Steps in a cycle are reported and left out. */
 export function topoSort(steps: PlanStep[], errors: string[]): PlanStep[] {
   const byId = new Map(steps.map((s) => [s.id, s]));
   const indegree = new Map(steps.map((s) => [s.id, s.deps.filter((d) => byId.has(d)).length]));
-  const order = (id: string) => `${['context_kind', 'segment', 'shell', 'env'].indexOf(id.split(':')[0]!)}:${id}`;
+  const order = (id: string) => `${['context_kind', 'randomization_unit', 'metric', 'segment', 'shell', 'env', 'bandit'].indexOf(id.split(':')[0]!)}:${id}`;
   const queue = steps.filter((s) => indegree.get(s.id) === 0).map((s) => s.id).sort((a, b) => order(a).localeCompare(order(b)));
   const out: PlanStep[] = [];
   while (queue.length) {
@@ -407,7 +593,8 @@ export function flagOwner(f: LdFlagState): { id: string; source: string } | null
   return id && source ? { id, source } : null;
 }
 
-export function ownsSegment(s: LdSegmentState, alias: string): boolean {
+/** Segments, metrics and experiments have no custom properties: ownership is the pair of tags. */
+export function ownsSegment(s: { key?: string; tags: string[] }, alias: string): boolean {
   return s.tags.includes(TAG_MIGRATED) && s.tags.includes(sourceTag(alias));
 }
 

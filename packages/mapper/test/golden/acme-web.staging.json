@@ -2260,5 +2260,269 @@
       "fidelity": "skipped",
       "decisions": []
     }
+  ],
+  "autotunes": [
+    {
+      "autotune": "promo_banner_autotune",
+      "state": "running",
+      "flagKey": "promo_banner_autotune",
+      "skipped": "running in StatSig (3 arms); migrate after it picks a winner",
+      "fidelity": "skipped",
+      "notes": [
+        "full: Variant sizes add up to 99%, not 100%; normalized to 33.33/33.33/33.33%.",
+        "skipped: Not migrated: running in StatSig (3 arms); migrate after it picks a winner."
+      ],
+      "decisions": [
+        "choice autotune_running (promo_banner_autotune) → wait"
+      ],
+      "dependencies": [],
+      "metric": null,
+      "bandit": null
+    },
+    {
+      "autotune": "hero_image_autotune",
+      "state": "not_started",
+      "flagKey": "hero_image_autotune",
+      "fidelity": "full",
+      "notes": [
+        "full: Not started in StatSig: the flag is created off with a draft bandit. Start it from LD when ready.",
+        "full: Success event “hero_click” becomes the LD metric “hero_click”. Your app must send it through LD track(\"hero_click\").",
+        "full: “Lifestyle” is the bandit's baseline arm (LD needs one; StatSig has none)."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "metric:hero_click"
+      ],
+      "variations": [
+        "Lifestyle",
+        "Product"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": false,
+        "offVariation": 0,
+        "fallthrough": {
+          "rollout": {
+            "contextKind": "user",
+            "variations": [
+              {
+                "variation": 0,
+                "weight": 50000
+              },
+              {
+                "variation": 1,
+                "weight": 50000
+              }
+            ]
+          }
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      },
+      "metric": "hero_click (hero_click)",
+      "bandit": {
+        "treatments": [
+          "Lifestyle (baseline) 50%",
+          "Product 50%"
+        ],
+        "metricKey": "hero_click",
+        "randomizationUnit": "user"
+      }
+    },
+    {
+      "autotune": "pricing_page_autotune",
+      "state": "concluded",
+      "flagKey": "pricing_page_autotune",
+      "fidelity": "full",
+      "notes": [
+        "full: Concluded in StatSig: winner “Annual first” is served to everyone, so no bandit is created in LD."
+      ],
+      "decisions": [
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "variations": [
+        "Monthly first",
+        "Annual first"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": true,
+        "offVariation": 0,
+        "fallthrough": {
+          "variation": 1
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      },
+      "metric": null,
+      "bandit": null
+    },
+    {
+      "autotune": "cart_upsell_autotune",
+      "state": "not_started",
+      "flagKey": "cart_upsell_autotune",
+      "fidelity": "manual",
+      "notes": [
+        "full: Not started in StatSig: the flag is created off with a draft bandit. Start it from LD when ready.",
+        "manual: No success event: the flag is created without a bandit. Add a metric and a multi-armed bandit on it in LD."
+      ],
+      "decisions": [
+        "blocking missing_metric (cart_upsell_autotune) → no default",
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [],
+      "variations": [
+        "Accessories",
+        "Warranty"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": false,
+        "offVariation": 0,
+        "fallthrough": {
+          "rollout": {
+            "contextKind": "user",
+            "variations": [
+              {
+                "variation": 0,
+                "weight": 50000
+              },
+              {
+                "variation": 1,
+                "weight": 50000
+              }
+            ]
+          }
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      },
+      "metric": null,
+      "bandit": null
+    },
+    {
+      "autotune": "free_shipping_copy_autotune",
+      "state": "not_started",
+      "flagKey": "free_shipping_copy_autotune",
+      "fidelity": "partial",
+      "notes": [
+        "partial: Merged “Short” + “Short again”: identical values become one arm.",
+        "full: Variant sizes add up to 99%, not 100%; normalized to 66.67/33.33%.",
+        "full: Not started in StatSig: the flag is created off with a draft bandit. Start it from LD when ready.",
+        "full: Success event “checkout_start” becomes the LD metric “checkout_start”. Your app must send it through LD track(\"checkout_start\").",
+        "full: “Short / Short again” is the bandit's baseline arm (LD needs one; StatSig has none)."
+      ],
+      "decisions": [
+        "choice duplicate_variant_value (free_shipping_copy_autotune) → merge",
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "metric:checkout_start"
+      ],
+      "variations": [
+        "Short / Short again",
+        "Long"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": false,
+        "offVariation": 0,
+        "fallthrough": {
+          "rollout": {
+            "contextKind": "user",
+            "variations": [
+              {
+                "variation": 0,
+                "weight": 66667
+              },
+              {
+                "variation": 1,
+                "weight": 33333
+              }
+            ]
+          }
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      },
+      "metric": "checkout_start (checkout_start)",
+      "bandit": {
+        "treatments": [
+          "Short / Short again (baseline) 66.67%",
+          "Long 33.33%"
+        ],
+        "metricKey": "checkout_start",
+        "randomizationUnit": "user"
+      }
+    },
+    {
+      "autotune": "b2b_pricing_autotune",
+      "state": "not_started",
+      "flagKey": "b2b_pricing_autotune",
+      "fidelity": "full",
+      "notes": [
+        "full: Not started in StatSig: the flag is created off with a draft bandit. Start it from LD when ready.",
+        "full: Success event “quote_requested” becomes the LD metric “quote_requested”. Your app must send it through LD track(\"quote_requested\").",
+        "full: Randomizes by “company”: the migration enables it as a randomization unit in the LD project's experimentation settings.",
+        "full: “Volume tiers” is the bandit's baseline arm (LD needs one; StatSig has none)."
+      ],
+      "decisions": [
+        "choice unit_type_kind (companyID) → create:company",
+        "choice client_side_availability (flag settings) → both"
+      ],
+      "dependencies": [
+        "context_kind:company",
+        "metric:quote_requested",
+        "randomization_unit:company"
+      ],
+      "variations": [
+        "Volume tiers",
+        "Flat rate"
+      ],
+      "env": {
+        "ldEnv": "test",
+        "statsigEnv": "staging",
+        "on": false,
+        "offVariation": 0,
+        "fallthrough": {
+          "rollout": {
+            "contextKind": "company",
+            "variations": [
+              {
+                "variation": 0,
+                "weight": 50000
+              },
+              {
+                "variation": 1,
+                "weight": 50000
+              }
+            ]
+          }
+        },
+        "rules": [],
+        "targets": [],
+        "prerequisites": []
+      },
+      "metric": "quote_requested (quote_requested)",
+      "bandit": {
+        "treatments": [
+          "Volume tiers (baseline) 50%",
+          "Flat rate 50%"
+        ],
+        "metricKey": "quote_requested",
+        "randomizationUnit": "company"
+      }
+    }
   ]
 }

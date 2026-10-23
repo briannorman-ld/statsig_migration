@@ -3,6 +3,7 @@ import { LD_INSTANCES, type CapabilityStatus, type LdInstanceId } from '@sslm/ld
 import type { WorkspaceRecord } from '@sslm/store';
 import { Badge, Button, Callout, Card, cx, Input, Label, Modal, Select, Spinner } from '../components/ui.tsx';
 import { chooseProject, connectLd, disconnectLd, reprobe, useLdSession } from '../lib/ld.ts';
+import { ProjectResetModal } from './ProjectResetModal.tsx';
 import { DEMO_LD_PROJECT } from '../lib/demo.ts';
 import { store } from '../lib/store.ts';
 
@@ -17,6 +18,7 @@ const STATUS_TONE: Record<CapabilityStatus, 'green' | 'amber' | 'red' | 'slate' 
 export function LdPanel({ workspaceId, workspace }: { workspaceId: string; workspace: WorkspaceRecord }) {
   const ld = useLdSession(workspaceId);
   const [instance, setInstance] = useState<LdInstanceId>(workspace.ld?.instance ?? 'us');
+  const [resetting, setResetting] = useState(false);
   const [token, setToken] = useState('');
   const [pendingAck, setPendingAck] = useState<LdInstanceId>();
   const acked = (id: LdInstanceId) => id === 'us' || workspace.instanceAcknowledgement?.instance === id;
@@ -126,8 +128,23 @@ export function LdPanel({ workspaceId, workspace }: { workspaceId: string; works
             </Callout>
           )}
           {ld.error && <Callout tone="red">{ld.error}</Callout>}
+          {ld.projectKey && ld.matrix && (
+            <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4 text-sm">
+              <div className="min-w-0 flex-1">
+                <div className="font-medium">Danger zone</div>
+                <p className="text-xs text-fg-muted">
+                  Reset <code>{ld.projectKey}</code> to day 0: delete every flag, segment and metric, archive experiments and custom context kinds, and remove the environments this console created.
+                  Three typed confirmations stand between you and it. StatSig is never touched.
+                </p>
+              </div>
+              <Button variant="danger" onClick={() => setResetting(true)}>
+                Reset LD project…
+              </Button>
+            </div>
+          )}
         </Card>
       )}
+      {resetting && <ProjectResetModal workspaceId={workspaceId} ld={ld} onClose={() => setResetting(false)} />}
 
       {ld.matrix && (
         <Card className="overflow-hidden">

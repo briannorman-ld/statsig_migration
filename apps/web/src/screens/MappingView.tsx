@@ -1,19 +1,36 @@
 import { useState } from 'react';
 import type { CanonicalSnapshot } from '@sslm/canonical';
-import { defaultKindFor, type MappingProfile } from '@sslm/mapper';
+import { defaultKindFor, sanitizeKey, type MappingProfile } from '@sslm/mapper';
 import type { SourceRecord } from '@sslm/store';
-import { Badge, Callout, Card, Input, Select } from '../components/ui.tsx';
+import { Badge, Button, Callout, Card, Input, Select, Spinner } from '../components/ui.tsx';
+import { createLdEnvironment } from '../lib/ld.ts';
 import type { MigrationContext } from '../lib/useMigration.ts';
 
 /**
  * Mapping profile (PLAN §7, §12): per source, which LD environment each StatSig environment
  * migrates to, and which LD context kind each unit type becomes.
  */
-export function MappingView({ sources, snapshots, m, onConnect }: { sources: SourceRecord[]; snapshots: Record<string, CanonicalSnapshot | undefined>; m: MigrationContext; onConnect: () => void }) {
+export function MappingView({ workspaceId, sources, snapshots, m, onConnect }: { workspaceId: string; sources: SourceRecord[]; snapshots: Record<string, CanonicalSnapshot | undefined>; m: MigrationContext; onConnect: () => void }) {
   const save = (fn: (p: MappingProfile) => void) => {
     const next: MappingProfile = structuredClone(m.profile);
     fn(next);
     void m.saveProfile(next);
+  };
+  // "Create in LD": one in flight at a time, with the outcome shown next to the row.
+  const [creating, setCreating] = useState<string>();
+  const [createError, setCreateError] = useState<string>();
+  const createEnv = async (sourceId: string, statsigEnv: string, isProduction: boolean) => {
+    const key = sanitizeKey(statsigEnv).toLowerCase();
+    setCreating(`${sourceId}|${statsigEnv}`);
+    setCreateError(undefined);
+    try {
+      await createLdEnvironment(workspaceId, { key, name: statsigEnv, critical: isProduction });
+      save((p) => void ((p.sources[sourceId] ??= { envMapping: {}, unitTypeKinds: {} }).envMapping[statsigEnv] = key));
+    } catch (e) {
+      setCreateError(`Could not create LD environment “${key}”: ${(e as Error).message}`);
+    } finally {
+      setCreating(undefined);
+    }
   };
   return (
     <div className="max-w-4xl space-y-5">
@@ -69,6 +86,19 @@ export function MappingView({ sources, snapshots, m, onConnect }: { sources: Sou
                             ))}
                           </Select>
                         </td>
+                        <td className="py-1.5 pl-2 text-xs">
+                          {m.connected && !sp.envMapping[e.name] && !m.ldEnvs.some((l) => l.key === sanitizeKey(e.name).toLowerCase()) && (
+                            <Button
+                              variant="ghost"
+                              className="py-1 text-xs"
+                              disabled={!!creating}
+                              title={`Create LD environment “${sanitizeKey(e.name).toLowerCase()}” in project ${m.ld.projectKey} through the LD API, then map ${e.name} to it`}
+                              onClick={() => void createEnv(s.id, e.name, !!e.isProduction)}
+                            >
+                              {creating === `${s.id}|${e.name}` ? <Spinner /> : null} Create “{sanitizeKey(e.name).toLowerCase()}” in LD
+                            </Button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -78,7 +108,15 @@ export function MappingView({ sources, snapshots, m, onConnect }: { sources: Sou
                     <Callout tone="red">Two StatSig environments map to LD “{dup[0]}”. Within one source, map at most one environment to each LD environment.</Callout>
                   </div>
                 )}
-                <p className="mt-2 text-xs text-fg-muted">Environments marked “not migrated” keep LD's default (off, serving false) and keep calling StatSig.</p>
+                {createError && (
+                  <div className="mt-2">
+                    <Callout tone="red">{createError}</Callout>
+                  </div>
+                )}
+                <p className="mt-2 text-xs text-fg-muted">
+                  Environments marked “not migrated” keep LD's default (off, serving false) and keep calling StatSig. A StatSig environment with no LD counterpart can be created in the LD project from here
+                  (POST /environments; production tiers are created as critical).
+                </p>
               </div>
               <div>
                 <div className="mb-2 text-xs font-semibold tracking-wide text-fg-muted uppercase">Unit types → context kinds</div>

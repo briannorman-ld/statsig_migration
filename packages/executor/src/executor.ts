@@ -5,13 +5,32 @@
  * - the state of anything updated is captured first (pre-image), so the run can be undone;
  * - each flag environment is one atomic semantic PATCH that also records provenance.
  */
-import { LdAuthError, LdWriteError, type JsonPatchOp, type LdClient, type LdFlag, type LdFlagConfig, type LdSegment, type SemanticPatch } from '@sslm/ld-client';
+import { LdAuthError, LdWriteError, type JsonPatchOp, type LdClient, type LdExperiment, type LdExperimentationSettings, type LdFlag, type LdFlagConfig, type LdMetric, type LdSegment, type SemanticPatch } from '@sslm/ld-client';
 import { flagOwner, ownsSegment, syncPropertyKey, type PlanStep } from '@sslm/planner';
-import type { DesiredRule, VariationOrRollout } from '@sslm/mapper';
+import type { DesiredBandit, DesiredRule, VariationOrRollout } from '@sslm/mapper';
 
 export type LdWriter = Pick<
   LdClient,
-  'getFlag' | 'createFlag' | 'patchFlagSemantic' | 'patchFlagJson' | 'deleteFlag' | 'getSegment' | 'createSegment' | 'patchSegmentJson' | 'deleteSegment' | 'putContextKind'
+  | 'getFlag'
+  | 'createFlag'
+  | 'patchFlagSemantic'
+  | 'patchFlagJson'
+  | 'deleteFlag'
+  | 'getSegment'
+  | 'createSegment'
+  | 'patchSegmentJson'
+  | 'deleteSegment'
+  | 'putContextKind'
+  | 'getMetric'
+  | 'createMetric'
+  | 'patchMetricJson'
+  | 'deleteMetric'
+  | 'getExperiment'
+  | 'createExperiment'
+  | 'createIteration'
+  | 'patchExperimentSemantic'
+  | 'getExperimentationSettings'
+  | 'putExperimentationSettings'
 >;
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'undone';
@@ -32,7 +51,7 @@ export interface StepRecord {
   /** Created by this run: undo deletes (or archives) it. */
   created?: boolean;
   /** State before this run touched it: undo restores it. Contains customer config; stays local. */
-  preImage?: LdFlag | LdSegment;
+  preImage?: LdFlag | LdSegment | LdMetric | LdExperiment | LdExperimentationSettings;
   ldVersion?: number;
 }
 
@@ -79,6 +98,12 @@ export function stepLabel(s: PlanStep): string {
       return `Flag “${s.key}” (project settings)`;
     case 'update_flag_env':
       return `Flag “${s.key}” targeting in ${s.ldEnv}`;
+    case 'ensure_randomization_unit':
+      return `Randomization unit “${s.key}” (experimentation settings)`;
+    case 'upsert_metric':
+      return `Metric “${s.key}” (project)`;
+    case 'create_bandit':
+      return `Bandit “${s.key}” in ${s.ldEnv} (draft)`;
   }
 }
 
@@ -190,7 +215,7 @@ export class Executor {
   private comment(run: RunRecord, s: PlanStep): string {
     const by = this.opts.actor ? ` by ${this.opts.actor}` : '';
     const ref = `run #${run.id.slice(0, 8)}`;
-    if (s.op === 'update_flag_env' || s.op === 'upsert_segment') {
+    if (s.op === 'update_flag_env' || s.op === 'upsert_segment' || s.op === 'upsert_metric' || s.op === 'create_bandit') {
       const p = s.provenance;
       return `Synced from StatSig ${p.statsigType} ${p.statsigId}${p.statsigVersion !== undefined ? ` v${p.statsigVersion}` : ''} (source ${p.sourceAlias})${by}, ${ref}`;
     }
@@ -212,7 +237,91 @@ export class Executor {
         return this.shell(run, rec, s);
       case 'update_flag_env':
         return this.flagEnv(run, rec, s);
+      case 'ensure_randomization_unit':
+        return this.randomizationUnit(run, rec, s);
+      case 'upsert_metric':
+        return this.metric(run, rec, s);
+      case 'create_bandit':
+        return this.bandit(run, rec, s);
     }
+  }
+
+  private async randomizationUnit(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'ensure_randomization_unit' }>): Promise<string> {
+    const settings = await this.c.getExperimentationSettings(this.p);
+    const units = settings.randomizationUnits ?? [];
+    if (units.some((u) => u.randomizationUnit === s.key)) return `Randomization unit “${s.key}” already enabled.`;
+    if (run.dryRun) return `Would enable “${s.key}” as a randomization unit.`;
+    if (rec.preImage === undefined) rec.preImage = settings;
+    await this.c.putExperimentationSettings(this.p, { randomizationUnits: [...units.map((u) => ({ randomizationUnit: u.randomizationUnit, ...(u.default ? { default: true } : {}) })), { randomizationUnit: s.key }] });
+    rec.created = true;
+    return `Enabled “${s.key}” as a randomization unit.`;
+  }
+
+  private async metric(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'upsert_metric' }>): Promise<string> {
+    const d = s.desired;
+    let current = await this.c.getMetric(this.p, s.key);
+    if (current && !rec.created && rec.preImage === undefined) {
+      const same = current.kind === 'custom' && current.eventKey === d.eventKey;
+      if (!s.adopt && !same && !ownsSegment({ tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw new Error(`Metric “${s.key}” appeared since planning and wasn't created by this app. Re-plan to decide.`);
+      rec.preImage = current;
+    }
+    if (!current) {
+      if (run.dryRun) return `Would create custom metric “${s.key}” on event “${d.eventKey}”.`;
+      const body = { key: d.key, name: d.name, description: d.description, kind: d.kind, eventKey: d.eventKey, isNumeric: d.isNumeric, successCriteria: d.successCriteria, tags: d.tags, analysisUnits: d.analysisUnits };
+      try {
+        current = await this.c.createMetric(this.p, body);
+      } catch (e) {
+        if (!(e instanceof LdWriteError && e.status === 409)) throw e;
+        current = await this.c.getMetric(this.p, s.key);
+        if (!current || !ownsSegment({ tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw e;
+      }
+      rec.created = true;
+      return `Created metric “${s.key}” on event “${d.eventKey}”.`;
+    }
+    // Same event under the same key: the metric already is what the bandit needs. Only tag it.
+    const ops: JsonPatchOp[] = [];
+    const tags = union(current.tags ?? [], d.tags);
+    if (tags.length !== (current.tags ?? []).length) ops.push({ op: 'replace', path: '/tags', value: tags });
+    if (current.eventKey !== d.eventKey) ops.push({ op: 'replace', path: '/eventKey', value: d.eventKey });
+    if (ops.length === 0) return `Metric “${s.key}” already up to date.`;
+    if (run.dryRun) return `Would update metric “${s.key}” (${ops.map((o) => o.path.slice(1)).join(', ')}).`;
+    await this.c.patchMetricJson(this.p, s.key, ops, { comment: this.comment(run, s) });
+    return `Updated metric “${s.key}” (${ops.map((o) => o.path.slice(1)).join(', ')}).`;
+  }
+
+  private async bandit(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'create_bandit' }>): Promise<string> {
+    const d = s.desired;
+    const flag = this.flags.get(s.flagKey) ?? (await this.c.getFlag(this.p, s.flagKey));
+    if (!flag) {
+      if (run.dryRun) return `Would create bandit “${s.key}” in ${s.ldEnv}: ${banditSummary(d)}.`;
+      throw new Error(`Flag “${s.flagKey}” doesn't exist (its settings step didn't run).`);
+    }
+    const env = flag.environments?.[s.ldEnv];
+    const iteration = banditIteration(d, flag, env?.version ?? 0);
+    let current = await this.c.getExperiment(this.p, s.ldEnv, s.key);
+    if (current && !rec.created && rec.preImage === undefined) {
+      if (!s.adopt && !ownsSegment({ tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw new Error(`Experiment “${s.key}” appeared in ${s.ldEnv} since planning and wasn't created by this app. Re-plan to decide.`);
+      rec.preImage = current;
+    }
+    if (!current) {
+      if (run.dryRun) return `Would create bandit “${s.key}” in ${s.ldEnv}: ${banditSummary(d)}.`;
+      const body = { key: d.key, name: d.name, description: withFooter(d.description, footer(s.provenance, this.now())), type: 'mab', tags: d.tags, iteration };
+      try {
+        current = await this.c.createExperiment(this.p, s.ldEnv, body);
+      } catch (e) {
+        if (!(e instanceof LdWriteError && e.status === 409)) throw e;
+        current = await this.c.getExperiment(this.p, s.ldEnv, s.key);
+        if (!current || !ownsSegment({ tags: current.tags ?? [] }, s.provenance.sourceAlias)) throw e;
+      }
+      rec.created = true;
+      return `Created bandit “${s.key}” in ${s.ldEnv} as a draft: ${banditSummary(d)}.`;
+    }
+    // An iteration that ran (or runs) is the customer's experiment history: never replaced.
+    const status = current.draftIteration?.status ?? current.currentIteration?.status;
+    if (status && status !== 'not_started') return `Bandit “${s.key}” in ${s.ldEnv} has ${status === 'running' ? 'a running' : 'a finished'} iteration; left as is.`;
+    if (run.dryRun) return `Would replace the draft of bandit “${s.key}” in ${s.ldEnv}: ${banditSummary(d)}.`;
+    await this.c.createIteration(this.p, s.ldEnv, s.key, iteration);
+    return `Replaced the draft of bandit “${s.key}” in ${s.ldEnv}: ${banditSummary(d)}.`;
   }
 
   private async contextKind(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'ensure_context_kind' }>): Promise<string> {
@@ -264,7 +373,7 @@ export class Executor {
       rec.preImage = flag;
     }
     if (!flag) {
-      if (run.dryRun) return `Would create boolean flag “${s.key}” (${d.tags.join(', ')}).`;
+      if (run.dryRun) return d.variations.every((v) => typeof v.value === 'boolean') ? `Would create boolean flag “${s.key}” (${d.tags.join(', ')}).` : `Would create JSON flag “${s.key}” with ${d.variations.length} variations (${d.tags.join(', ')}).`;
       const body = { key: d.key, name: d.name, description: d.description, variations: d.variations, defaults: d.defaults, temporary: d.temporary, tags: d.tags, customProperties: d.customProperties, clientSideAvailability: d.clientSideAvailability };
       try {
         flag = await this.c.createFlag(this.p, body);
@@ -290,7 +399,7 @@ export class Executor {
   private async flagEnv(run: RunRecord, rec: StepRecord, s: Extract<PlanStep, { op: 'update_flag_env' }>): Promise<string> {
     const flag = await this.c.getFlag(this.p, s.key);
     if (!flag) {
-      if (run.dryRun) return `Would set targeting in ${s.ldEnv}: ${envSummary(s.desired)}.`;
+      if (run.dryRun) return `Would set targeting in ${s.ldEnv}: ${envSummary(s.desired, s.variations)}.`;
       throw new Error(`Flag “${s.key}” doesn't exist (its settings step didn't run).`);
     }
     this.flags.set(s.key, flag);
@@ -322,7 +431,7 @@ export class Executor {
     const prop = syncPropertyKey(s.ldEnv);
     const value = [s.provenance.statsigFingerprint, String(s.provenance.statsigVersion ?? ''), this.now().toISOString(), s.provenance.decisionSetHash];
     await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: { name: `StatSig sync (${s.ldEnv})`, value } }], { comment: this.comment(run, s), dryRun: run.dryRun });
-    return `${run.dryRun ? 'Would set' : 'Set'} targeting in ${s.ldEnv}: ${envSummary(d)}.`;
+    return `${run.dryRun ? 'Would set' : 'Set'} targeting in ${s.ldEnv}: ${envSummary(d, s.variations)}.`;
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -373,6 +482,30 @@ export class Executor {
           ],
           { comment },
         );
+        return;
+      }
+      case 'ensure_randomization_unit': {
+        const pre = rec.preImage as LdExperimentationSettings | undefined;
+        if (!rec.created || !pre) return;
+        await this.c.putExperimentationSettings(this.p, { randomizationUnits: (pre.randomizationUnits ?? []).map((u) => ({ randomizationUnit: u.randomizationUnit, ...(u.default ? { default: true } : {}) })) });
+        return;
+      }
+      case 'upsert_metric': {
+        if (rec.created) {
+          await this.c.deleteMetric(this.p, s.key).catch((e) => {
+            if (!(e instanceof LdWriteError && e.status === 404)) throw e;
+          });
+          return;
+        }
+        const pre = rec.preImage as LdMetric | undefined;
+        if (!pre) return;
+        await this.c.patchMetricJson(this.p, s.key, [{ op: 'replace', path: '/tags', value: pre.tags ?? [] }, ...(pre.eventKey ? [{ op: 'replace' as const, path: '/eventKey', value: pre.eventKey }] : [])], { comment });
+        return;
+      }
+      case 'create_bandit': {
+        // Experiments can't be deleted: archiving hides a draft this run created. An adopted
+        // experiment keeps the replaced draft (LD has no way to restore an iteration).
+        if (rec.created) await this.c.patchExperimentSemantic(this.p, s.ldEnv, s.key, { comment, instructions: [{ kind: 'archiveExperiment' }] });
         return;
       }
       case 'update_flag_env': {
@@ -513,13 +646,46 @@ export function parseFooter(description: string | null | undefined): Record<stri
   return Object.fromEntries(m[1]!.split(';').map((kv) => kv.trim().split('=') as [string, string]).filter((x) => x.length === 2));
 }
 
+/** `IterationInput` for a drafted bandit (reference/launchdarkly/openapi.json): treatments by variation ID, the flag's default rule. */
+export function banditIteration(d: DesiredBandit, flag: LdFlag, flagConfigVersion: number): Record<string, unknown> {
+  const ids = (i: number) => {
+    const v = flag.variations[i];
+    if (!v) throw new Error(`Flag “${flag.key}” has no variation ${i}.`);
+    return v._id;
+  };
+  return {
+    hypothesis: d.hypothesis,
+    canReshuffleTraffic: true,
+    metrics: [{ key: d.metricKey, isGroup: false }],
+    primarySingleMetricKey: d.metricKey,
+    treatments: d.treatments.map((t) => ({ name: t.name, baseline: t.baseline, allocationPercent: t.allocationPercent, parameters: [{ flagKey: d.flagKey, variationId: ids(t.variation) }] })),
+    flags: { [d.flagKey]: { ruleId: d.ruleId, flagConfigVersion, notInExperimentVariationId: ids(d.treatments.find((t) => t.baseline)?.variation ?? 0) } },
+    randomizationUnit: d.randomizationUnit,
+    reallocationFrequencyMillis: d.reallocationFrequencyMillis,
+  };
+}
+
+export function banditSummary(d: DesiredBandit): string {
+  return `${d.treatments.length} arms (${d.treatments.map((t) => `${t.name} ${t.allocationPercent}%`).join(', ')}), optimizing “${d.metricKey}” by ${d.randomizationUnit}`;
+}
+
 function segmentSummary(d: { rules: unknown[]; included: string[]; includedContexts: { values: string[] }[] }): string {
   const ids = d.included.length + d.includedContexts.reduce((n, c) => n + c.values.length, 0);
   return [d.rules.length ? `${d.rules.length} rule${d.rules.length === 1 ? '' : 's'}` : '', ids ? `${ids} IDs` : ''].filter(Boolean).join(', ') || 'no members';
 }
 
-export function envSummary(d: Extract<PlanStep, { op: 'update_flag_env' }>['desired']): string {
-  const ft = d.fallthrough.rollout ? `${(d.fallthrough.rollout.variations[0]!.weight / 1000).toString()}% rollout` : d.fallthrough.variation === 0 ? 'true' : 'false';
+/** One line for a run log; `variations` (the flag's values) names the default when given. */
+export function envSummary(d: Extract<PlanStep, { op: 'update_flag_env' }>['desired'], variations?: unknown[]): string {
+  const name = (i: number | undefined) => {
+    if (!variations) return i === 0 ? 'true' : 'false';
+    const v = JSON.stringify(variations[i ?? 0]);
+    return v.length > 40 ? `${v.slice(0, 37)}…` : v;
+  };
+  const ft = d.fallthrough.rollout
+    ? d.fallthrough.rollout.variations.length > 2
+      ? `${d.fallthrough.rollout.variations.length}-way split`
+      : `${(d.fallthrough.rollout.variations[0]!.weight / 1000).toString()}% rollout`
+    : name(d.fallthrough.variation);
   const targets = d.targets.reduce((n, t) => n + t.values.length, 0);
   return [
     d.on ? 'on' : 'off',

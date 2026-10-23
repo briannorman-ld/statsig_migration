@@ -157,6 +157,64 @@ export const SegmentSchema = z.looseObject({
 export const SegmentsSchema = z.looseObject({ items: z.array(SegmentSchema), totalCount: optNum });
 export type LdSegment = z.infer<typeof SegmentSchema>;
 
+/** Metric (GET /metrics/{p}/{key}); the listing returns the same shape with fewer fields. */
+export const MetricSchema = z.looseObject({
+  key: z.string(),
+  name: optStr,
+  kind: optStr,
+  description: optStr,
+  tags: z.array(z.string()).nullish(),
+  eventKey: optStr,
+  isNumeric: optBool,
+  successCriteria: optStr,
+  analysisUnits: z.array(z.string()).nullish(),
+  randomizationUnits: z.array(z.string()).nullish(),
+  archived: optBool,
+  _version: optNum,
+  _id: optStr,
+});
+export const MetricsSchema = z.looseObject({ items: z.array(MetricSchema).nullish(), totalCount: optNum });
+export type LdMetric = z.infer<typeof MetricSchema>;
+
+const IterationSchema = z.looseObject({
+  _id: optStr,
+  hypothesis: optStr,
+  status: optStr,
+  createdAt: optNum,
+  startedAt: optNum,
+  endedAt: optNum,
+  randomizationUnit: optStr,
+  reallocationFrequencyMillis: optNum,
+  treatments: z.array(z.looseObject({ _id: optStr, name: z.string(), allocationPercent: z.string(), baseline: optBool })).nullish(),
+  flags: z.record(z.string(), z.looseObject({ targetingRule: optStr, flagConfigVersion: optNum })).nullish(),
+});
+
+/** Experiment (GET /projects/{p}/environments/{e}/experiments/{key}). Bandits are experiments with `type: mab`. */
+export const ExperimentSchema = z.looseObject({
+  _id: optStr,
+  key: z.string(),
+  name: z.string(),
+  description: optStr,
+  environmentKey: optStr,
+  type: optStr,
+  tags: z.array(z.string()).nullish(),
+  archivedDate: optNum,
+  currentIteration: IterationSchema.nullish(),
+  draftIteration: IterationSchema.nullish(),
+  previousIterations: z.array(IterationSchema).nullish(),
+});
+/** LD spells this collection's count `total_count`, unlike the others. */
+export const ExperimentsSchema = z.looseObject({ items: z.array(ExperimentSchema), total_count: optNum, totalCount: optNum });
+export type LdExperiment = z.infer<typeof ExperimentSchema>;
+export type LdIteration = z.infer<typeof IterationSchema>;
+
+/** Project experimentation settings: the context kinds experiments may randomize by. */
+export const ExperimentationSettingsSchema = z.looseObject({
+  _projectKey: optStr,
+  randomizationUnits: z.array(z.looseObject({ randomizationUnit: z.string(), default: optBool, _hidden: optBool, _displayName: optStr })).nullish(),
+});
+export type LdExperimentationSettings = z.infer<typeof ExperimentationSettingsSchema>;
+
 /** Any `{items: [...]}` collection, for probes where we only care that the route answers. */
 export const CollectionSchema = z.looseObject({ items: z.array(z.unknown()).nullish(), totalCount: optNum });
 

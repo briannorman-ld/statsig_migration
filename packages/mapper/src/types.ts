@@ -121,6 +121,52 @@ export interface DesiredSegment {
   includedContexts: { contextKind: string; values: string[] }[];
 }
 
+/** An LD custom conversion metric (POST /metrics/{projectKey}; PLAN §11 "the success event becomes a metric"). */
+export interface DesiredMetric {
+  key: string;
+  name: string;
+  description: string;
+  kind: 'custom';
+  /** The event name the app must send through LD `track()`. */
+  eventKey: string;
+  isNumeric: false;
+  successCriteria: 'HigherThanBaseline';
+  tags: string[];
+  /** Context kinds the metric can be analyzed by (the bandit's randomization unit). */
+  analysisUnits: string[];
+}
+
+export interface DesiredTreatment {
+  name: string;
+  baseline: boolean;
+  /** Percent of traffic, as LD's `TreatmentInput.allocationPercent` string, e.g. "33.34". */
+  allocationPercent: string;
+  /** Index into the flag's variations. */
+  variation: number;
+}
+
+/**
+ * A drafted LD multi-armed bandit (an experiment with `type: mab`, PLAN §11 "Autotune"), in one
+ * environment. Created with its first iteration as a draft: nothing runs until someone starts it in LD.
+ */
+export interface DesiredBandit {
+  key: string;
+  ldEnv: string;
+  statsigEnv: string;
+  name: string;
+  description: string;
+  hypothesis: string;
+  flagKey: string;
+  /** The flag rule the bandit runs on. Always the default rule for a migrated autotune. */
+  ruleId: 'fallthrough';
+  treatments: DesiredTreatment[];
+  /** The primary metric the bandit optimizes (`primarySingleMetricKey`). */
+  metricKey: string;
+  randomizationUnit: string;
+  reallocationFrequencyMillis: number;
+  tags: string[];
+}
+
 // ---------------------------------------------------------------------------------------------
 // Decisions (PLAN §8)
 // ---------------------------------------------------------------------------------------------
@@ -143,7 +189,10 @@ export type DecisionType =
   | 'null_check'
   | 'client_side_availability'
   | 'unsupported_condition'
-  | 'rule_expansion';
+  | 'rule_expansion'
+  | 'autotune_running'
+  | 'missing_metric'
+  | 'duplicate_variant_value';
 
 /**
  * - blocking: no safe default; the item can't migrate until resolved.
@@ -259,9 +308,9 @@ export interface EnvTarget {
 export type IdLists = Record<string, string[]>;
 
 export interface Dependency {
-  kind: 'segment' | 'context_kind' | 'flag';
+  kind: 'segment' | 'context_kind' | 'flag' | 'metric' | 'randomization_unit';
   key: string;
-  /** For segments and prerequisite flags: the StatSig entity id it comes from. */
+  /** For segments and prerequisite flags: the StatSig entity id it comes from; for metrics, the event name. */
   entityId?: string;
 }
 

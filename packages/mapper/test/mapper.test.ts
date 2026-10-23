@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { CanonicalSnapshot, Condition, Gate } from '@sslm/canonical';
-import { caseFoldedPattern, mapGate, mapSegment, type MapArgs, type Resolution } from '../src/index.ts';
+import { caseFoldedPattern, mapAutotune, mapGate, mapSegment, type MapArgs, type Resolution } from '../src/index.ts';
 import { acmeSnapshot, CAPS, NOW, profileFor, server } from './fixtures.ts';
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
@@ -434,6 +434,97 @@ describe('known edge cases (docs/KNOWN-EDGE-CASES.md)', () => {
 
     it('an empty ID list is an empty LD segment', () => {
       expect(seg('beta_waitlist').desired?.included).toEqual([]);
+    });
+  });
+
+  describe('autotunes → multi-armed bandits (PLAN §11; edge cases 11.8–11.15)', () => {
+    const at = (id: string, resolutions = new Map<string, Resolution>()) =>
+      mapAutotune({ canonical: { snapshot: web }, entity: web.autotunes.find((a) => a.id === id)!, profile: profileFor(web, MAPPING), resolutions, capabilities: CAPS, env: { statsig: 'production', ld: 'production' }, now: NOW });
+    const decide = (r: { unresolved: { id: string; type: string; fingerprint: string }[] }, type: string, optionKey: string): Map<string, Resolution> => {
+      const d = r.unresolved.find((x) => x.type === type)!;
+      return new Map([[d.id, { id: d.id, type: d.type as Resolution['type'], optionKey, scope: 'resource', fingerprint: d.fingerprint, decidedAt: NOW }]]);
+    };
+
+    it('11.8: a not-started autotune becomes an off JSON flag, a success metric and a drafted bandit', () => {
+      const r = at('hero_image_autotune');
+      expect(r.state).toBe('not_started');
+      expect(r.skipped).toBeUndefined();
+      expect(r.shell.variations.map((v) => v.name)).toEqual(['Lifestyle', 'Product']);
+      expect(r.shell.variations[0]!.value).toEqual({ image: 'hero-lifestyle.jpg' });
+      expect(r.shell.customProperties['statsig.type']!.value).toEqual(['autotune']);
+      expect(r.env).toMatchObject({ on: false, offVariation: 0, fallthrough: { rollout: { contextKind: 'user', variations: [{ variation: 0, weight: 50_000 }, { variation: 1, weight: 50_000 }] } } });
+      expect(r.metric).toMatchObject({ key: 'hero_click', kind: 'custom', eventKey: 'hero_click', isNumeric: false, successCriteria: 'HigherThanBaseline' });
+      expect(r.bandit).toMatchObject({ key: 'hero_image_autotune', flagKey: 'hero_image_autotune', ruleId: 'fallthrough', metricKey: 'hero_click', randomizationUnit: 'user' });
+      expect(r.bandit!.treatments).toEqual([
+        { name: 'Lifestyle', baseline: true, allocationPercent: '50', variation: 0 },
+        { name: 'Product', baseline: false, allocationPercent: '50', variation: 1 },
+      ]);
+      expect(r.dependencies).toEqual([{ kind: 'metric', key: 'hero_click', entityId: 'hero_click' }]);
+      expect(types(r)).toEqual(['client_side_availability']);
+    });
+
+    it('11.8: a running autotune waits by default (autotune_running), or is pre-staged', () => {
+      const waiting = at('promo_banner_autotune');
+      expect(waiting.state).toBe('running');
+      expect(types(waiting)).toContain('autotune_running');
+      expect(waiting.skipped).toMatch(/running in StatSig/);
+      const staged = at('promo_banner_autotune', decide(waiting, 'autotune_running', 'prestage'));
+      expect(staged.skipped).toBeUndefined();
+      expect(staged.fidelity.overall).toBe('partial');
+      expect(staged.bandit!.treatments).toHaveLength(3);
+    });
+
+    it('11.9: arm sizes that sum to 99 are normalized to thousandths summing to 100 000', () => {
+      const r = at('promo_banner_autotune', decide(at('promo_banner_autotune'), 'autotune_running', 'prestage'));
+      const weights = r.env.fallthrough.rollout!.variations.map((v) => v.weight);
+      expect(weights.reduce((n, w) => n + w, 0)).toBe(100_000);
+      expect(weights).toEqual([33_334, 33_333, 33_333]);
+      expect(r.bandit!.treatments.map((t) => t.allocationPercent)).toEqual(['33.33', '33.33', '33.33']);
+      expect(r.fidelity.notes.map((n) => n.message)).toContainEqual(expect.stringMatching(/add up to 99%/));
+    });
+
+    it('11.10: a concluded autotune serves the winner at 100% with no bandit', () => {
+      const r = at('pricing_page_autotune');
+      expect(r.state).toBe('concluded');
+      expect(r.env).toMatchObject({ on: true, fallthrough: { variation: 1 } });
+      expect(r.bandit).toBeNull();
+      expect(r.metric).toBeNull();
+      expect(r.fidelity.overall).toBe('full');
+    });
+
+    it('11.11: no success event is a blocking missing_metric decision; "flag only" is manual fidelity', () => {
+      const r = at('cart_upsell_autotune');
+      expect(r.unresolved.map((d) => [d.type, d.severity])).toContainEqual(['missing_metric', 'blocking']);
+      expect(r.bandit).toBeNull();
+      const flagOnly = at('cart_upsell_autotune', decide(r, 'missing_metric', 'flag_only'));
+      expect(flagOnly.fidelity.overall).toBe('manual');
+      expect(flagOnly.env.fallthrough.rollout!.variations).toHaveLength(2);
+      expect(at('cart_upsell_autotune', decide(r, 'missing_metric', 'skip')).skipped).toMatch(/no success event/);
+    });
+
+    it('11.12: variants with identical JSON are merged into one arm (or the item is skipped)', () => {
+      const r = at('free_shipping_copy_autotune');
+      expect(types(r)).toContain('duplicate_variant_value');
+      expect(r.shell.variations.map((v) => v.name)).toEqual(['Short / Short again', 'Long']);
+      expect(r.env.fallthrough.rollout!.variations.map((v) => v.weight)).toEqual([66_667, 33_333]);
+      expect(r.fidelity.overall).toBe('partial');
+      expect(at('free_shipping_copy_autotune', decide(r, 'duplicate_variant_value', 'skip')).skipped).toMatch(/identical values/);
+    });
+
+    it('11.13: a companyID autotune randomizes by the company kind and needs a randomization unit', () => {
+      const r = at('b2b_pricing_autotune');
+      expect(r.bandit!.randomizationUnit).toBe('company');
+      expect(r.metric!.analysisUnits).toEqual(['company']);
+      expect(r.dependencies.map((d) => `${d.kind}:${d.key}`)).toEqual(['context_kind:company', 'metric:quote_requested', 'randomization_unit:company']);
+      expect(types(r)).toContain('unit_type_kind');
+    });
+
+    it('is deterministic and fingerprints the arms, event and state', () => {
+      const a = at('hero_image_autotune');
+      const b = at('hero_image_autotune');
+      expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+      const changed = mapAutotune({ canonical: { snapshot: web }, entity: { ...web.autotunes.find((x) => x.id === 'hero_image_autotune')!, isStarted: true }, profile: profileFor(web, MAPPING), resolutions: new Map(), capabilities: CAPS, env: { statsig: 'production', ld: 'production' }, now: NOW });
+      expect(changed.statsigFingerprint).not.toBe(a.statsigFingerprint);
     });
   });
 });

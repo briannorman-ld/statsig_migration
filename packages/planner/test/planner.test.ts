@@ -118,6 +118,70 @@ describe('planMigration', () => {
   });
 });
 
+describe('autotunes (PLAN §11)', () => {
+  const auid = (id: string) => web.autotunes.find((a) => a.id === id)!.uid;
+
+  it('plans metric → shell → targeting → drafted bandit, with a randomization unit for custom kinds', () => {
+    const plan = planMigration(acceptAll(request([], { autotunes: [auid('hero_image_autotune'), auid('b2b_pricing_autotune')] })));
+    expect(plan.errors).toEqual([]);
+    expect(plan.ready).toBe(true);
+    expect(plan.steps.map((s) => s.id)).toEqual([
+      'context_kind:company',
+      'randomization_unit:company',
+      'metric:hero_click',
+      'metric:quote_requested',
+      'shell:b2b_pricing_autotune',
+      'shell:hero_image_autotune',
+      'env:test:b2b_pricing_autotune',
+      'env:test:hero_image_autotune',
+      'bandit:test:b2b_pricing_autotune',
+      'bandit:test:hero_image_autotune',
+    ]);
+    const bandit = plan.steps.find((s) => s.id === 'bandit:test:hero_image_autotune')!;
+    expect(bandit.op === 'create_bandit' && bandit.deps).toEqual(['env:test:hero_image_autotune', 'metric:hero_click']);
+    expect(plan.items.filter((i) => i.kind === 'metric').map((i) => [i.ldKey, i.dependency])).toEqual([
+      ['hero_click', true],
+      ['quote_requested', true],
+    ]);
+    const env = plan.steps.find((s) => s.id === 'env:test:hero_image_autotune')!;
+    expect(env.op === 'update_flag_env' && env.provenance.statsigType).toBe('autotune');
+  });
+
+  it('a running autotune is skipped until its decision is answered; a concluded one needs no bandit', () => {
+    const plan = planMigration(request([], { autotunes: [auid('promo_banner_autotune'), auid('pricing_page_autotune')] }));
+    expect(plan.decisions.map((d) => d.type)).toContain('autotune_running');
+    expect(plan.items.find((i) => i.entityId === 'promo_banner_autotune')!.status).toBe('blocked');
+    const done = planMigration(acceptAll(request([], { autotunes: [auid('promo_banner_autotune'), auid('pricing_page_autotune')] })));
+    // "Wait" is the recommended answer: the running autotune stays in StatSig.
+    expect(done.items.find((i) => i.entityId === 'promo_banner_autotune')).toMatchObject({ status: 'skipped' });
+    expect(done.steps.map((s) => s.op)).toEqual(['upsert_flag_shell', 'update_flag_env']);
+    expect(done.steps.some((s) => s.op === 'create_bandit' || s.op === 'upsert_metric')).toBe(false);
+  });
+
+  it('reuses an existing LD metric on the same event silently, and asks about a foreign one', () => {
+    const base = acceptAll(request([], { autotunes: [auid('hero_image_autotune')] }));
+    const same = planMigration({ ...base, ld: { ...EMPTY_LD, metrics: new Map([['hero_click', { key: 'hero_click', tags: [], eventKey: 'hero_click', kind: 'custom' }]]) } });
+    expect(same.ready).toBe(true);
+    expect(same.steps.find((s) => s.op === 'upsert_metric')).toMatchObject({ exists: true, adopt: true });
+    const foreign = planMigration({ ...base, ld: { ...EMPTY_LD, metrics: new Map([['hero_click', { key: 'hero_click', tags: [], eventKey: 'Hero clicked', kind: 'custom' }]]) } });
+    expect(foreign.decisions.map((d) => d.type)).toEqual(['key_collision']);
+    expect(foreign.items.find((i) => i.kind === 'metric')!.status).toBe('blocked');
+  });
+
+  it('asks before touching an LD experiment the app did not create, and skips the randomization unit when enabled', () => {
+    const base = acceptAll(request([], { autotunes: [auid('b2b_pricing_autotune')] }));
+    const plan = planMigration({
+      ...base,
+      ld: { ...EMPTY_LD, randomizationUnits: ['user', 'company'], contextKinds: ['user', 'company'], experiments: { test: new Map([['b2b_pricing_autotune', { key: 'b2b_pricing_autotune', tags: [], type: 'mab', iterationStatus: 'running' }]]) } },
+    });
+    expect(plan.decisions.map((d) => d.type)).toEqual(['key_collision']);
+    const adopted = planMigration({ ...base, ld: { ...EMPTY_LD, randomizationUnits: ['user', 'company'], contextKinds: ['user', 'company'], experiments: { test: new Map([['b2b_pricing_autotune', { key: 'b2b_pricing_autotune', tags: [], type: 'mab' }]]) } }, resolutions: new Map([...base.resolutions, [plan.decisions[0]!.id, { id: plan.decisions[0]!.id, type: 'key_collision' as const, optionKey: 'adopt', scope: 'resource' as const, fingerprint: plan.decisions[0]!.fingerprint, decidedAt: NOW }]]) });
+    expect(adopted.ready).toBe(true);
+    expect(adopted.steps.map((s) => s.id)).toEqual(['metric:quote_requested', 'shell:b2b_pricing_autotune', 'env:test:b2b_pricing_autotune', 'bandit:test:b2b_pricing_autotune']);
+    expect(adopted.steps.find((s) => s.op === 'create_bandit')).toMatchObject({ exists: true, adopt: true });
+  });
+});
+
 describe('migrationStatus (from LD provenance)', () => {
   const fp = { statsigFingerprint: 'abc', decisionSetHash: 'd1' };
   const flag = (sync?: string[]) => ({
