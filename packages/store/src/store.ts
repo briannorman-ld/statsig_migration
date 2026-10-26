@@ -14,8 +14,10 @@ import {
   type SnapshotRecord,
   type SourceRecord,
   type SpecUploadRecord,
+  type VaultRecord,
   type WorkspaceRecord,
 } from "./db.ts";
+import type { VaultBlob } from "./vault.ts";
 
 /** Property names that must never be persisted (CLAUDE.md: tokens never persisted unencrypted). */
 const SECRET_KEYS =
@@ -145,8 +147,10 @@ export class WorkspaceStore {
       this.db.monitorSamples,
       this.db.monitorItems,
       this.db.monitorState,
+      this.db.vaults,
     ];
     await this.db.transaction("rw", tables, async () => {
+      await this.db.vaults.delete(id);
       await this.db.monitorSamples.where("workspaceId").equals(id).delete();
       await this.db.monitorItems.where("workspaceId").equals(id).delete();
       await this.db.monitorState.delete(id);
@@ -460,6 +464,23 @@ export class WorkspaceStore {
       await this.db.monitorItems.where("workspaceId").equals(workspaceId).delete();
       await this.db.monitorState.delete(workspaceId);
     });
+  }
+
+  // --- Encrypted token vault (PLAN §3.4 "Remember on this device") ----------------------------
+
+  getVault(workspaceId: string): Promise<VaultRecord | undefined> {
+    return this.db.vaults.get(workspaceId);
+  }
+
+  /** Only the encrypted blob is accepted here; assertNoSecrets refuses anything that looks like a raw token. */
+  async saveVault(workspaceId: string, blob: VaultBlob): Promise<void> {
+    const rec: VaultRecord = { workspaceId, updatedAt: now(), blob };
+    assertNoSecrets(rec);
+    await this.db.vaults.put(rec);
+  }
+
+  async deleteVault(workspaceId: string): Promise<void> {
+    await this.db.vaults.delete(workspaceId);
   }
 
   private async touch(workspaceId: string): Promise<void> {

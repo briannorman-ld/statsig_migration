@@ -101,6 +101,12 @@ export function probeStartPatch(current: LdSession, projectKey: string): Partial
 export async function chooseProject(workspaceId: string, projectKey: string): Promise<void> {
   const c = client(workspaceId);
   set(workspaceId, probeStartPatch(sessions.get(workspaceId) ?? EMPTY, projectKey));
+  // After a reload (token restored from the device vault), show the last probe's matrix at once so
+  // the mapping, decisions and monitoring screens render while the fresh probe runs.
+  if (!sessions.get(workspaceId)?.matrix) {
+    const saved = (await store.getCapabilities(workspaceId))?.matrix as CapabilityMatrix | undefined;
+    if (saved && saved.projectKey === projectKey && saved.instance === c.instance.id && !sessions.get(workspaceId)?.matrix) set(workspaceId, { matrix: saved });
+  }
   try {
     const matrix = await probeCapabilities(c, projectKey, { onProgress: (s) => set(workspaceId, { probing: s }) });
     set(workspaceId, { matrix, probing: undefined });

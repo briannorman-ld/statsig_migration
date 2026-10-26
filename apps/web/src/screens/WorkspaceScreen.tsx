@@ -8,6 +8,7 @@ import {
 } from "@sslm/canonical";
 import type { SourceRecord } from "@sslm/store";
 import { LdMark } from "../components/Brand.tsx";
+import { UnlockKeysBar } from "../components/DeviceVault.tsx";
 import { ThemeToggle } from "../components/ThemeToggle.tsx";
 import {
   appendLog,
@@ -28,7 +29,6 @@ import {
 import { describeScope, KIND_LABEL } from "../lib/kinds.ts";
 import { timeAgo } from "../lib/time.ts";
 import { useLdSession } from "../lib/ld.ts";
-import { openReverseMigration, useLdToss } from "../lib/ldtoss.ts";
 import { secrets } from "../lib/secrets.ts";
 import {
   collectDecisions,
@@ -137,7 +137,6 @@ export function WorkspaceScreen({
   const [sync, setSync] = useState<Record<string, SyncState>>({});
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const ld = useLdSession(workspaceId);
-  const toss = useLdToss();
   const autoSynced = useRef(new Set<string>());
   const [migrate, setMigrate] = useState<{
     selection: MigrationSelection;
@@ -380,6 +379,7 @@ export function WorkspaceScreen({
         </div>
       </header>
 
+      <UnlockKeysBar workspaceId={workspaceId} workspace={workspace} />
       {viewingPast && (
         <div
           className="flex flex-wrap items-center gap-3 border-b border-warning-line bg-warning-fill/10 px-4 py-2 text-sm"
@@ -578,12 +578,6 @@ export function WorkspaceScreen({
           >
             <span>What migrates</span>
           </NavItem>
-          {toss && (
-            <NavItem active={false} onClick={openReverseMigration}>
-              <span>Migrate to StatSig</span>
-              <Badge tone="violet">beta</Badge>
-            </NavItem>
-          )}
 
           <SectionTitle>Workspace</SectionTitle>
           <NavItem

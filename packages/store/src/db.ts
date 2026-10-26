@@ -2,6 +2,7 @@ import Dexie, { type EntityTable } from "dexie";
 import type { CanonicalSnapshot, SourceDescriptor } from "@sslm/canonical";
 import type { MappingProfile, Resolution } from "@sslm/mapper";
 import type { RunRecord } from "@sslm/executor";
+import type { VaultBlob } from "./vault.ts";
 
 /**
  * Browser state (PLAN §3.3 item 2). Tokens are never stored here: see assertNoSecrets.
@@ -153,6 +154,16 @@ export interface MonitorStateRecord {
   notify?: boolean;
 }
 
+/**
+ * "Remember on this device" (PLAN §3.4): the workspace's tokens, AES-GCM encrypted under a
+ * passphrase-derived key. The only place a token ever reaches disk, and only as this blob.
+ */
+export interface VaultRecord {
+  workspaceId: string;
+  updatedAt: string;
+  blob: VaultBlob;
+}
+
 export class MigratorDb extends Dexie {
   workspaces!: EntityTable<WorkspaceRecord, "id">;
   sources!: EntityTable<SourceRecord, "id">;
@@ -167,6 +178,7 @@ export class MigratorDb extends Dexie {
   monitorSamples!: EntityTable<MonitorSampleRecord, "id">;
   monitorItems!: Dexie.Table<MonitorItemRecord, [string, string, string]>;
   monitorState!: EntityTable<MonitorStateRecord, "workspaceId">;
+  vaults!: EntityTable<VaultRecord, "workspaceId">;
 
   constructor(name = "statsig-ld-migrator") {
     super(name);
@@ -198,6 +210,10 @@ export class MigratorDb extends Dexie {
       monitorSamples: "id, workspaceId, [workspaceId+flagKey+ldEnv], at",
       monitorItems: "[workspaceId+flagKey+ldEnv], workspaceId",
       monitorState: "workspaceId",
+    });
+    // Remember on this device: encrypted token vault per workspace (PLAN §3.4).
+    this.version(6).stores({
+      vaults: "workspaceId",
     });
   }
 }

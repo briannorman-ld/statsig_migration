@@ -103,7 +103,7 @@ export const COVERAGE: CoverageEntry[] = [
     statsig: 'Console API keys, server/client SDK keys',
     ld: 'Service tokens, SDK keys',
     status: 'none',
-    how: 'Keys are never migrated; the console uses a read-only Console key and an LD service token, both kept in memory only.',
+    how: 'Keys are never migrated; the console uses a read-only Console key and an LD service token, both kept in memory (optionally encrypted on the device under a passphrase).',
     detail: 'Each app re-initializes its SDK with an LD key for the right environment. Spec-only sources can be read with a client key that only downloads the config spec.',
     docs: { statsig: `${SS}/sdk-keys/api-keys`, ld: `${LD}/home/account/api` },
   },

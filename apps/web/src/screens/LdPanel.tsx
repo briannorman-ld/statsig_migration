@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { LD_INSTANCES, type CapabilityStatus, type LdInstanceId } from '@sslm/ld-client';
 import type { WorkspaceRecord } from '@sslm/store';
+import { RememberKeysCard } from '../components/DeviceVault.tsx';
 import { Badge, Button, Callout, Card, cx, Input, Label, Modal, Select, Spinner } from '../components/ui.tsx';
 import { chooseProject, connectLd, disconnectLd, reprobe, useLdSession } from '../lib/ld.ts';
 import { ProjectResetModal } from './ProjectResetModal.tsx';
@@ -75,8 +76,8 @@ export function LdPanel({ workspaceId, workspace }: { workspaceId: string; works
               onKeyDown={(e) => e.key === 'Enter' && token && acked(instance) && void connect()}
             />
             <p className="mt-1.5 text-xs text-fg-muted">
-              Kept in memory only and sent only to {LD_INSTANCES[instance].origin}. Closing the tab forgets it. A Writer service token is recommended; this milestone only
-              reads.
+              Kept in memory and sent only to {LD_INSTANCES[instance].origin}. Closing the tab forgets it unless you remember keys on this device (below, encrypted with a
+              passphrase). A Writer service token is recommended; this milestone only reads.
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -197,6 +198,8 @@ export function LdPanel({ workspaceId, workspace }: { workspaceId: string; works
           </div>
         </Card>
       )}
+
+      <RememberKeysCard workspaceId={workspaceId} workspace={workspace} />
 
       {pendingAck && LD_INSTANCES[pendingAck].disclaimer && (
         <Modal title={LD_INSTANCES[pendingAck].disclaimer!.title} onClose={() => { setPendingAck(undefined); setInstance('us'); }}>

@@ -4,7 +4,6 @@ import { LdLockup, LdMark } from '../components/Brand.tsx';
 import { ThemeToggle } from '../components/ThemeToggle.tsx';
 import { Badge, Button, Callout, Card, Input, Label, Spinner } from '../components/ui.tsx';
 import { ensureDemoWorkspace, startDemoMock } from '../lib/demo.ts';
-import { openReverseMigration, useLdToss } from '../lib/ldtoss.ts';
 import { store } from '../lib/store.ts';
 import { normalizeWorkspaceName, type WorkspaceRecord } from '@sslm/store';
 
@@ -13,7 +12,6 @@ export function StartScreen({ onOpen }: { onOpen: (workspaceId: string) => void 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [name, setName] = useState('');
-  const toss = useLdToss();
 
   const tryDemo = async () => {
     setBusy(true);
@@ -72,7 +70,7 @@ export function StartScreen({ onOpen }: { onOpen: (workspaceId: string) => void 
           </h1>
           <p className="mt-5 text-base leading-relaxed text-fg-muted">
             Reads your StatSig projects and compares them with one LaunchDarkly project, side by side. Every imperfect mapping becomes a decision you make once;
-            nothing is dropped or approximated silently. Everything stays in this browser: no server, no account, and tokens are kept in memory only.
+            nothing is dropped or approximated silently. Everything stays in this browser: no server, no account, and tokens are kept in memory, or encrypted on this device only if you ask.
           </p>
         </div>
 
@@ -124,20 +122,6 @@ export function StartScreen({ onOpen }: { onOpen: (workspaceId: string) => void 
           </Card>
         </div>
 
-        {toss && (
-          <Card className="mt-5 flex flex-wrap items-center gap-4 p-5">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-semibold text-fg">Migrate to StatSig</h2>
-                <Badge tone="violet">beta</Badge>
-              </div>
-              <p className="mt-1 text-sm leading-relaxed text-fg-muted">Going the other way? A guided wizard moves a LaunchDarkly project to StatSig. About four minutes.</p>
-            </div>
-            <Button variant="secondary" onClick={openReverseMigration}>
-              Start reverse migration
-            </Button>
-          </Card>
-        )}
 
         {workspaces && workspaces.length > 0 && (
           <section className="mt-12">

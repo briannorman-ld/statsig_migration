@@ -40,7 +40,7 @@ export function ConnectionsView({
       <PageTitle eyebrow="Get started">{workspace.name}</PageTitle>
       <p className="max-w-2xl text-sm text-fg-muted">
         A workspace reads one or more StatSig projects and writes to one LaunchDarkly project. Connect both to compare them side by side. Tokens stay in this tab’s
-        memory and are sent only to StatSig and LaunchDarkly; nothing is ever written to StatSig.
+        memory (or encrypted on this device, if you choose to remember them) and are sent only to StatSig and LaunchDarkly; nothing is ever written to StatSig.
       </p>
 
       <div className="grid gap-5 md:grid-cols-2">
