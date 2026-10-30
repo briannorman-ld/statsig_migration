@@ -1,5 +1,5 @@
 {
-  "name": "statsig-ld-migrator",
+  "name": "ld-migration-console",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.25.0",

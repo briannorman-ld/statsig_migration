@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { CanonicalSnapshot } from '@sslm/canonical';
 import type { Resolution } from '@sslm/mapper';
-import { migrationStatus, planMigration, recommendedResolutions, syncPropertyKey, type LdProjectState, type PlanRequest } from '../src/index.ts';
+import { flagOwner, migrationStatus, ownsSegment, planMigration, recommendedResolutions, syncPropertyKey, type LdProjectState, type PlanRequest } from '../src/index.ts';
 import { acmeSnapshot, CAPS, NOW, profileFor, server } from './fixtures.ts';
 
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
@@ -186,8 +186,8 @@ describe('dynamic configs (PLAN §10.1; edge cases 1.2, 10.1, 10.8)', () => {
   const cuid = (id: string) => web.configs.find((c) => c.id === id)!.uid;
   const owned = (key: string, type: 'gate' | 'config', extra: Partial<LdProjectState['flags'] extends ReadonlyMap<string, infer V> ? V : never> = {}) => ({
     key,
-    tags: ['statsig-migrated', 'statsig-src-web'],
-    customProperties: { 'statsig.id': { value: [key] }, 'statsig.source': { value: ['web'] }, 'statsig.type': { value: [type] } },
+    tags: ['migrated-from-statsig', 'migration-src-web'],
+    customProperties: { 'migration.id': { value: [key] }, 'migration.source': { value: ['web'] }, 'migration.type': { value: [type] } },
     kind: type === 'gate' ? 'boolean' : 'multivariate',
     ...extra,
   });
@@ -228,7 +228,7 @@ describe('dynamic configs (PLAN §10.1; edge cases 1.2, 10.1, 10.8)', () => {
     const variations = shell.op === 'upsert_flag_shell' ? shell.desired.variations : [];
     const ld: LdProjectState = {
       ...EMPTY_LD,
-      flags: new Map([['shipping_thresholds', owned('shipping_thresholds', 'config', { variations, customProperties: { ...owned('x', 'config').customProperties, 'statsig.id': { value: ['shipping_thresholds'] }, [syncPropertyKey('production')]: { value: ['fp', '5', NOW, 'd'] } } })]]),
+      flags: new Map([['shipping_thresholds', owned('shipping_thresholds', 'config', { variations, customProperties: { ...owned('x', 'config').customProperties, 'migration.id': { value: ['shipping_thresholds'] }, [syncPropertyKey('production')]: { value: ['fp', '5', NOW, 'd'] } } })]]),
     };
     const req = acceptAll(request([], { configs: [cuid('shipping_thresholds')], snapshots: [web2], ld }));
     const blocked = planMigration({ ...req, resolutions: new Map([...req.resolutions].filter(([, r]) => r.type !== 'variation_change_affects_migrated_env')) });
@@ -252,8 +252,8 @@ describe('migrationStatus (from LD provenance)', () => {
   const fp = { statsigFingerprint: 'abc', decisionSetHash: 'd1' };
   const flag = (sync?: string[]) => ({
     key: 'x',
-    tags: ['statsig-migrated'],
-    customProperties: { 'statsig.id': { value: ['x'] }, 'statsig.source': { value: ['web'] }, ...(sync ? { [syncPropertyKey('test')]: { value: sync } } : {}) },
+    tags: ['migrated-from-statsig'],
+    customProperties: { 'migration.id': { value: ['x'] }, 'migration.source': { value: ['web'] }, ...(sync ? { [syncPropertyKey('test')]: { value: sync } } : {}) },
   });
   it('reads in-sync, StatSig-changed and not-migrated states', () => {
     expect(migrationStatus(undefined, 'test', fp).status).toBe('not_in_ld');
@@ -263,5 +263,20 @@ describe('migrationStatus (from LD provenance)', () => {
     expect(migrationStatus(flag(['old', '2', NOW, 'd1']), 'test', fp).status).toBe('statsig_changed');
     expect(migrationStatus(flag(['abc', '3', NOW, 'd0']), 'test', fp).status).toBe('decisions_changed');
     expect(migrationStatus(flag(['abc', '3', NOW, 'd1']), 'test', fp, { id: 'x', source: 'mobile' }).status).toBe('other_source');
+  });
+  it('still reads the legacy StatSig-only scheme written by earlier builds', () => {
+    const legacy = {
+      key: 'x',
+      tags: ['statsig-migrated', 'statsig-src-web'],
+      customProperties: { 'statsig.id': { value: ['x'] }, 'statsig.source': { value: ['web'] }, 'statsig.type': { value: ['gate'] }, 'statsig.sync.test': { value: ['abc', '3', NOW, 'd1'] } },
+    };
+    expect(flagOwner(legacy)).toEqual({ id: 'x', source: 'web', type: 'gate' });
+    expect(migrationStatus(legacy, 'test', fp)).toEqual({ status: 'in_sync', syncedAt: NOW });
+    expect(ownsSegment({ tags: ['statsig-migrated', 'statsig-src-web'] }, 'web')).toBe(true);
+    expect(ownsSegment({ tags: ['migrated-from-statsig', 'migration-src-web'] }, 'web')).toBe(true);
+    expect(ownsSegment({ tags: ['migrated-from-statsig', 'migration-src-mobile'] }, 'web')).toBe(false);
+    // A re-sync writes the current key next to a legacy one; the current one wins.
+    const both = { ...legacy, customProperties: { ...legacy.customProperties, 'migration.sync.test': { value: ['new', '4', NOW, 'd1'] } } };
+    expect(migrationStatus(both, 'test', { statsigFingerprint: 'new', decisionSetHash: 'd1' }).status).toBe('in_sync');
   });
 });

@@ -3,10 +3,11 @@
  * reachable only behind three typed confirmations (screens/ProjectResetModal.tsx). It removes
  * everything a project accumulates: flags (all environments), segments, metrics, experiments
  * (archived: LD can't delete them), custom context kinds (archived: same) and the environments
- * this app created (tagged `statsig-migrated`; LD's own default environments stay, a project
+ * this app created (tagged `migrated-from-statsig`, or `statsig-migrated` from earlier builds; LD's own default environments stay, a project
  * needs at least one). Nothing in StatSig is touched, ever.
  */
-import { LdWriteError, TAG_MIGRATED_ENV, type LdClient } from '@sslm/ld-client';
+import { hasMigratedTag } from '@sslm/canonical';
+import { LdWriteError, type LdClient } from '@sslm/ld-client';
 import { ldClient, refreshLdState, reprobe, type LdSession } from './ld.ts';
 import { store } from './store.ts';
 
@@ -156,7 +157,7 @@ async function resetSteps(c: Client, projectKey: string, report: ResetReport, on
   }
 
   // 6. Environments this app created. Never the last one, and never ones we didn't create.
-  const ours = envs.filter((e) => (e.tags ?? []).includes(TAG_MIGRATED_ENV));
+  const ours = envs.filter((e) => hasMigratedTag(e.tags ?? []));
   for (const [i, e] of ours.entries()) {
     if (envs.length - report.deleted.environments <= 1) break;
     progress('Deleting environments', i, ours.length, e.key);

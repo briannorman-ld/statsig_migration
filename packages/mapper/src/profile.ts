@@ -1,4 +1,6 @@
-import type { CanonicalSnapshot } from '@sslm/canonical';
+import { sanitizeTag, type CanonicalSnapshot } from '@sslm/canonical';
+
+export { sanitizeTag };
 import type { MappingProfile, SourceProfile } from './types.ts';
 
 /** LD attribute names for StatSig's built-in user fields (PLAN §10.3, "mapped attribute names"). */
@@ -108,12 +110,3 @@ export function sanitizeKey(id: string): string {
   return id.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._-]+/, '') || 'statsig_item';
 }
 
-/** LD tags: letters, digits, `.`, `_`, `-`; at most 64 characters. */
-export function sanitizeTag(tag: string): string {
-  return tag
-    .normalize('NFKD')
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase()
-    .slice(0, 64);
-}

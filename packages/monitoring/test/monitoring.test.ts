@@ -29,12 +29,12 @@ function flag(over: Partial<LdFlagInfo> & { sync?: string[]; env?: LdFlagInfo['e
   const { sync = ['fp1', '3', SYNCED, 'dh1'], env, ...rest } = over;
   return {
     key: 'new_checkout_flow',
-    tags: ['statsig-migrated', 'statsig-src-web'],
+    tags: ['migrated-from-statsig', 'migration-src-web'],
     customProperties: {
-      'statsig.id': { value: ['new_checkout_flow'] },
-      'statsig.source': { value: ['web'] },
-      'statsig.type': { value: ['gate'] },
-      'statsig.sync.test': { value: sync },
+      'migration.id': { value: ['new_checkout_flow'] },
+      'migration.source': { value: ['web'] },
+      'migration.type': { value: ['gate'] },
+      'migration.sync.test': { value: sync },
     },
     environments: env ?? { test: { on: true, version: 7, lastModified: Date.parse(SYNCED) + 500 } },
     ...rest,
@@ -130,7 +130,7 @@ describe('monitorRows', () => {
   });
 
   it('lists LD flags with our provenance whose StatSig entity is gone', () => {
-    const gone = flag({ key: 'retired_gate', customProperties: { 'statsig.id': { value: ['retired_gate'] }, 'statsig.source': { value: ['web'] }, 'statsig.sync.test': { value: ['fp', '1', SYNCED, 'dh'] }, 'statsig.sync.production': { value: [] } } });
+    const gone = flag({ key: 'retired_gate', customProperties: { 'migration.id': { value: ['retired_gate'] }, 'migration.source': { value: ['web'] }, 'migration.sync.test': { value: ['fp', '1', SYNCED, 'dh'] }, 'migration.sync.production': { value: [] } } });
     const foreign: LdFlagInfo = { key: 'hand_made', tags: [], customProperties: {} };
     const rows = monitorRows({ items: [item()], ldFlags: flags(flag(), gone, foreign), statuses: {}, settings: [], samples: [], now: NOW });
     expect(rows.map((r) => `${r.id}@${r.ldEnv}:${r.status}`)).toEqual(['new_checkout_flow@test:in_sync', 'retired_gate@test:missing_in_statsig']);
@@ -139,7 +139,7 @@ describe('monitorRows', () => {
   it('builds the per-environment funnel', () => {
     const rows = monitorRows({
       items: [item(), item({ ldEnv: 'production', statsigEnv: 'production' })],
-      ldFlags: flags(flag({ customProperties: { ...flag().customProperties, 'statsig.sync.production': { value: ['fp1', '3', SYNCED, 'dh1'] } }, env: { test: { lastModified: 1 }, production: { lastModified: 1 } } })),
+      ldFlags: flags(flag({ customProperties: { ...flag().customProperties, 'migration.sync.production': { value: ['fp1', '3', SYNCED, 'dh1'] } }, env: { test: { lastModified: 1 }, production: { lastModified: 1 } } })),
       statuses: { production: { new_checkout_flow: { name: 'launched' } } },
       settings: [],
       samples: [],

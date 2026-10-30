@@ -27,8 +27,8 @@ const item = (over: Partial<MonitoredItem>): MonitoredItem => ({
 });
 const flag = (key: string, over: Partial<LdFlagInfo> = {}): LdFlagInfo => ({
   key,
-  tags: ['statsig-migrated', 'statsig-src-web'],
-  customProperties: { 'statsig.id': { value: [key] }, 'statsig.source': { value: ['web'] }, 'statsig.sync.test': { value: ['fp1', '3', SYNCED, 'dh1'] } },
+  tags: ['migrated-from-statsig', 'migration-src-web'],
+  customProperties: { 'migration.id': { value: [key] }, 'migration.source': { value: ['web'] }, 'migration.sync.test': { value: ['fp1', '3', SYNCED, 'dh1'] } },
   environments: { test: { on: true, lastModified: Date.parse(SYNCED) } },
   ...over,
 });

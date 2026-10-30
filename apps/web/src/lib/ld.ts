@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import type { CapabilityUpdate } from '@sslm/executor';
-import { LdAuthError, LdClient, LdWriteError, probeCapabilities, TAG_MIGRATED_ENV, type CapabilityMatrix, type LdCallerIdentity, type LdExperiment, type LdFlagSummary, type LdInstanceId, type LdMetric, type LdProject, type LdSegment } from '@sslm/ld-client';
+import { migratedFromTag } from '@sslm/canonical';
+import { LdAuthError, LdClient, LdWriteError, probeCapabilities, type CapabilityMatrix, type LdCallerIdentity, type LdExperiment, type LdFlagSummary, type LdInstanceId, type LdMetric, type LdProject, type LdSegment } from '@sslm/ld-client';
 import { secrets } from './secrets.ts';
 import { store } from './store.ts';
 
@@ -129,7 +130,7 @@ export async function createLdEnvironment(workspaceId: string, input: { key: str
   const c = client(workspaceId);
   const color = ENV_COLORS[Math.abs([...input.key].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) | 0, 0)) % ENV_COLORS.length]!;
   try {
-    await c.createEnvironment(s.projectKey, { key: input.key, name: input.name, color, ...(input.critical ? { critical: true } : {}), tags: [TAG_MIGRATED_ENV] });
+    await c.createEnvironment(s.projectKey, { key: input.key, name: input.name, color, ...(input.critical ? { critical: true } : {}), tags: [migratedFromTag('statsig')] });
   } catch (e) {
     if (!(e instanceof LdWriteError && e.status === 409)) throw e;
   }

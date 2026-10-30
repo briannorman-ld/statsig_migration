@@ -4,7 +4,7 @@
  * metrics, randomization units), collision checks against what's already in LD, and an ordered
  * list of idempotent steps. Pure: LD state is an input.
  */
-import { stableStringify, type Autotune, type CanonicalSnapshot, type Config, type Gate } from '@sslm/canonical';
+import { hasMigratedTag, hasSourceTag, readFlagProvenance, readSync, stableStringify, syncedEnvsOf, syncPropertyKey, type Autotune, type CanonicalSnapshot, type Config, type Gate } from '@sslm/canonical';
 import {
   decisionPoint,
   lookupResolution,
@@ -12,8 +12,6 @@ import {
   mapConfig,
   mapGate,
   mapSegment,
-  sourceTag,
-  TAG_MIGRATED,
   type AutotuneMapResult,
   type ConfigMapResult,
   type DecisionPoint,
@@ -173,8 +171,8 @@ export function recommendedResolutions(ds: DecisionPoint[], decidedAt: string): 
     .map((d) => ({ id: d.id, type: d.type, optionKey: d.recommended!, scope: 'resource' as const, fingerprint: d.fingerprint, decidedAt }));
 }
 
-/** `statsig.sync.<env>`: `[fingerprint, version, syncedAt, decisionSetHash]` (PLAN §3.3). */
-export const syncPropertyKey = (ldEnv: string) => `statsig.sync.${ldEnv}`;
+/** `migration.sync.<env>`: `[fingerprint, version, syncedAt, decisionSetHash]` (PLAN §3.3). */
+export { syncPropertyKey };
 
 export function planMigration(req: PlanRequest): Plan {
   const errors: string[] = [];
@@ -377,10 +375,7 @@ export function planMigration(req: PlanRequest): Plan {
     const have = new Set(ldFlag.variations.map((v) => stableStringify(v.value)));
     const added = desired.variations.filter((v) => !have.has(stableStringify(v.value)));
     if (added.length === 0) return 'ok';
-    const migratedElsewhere = Object.keys(ldFlag.customProperties)
-      .filter((k) => k.startsWith('statsig.sync.') && (ldFlag.customProperties[k]?.value?.length ?? 0) > 0)
-      .map((k) => k.slice('statsig.sync.'.length))
-      .filter((e) => e !== ldEnv && !req.ldEnvs.includes(e));
+    const migratedElsewhere = syncedEnvsOf(ldFlag.customProperties).filter((e) => e !== ldEnv && !req.ldEnvs.includes(e));
     if (migratedElsewhere.length === 0) return 'ok';
     const dp = decisionPoint({
       type: 'variation_change_affects_migrated_env',
@@ -733,17 +728,15 @@ export function topoSort(steps: PlanStep[], errors: string[]): PlanStep[] {
   return out;
 }
 
+/** The provenance a flag carries (current or legacy keys, PLAN §3.3), or null when the console didn't create it. */
 export function flagOwner(f: LdFlagState): { id: string; source: string; type?: string } | null {
-  if (!f.tags.includes(TAG_MIGRATED)) return null;
-  const id = f.customProperties['statsig.id']?.value?.[0];
-  const source = f.customProperties['statsig.source']?.value?.[0];
-  const type = f.customProperties['statsig.type']?.value?.[0];
-  return id && source ? { id, source, ...(type ? { type } : {}) } : null;
+  const p = readFlagProvenance(f);
+  return p ? { id: p.id, source: p.source, ...(p.type ? { type: p.type } : {}) } : null;
 }
 
 /** Segments, metrics and experiments have no custom properties: ownership is the pair of tags. */
 export function ownsSegment(s: { key?: string; tags: string[] }, alias: string): boolean {
-  return s.tags.includes(TAG_MIGRATED) && s.tags.includes(sourceTag(alias));
+  return hasMigratedTag(s.tags) && hasSourceTag(s.tags, alias);
 }
 
 export type MigrationStatus = 'not_in_ld' | 'not_migrated' | 'in_sync' | 'statsig_changed' | 'decisions_changed' | 'foreign' | 'other_source';
@@ -763,8 +756,8 @@ export function migrationStatus(
   const owner = flagOwner(ldFlag);
   if (!owner) return { status: 'foreign' };
   if (expected && (owner.id !== expected.id || owner.source !== expected.source)) return { status: 'other_source' };
-  const sync = ldFlag.customProperties[syncPropertyKey(ldEnv)]?.value;
-  if (!sync?.length) return { status: 'not_migrated' };
+  const sync = readSync(ldFlag.customProperties, ldEnv);
+  if (!sync) return { status: 'not_migrated' };
   const [fp, , syncedAt, dsh] = sync;
   const base = syncedAt ? { syncedAt } : {};
   if (fp !== current.statsigFingerprint) return { status: 'statsig_changed', ...base };

@@ -1,7 +1,9 @@
-# StatSig → LaunchDarkly Migration Console
+# LaunchDarkly Migration Console
 
-A browser-only app (static Vite SPA, no backend) that reads StatSig projects and compares them
-with one LaunchDarkly project. The spec is [PLAN.md](PLAN.md); project rules are in
+A browser-only app (static Vite SPA, no backend) that reads feature-flag projects from another
+provider and compares them with one LaunchDarkly project. StatSig is the only source today; the
+name, the repository and the provenance written into LD are source-neutral so more can follow
+(see the note at the top of PLAN.md). The spec is [PLAN.md](PLAN.md); project rules are in
 [CLAUDE.md](CLAUDE.md). Status: **M0 + M1** (foundations, source adapters, canonical model, demo
 dataset, LD connect + capability probe) **+ M3 for gates and dynamic configs** (mapper with
 decisions, mapping profile, planner, dry run, journaled executor with LD provenance, undo; configs

@@ -125,7 +125,7 @@ export function LdPanel({ workspaceId, workspace }: { workspaceId: string; works
           {workspace.isDemo && (
             <Callout tone="blue">
               Demo target: <code>{DEMO_LD_PROJECT.projectKey}</code>, an existing project. Later milestones write only resources tagged{' '}
-              <code>statsig-migrated</code> there, and “Reset demo” only ever removes those.
+              <code>migrated-from-statsig</code> there, and “Reset demo” only ever removes those.
             </Callout>
           )}
           {ld.error && <Callout tone="red">{ld.error}</Callout>}

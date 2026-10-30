@@ -116,15 +116,15 @@ describe.skipIf(!enabled)('executor against real LaunchDarkly (writes, then undo
     expect(e.on).toBe(true);
     expect(e.rules).toHaveLength(2);
     expect(e.fallthrough?.rollout?.variations.map((v) => v.weight)).toEqual([20000, 80000]);
-    expect(ncf.tags).toEqual(expect.arrayContaining(['statsig-migrated', 'statsig-src-web']));
-    expect(ncf.customProperties?.['statsig.sync.test']?.value?.length).toBe(4);
+    expect(ncf.tags).toEqual(expect.arrayContaining(['migrated-from-statsig', 'migration-src-web']));
+    expect(ncf.customProperties?.['migration.sync.test']?.value?.length).toBe(4);
     expect(ncf.environments!.production!.on).toBe(false);
 
     const express = (await client.getFlag(PROJECT, `${PREFIX}checkout_express_pay`))!;
     expect(express.environments!.test!.prerequisites).toEqual([{ key: `${PREFIX}new_checkout_flow`, variation: 0 }]);
     const seg = (await client.getSegment(PROJECT, 'test', `${PREFIX}vip_customers`))!;
     expect(seg.included).toHaveLength(25);
-    expect(seg.description).toMatch(/\[statsig-migration: src=web; id=vip_customers;/);
+    expect(seg.description).toMatch(/\[ld-migration: from=statsig; src=web; id=vip_customers;/);
 
     const again = await ex.run(newRun({ id: `again-${PREFIX}`, workspaceId: 'live', projectKey: PROJECT, label: 'again', dryRun: false, steps, now: new Date() }));
     expect(again.steps.filter((s) => s.status !== 'done').map((s) => [s.id, s.error])).toEqual([]);

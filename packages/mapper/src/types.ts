@@ -82,7 +82,7 @@ export interface DesiredFlagShell {
   temporary: boolean;
   tags: string[];
   clientSideAvailability: ClientSideAvailability;
-  /** Provenance (PLAN §3.3) minus the per-environment `statsig.sync.<env>` entries. */
+  /** Provenance (PLAN §3.3) minus the per-environment `migration.sync.<env>` entries. */
   customProperties: Record<string, CustomProperty>;
 }
 

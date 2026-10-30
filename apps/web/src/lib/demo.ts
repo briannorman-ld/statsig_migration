@@ -22,7 +22,7 @@ export const DEMO_LD_PROJECT = { instance: 'us' as const, projectKey: 'statsig-m
  */
 export const DEMO_ENV_HINTS: Record<string, string> = { staging: 'test' };
 
-/** Where the app is served from, e.g. `https://x.github.io/statsig_migration` (no trailing slash). */
+/** Where the app is served from, e.g. `https://x.github.io/ld-migration-console` (no trailing slash). */
 export function appRoot(): string {
   return new URL(import.meta.env.BASE_URL, location.origin).href.replace(/\/+$/, '');
 }

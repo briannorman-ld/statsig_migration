@@ -2,7 +2,7 @@
  * Feature gate → boolean LD flag (PLAN §10). Pure and deterministic: the same inputs always give
  * the same flag, decisions and fingerprints. `now` is an input because `time` conditions depend on it.
  */
-import { fingerprint, overridesForEnvironment, resolveRulesForEnvironment, targetingFingerprint, type CanonicalSnapshot, type Condition, type Gate, type Holdout } from '@sslm/canonical';
+import { fingerprint, migratedFromTag, overridesForEnvironment, PROP, resolveRulesForEnvironment, SOURCE_KIND_LABEL, sourceTag, targetingFingerprint, type CanonicalSnapshot, type Condition, type Gate, type Holdout, type MigrationSourceKind } from '@sslm/canonical';
 import { ALWAYS, andDnf, MAX_EXPANSION, NEVER, resolveKind, SkipItem, translateCondition, unique, type ConditionContext, type Dnf, type Loc } from './conditions.ts';
 import { DecisionCollector, DROP_CONDITION, DROP_RULE, SKIP } from './decisions.ts';
 import { sanitizeKey, sanitizeTag } from './profile.ts';
@@ -31,8 +31,11 @@ import type {
   VariationOrRollout,
 } from './types.ts';
 
-export const TAG_MIGRATED = 'statsig-migrated';
-export const sourceTag = (alias: string) => sanitizeTag(`statsig-src-${alias}`);
+/** The canonical model is StatSig's today; the kind is written into every resource (PLAN §3.3). */
+export const SOURCE_KIND: MigrationSourceKind = 'statsig';
+/** `migrated-from-statsig`: the marker tag on everything the console creates from this source. */
+export const TAG_MIGRATED = migratedFromTag(SOURCE_KIND);
+export { sourceTag };
 
 /** Variation indexes of every migrated gate: `[true, false]`. */
 export const PASS = 0;
@@ -59,7 +62,7 @@ export interface MapOutcome {
   applied: AppliedDecision[];
   stale: StaleDecision[];
   dependencies: Dependency[];
-  /** Fingerprint of everything in StatSig this result depends on (PLAN §3.3 `statsig.sync.<env>`). */
+  /** Fingerprint of everything in StatSig this result depends on (PLAN §3.3 `migration.sync.<env>`). */
   statsigFingerprint: string;
   decisionSetHash: string;
   /** Set when the item is not migrated (archived, or a decision chose "skip"). */
@@ -452,14 +455,16 @@ export function chooseClientSideAvailability(ctx: ConditionContext, targetApps: 
 
 /** Provenance custom properties (PLAN §3.3) minus the per-environment sync entries. */
 export function provenanceProperties(entity: { id: string; version?: number; owner?: { email?: string }; permalink?: string }, alias: string, statsigType: string): Record<string, CustomProperty> {
+  const label = SOURCE_KIND_LABEL[SOURCE_KIND];
   const props: Record<string, CustomProperty> = {
-    'statsig.id': { name: 'StatSig ID', value: [entity.id] },
-    'statsig.type': { name: 'StatSig type', value: [statsigType] },
-    'statsig.source': { name: 'StatSig source', value: [alias] },
+    [PROP.kind]: { name: 'Migrated from', value: [SOURCE_KIND] },
+    [PROP.id]: { name: `${label} ID`, value: [entity.id] },
+    [PROP.type]: { name: `${label} type`, value: [statsigType] },
+    [PROP.source]: { name: `${label} source`, value: [alias] },
   };
-  if (entity.version !== undefined) props['statsig.version'] = { name: 'StatSig version', value: [String(entity.version)] };
-  if (entity.owner?.email) props['statsig.owner'] = { name: 'StatSig owner', value: [entity.owner.email] };
-  if (entity.permalink) props['statsig.permalink'] = { name: 'StatSig link', value: [entity.permalink] };
+  if (entity.version !== undefined) props[PROP.version] = { name: `${label} version`, value: [String(entity.version)] };
+  if (entity.owner?.email) props[PROP.owner] = { name: `${label} owner`, value: [entity.owner.email] };
+  if (entity.permalink) props[PROP.permalink] = { name: `${label} link`, value: [entity.permalink] };
   return props;
 }
 

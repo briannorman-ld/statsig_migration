@@ -6,7 +6,7 @@
  */
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
-import type { CanonicalSnapshot } from '@sslm/canonical';
+import { readSync, type CanonicalSnapshot } from '@sslm/canonical';
 import { alertsSince, ldVersionsAtSync, latestSamples, monitorRows, pruneSamples, shouldSample, type MonitorAlert, type MonitorRow, type MonitoredItem } from '@sslm/monitoring';
 import { flagOwner } from '@sslm/planner';
 import type { MonitorSampleRecord, MonitorStateRecord } from '@sslm/store';
@@ -108,7 +108,7 @@ export async function checkMonitor(workspaceId: string, ld: LdSession, snapshots
       const owner = flagOwner(ldFlagState(f));
       if (!owner) continue;
       for (const env of Object.keys(statuses)) {
-        if (!f.customProperties?.[`statsig.sync.${env}`]?.value?.length) continue;
+        if (!readSync(f.customProperties ?? {}, env)) continue;
         const st = statuses[env]?.[f.key];
         if (!st) continue;
         const next = { flagKey: f.key, ldEnv: env, ldStatus: st.name, lastRequested: st.lastRequested ?? null, statsigChecksPerHour: checks.get(`${owner.source}/${owner.id}`) ?? null };
@@ -202,7 +202,7 @@ export function useMonitorNotifications(workspaceId: string, data: MonitoringDat
     });
     for (const a of fresh.slice(0, 5)) {
       try {
-        new Notification('StatSig → LaunchDarkly migration', { body: a.message, tag: `sslm-${workspaceId}-${a.row.flagKey}-${a.row.ldEnv}` });
+        new Notification('LaunchDarkly migration', { body: a.message, tag: `sslm-${workspaceId}-${a.row.flagKey}-${a.row.ldEnv}` });
       } catch {
         // Notifications may be unavailable in this context (e.g. an iframe); the in-app callout still shows.
       }

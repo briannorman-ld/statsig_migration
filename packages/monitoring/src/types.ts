@@ -2,7 +2,7 @@
  * Monitoring model (PLAN §14). Read-only: nothing here writes to StatSig or LaunchDarkly.
  *
  * Everything is per (resource, LD environment), like migration state (PLAN §7). The durable
- * part is read from the LD provenance the executor wrote (`statsig.sync.<env>`), so the same
+ * part is read from the LD provenance the executor wrote (`migration.sync.<env>`), so the same
  * answers come out on any machine; samples, the "LD authoritative" switch and the alert
  * baseline live in the browser (PLAN §3.3 item 2).
  */

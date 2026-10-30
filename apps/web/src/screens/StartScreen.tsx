@@ -64,12 +64,12 @@ export function StartScreen({ onOpen }: { onOpen: (workspaceId: string) => void 
 
       <main className="relative z-10 mx-auto w-full max-w-5xl flex-1 px-6 pt-16 pb-16">
         <div className="mb-12 max-w-2xl">
-          <p className="text-xs font-semibold tracking-[0.14em] text-fg-muted uppercase">StatSig → LaunchDarkly</p>
+          <p className="text-xs font-semibold tracking-[0.14em] text-fg-muted uppercase">LaunchDarkly</p>
           <h1 className="mt-3 font-display text-5xl font-bold tracking-[-0.03em] text-fg sm:text-6xl">
             Migration <span className="text-gradient-brand">Console</span>
           </h1>
           <p className="mt-5 text-base leading-relaxed text-fg-muted">
-            Reads your StatSig projects and compares them with one LaunchDarkly project, side by side. Every imperfect mapping becomes a decision you make once;
+            Reads your feature-flag projects from another provider, StatSig today, and compares them with one LaunchDarkly project, side by side. Every imperfect mapping becomes a decision you make once;
             nothing is dropped or approximated silently. Everything stays in this browser: no server, no account, and tokens are kept in memory, or encrypted on this device only if you ask.
           </p>
         </div>

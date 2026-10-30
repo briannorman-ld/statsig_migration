@@ -741,7 +741,7 @@ export const COVERAGE: CoverageEntry[] = [
     statsig: '(the migration itself)',
     ld: 'Tags, custom properties and audit comments on every migrated resource',
     status: 'migrates',
-    how: 'statsig-migrated and statsig-src-<alias> tags, statsig.* custom properties, per-environment sync fingerprints; the LD project is the migration ledger.',
+    how: 'migrated-from-statsig and migration-src-<alias> tags, migration.* custom properties (the keys are source-neutral; the display names say StatSig), per-environment sync fingerprints; the LD project is the migration ledger. Resources tagged by earlier builds (statsig-migrated, statsig.*) are still recognised.',
     edgeCases: ['1.8'],
   },
   {

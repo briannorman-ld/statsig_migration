@@ -1,4 +1,4 @@
-# StatSig → LaunchDarkly Migration Console
+# LaunchDarkly Migration Console (StatSig source today)
 
 `PLAN.md` is the spec: read the sections relevant to your task before changing anything. Research inputs (API specs, real StatSig config-spec fixtures, prior-art repos) are in `reference/`; see `reference/README.md`.
 

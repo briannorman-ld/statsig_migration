@@ -40,9 +40,6 @@ import {
   type LdToken,
 } from './schemas.ts';
 
-/** Tag on LD environments this app created (Mapping page), so a project reset removes only those. */
-export const TAG_MIGRATED_ENV = 'statsig-migrated';
-
 export interface LdSchemaIssue {
   path: string;
   issues: { path: string; message: string }[];

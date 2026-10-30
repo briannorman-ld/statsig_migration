@@ -1,4 +1,5 @@
-import { flagOwner, migrationStatus, syncPropertyKey } from '@sslm/planner';
+import { readSync, syncedEnvsOf } from '@sslm/canonical';
+import { flagOwner, migrationStatus } from '@sslm/planner';
 import type { AlertKind, FlagStatusInfo, LdFlagEnvInfo, LdFlagInfo, LdTraffic, Lifecycle, MonitorAlert, MonitorInput, MonitorRow, MonitorSample, MonitorStatus, MonitoredItem } from './types.ts';
 
 /** Statuses that mean "under monitoring" (the flag carries a sync for this environment). */
@@ -126,11 +127,8 @@ export function monitorRows(input: MonitorInput): MonitorRow[] {
     const owner = flagOwner(flag);
     if (!owner || seen.has(`${owner.source}/${owner.id}`) || !knownSources.has(owner.source)) continue;
     const kind = owner.type === 'config' || owner.type === 'autotune' ? owner.type : 'gate';
-    for (const prop of Object.keys(flag.customProperties)) {
-      if (!prop.startsWith('statsig.sync.')) continue;
-      const ldEnv = prop.slice('statsig.sync.'.length);
-      const sync = flag.customProperties[syncPropertyKey(ldEnv)]?.value;
-      if (!sync?.length) continue;
+    for (const ldEnv of syncedEnvsOf(flag.customProperties)) {
+      const sync = readSync(flag.customProperties, ldEnv)!;
       const k = itemKey(flag.key, ldEnv);
       const authoritative = settings.get(k)?.ldAuthoritative ?? false;
       const traffic = trafficOf(input.statuses[ldEnv]?.[flag.key]);

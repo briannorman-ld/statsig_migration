@@ -363,11 +363,11 @@ describe('flag shell and provenance (PLAN §3.3, §10.1)', () => {
     expect(r.shell).toMatchObject({
       key: 'kill_switch_payments',
       temporary: false,
-      tags: ['statsig-migrated', 'statsig-src-web', 'platform'],
+      tags: ['migrated-from-statsig', 'migration-src-web', 'platform'],
       defaults: { onVariation: 1, offVariation: 1 },
       variations: [{ value: true }, { value: false }],
     });
-    expect(r.shell.customProperties['statsig.id']).toEqual({ name: 'StatSig ID', value: ['kill_switch_payments'] });
+    expect(r.shell.customProperties['migration.id']).toEqual({ name: 'StatSig ID', value: ['kill_switch_payments'] });
   });
 });
 
@@ -730,7 +730,7 @@ describe('known edge cases (docs/KNOWN-EDGE-CASES.md)', () => {
       expect(r.skipped).toBeUndefined();
       expect(r.shell.variations.map((v) => v.name)).toEqual(['Lifestyle', 'Product']);
       expect(r.shell.variations[0]!.value).toEqual({ image: 'hero-lifestyle.jpg' });
-      expect(r.shell.customProperties['statsig.type']!.value).toEqual(['autotune']);
+      expect(r.shell.customProperties['migration.type']!.value).toEqual(['autotune']);
       expect(r.env).toMatchObject({ on: false, offVariation: 0, fallthrough: { rollout: { contextKind: 'user', variations: [{ variation: 0, weight: 50_000 }, { variation: 1, weight: 50_000 }] } } });
       expect(r.metric).toMatchObject({ key: 'hero_click', kind: 'custom', eventKey: 'hero_click', isNumeric: false, successCriteria: 'HigherThanBaseline' });
       expect(r.bandit).toMatchObject({ key: 'hero_image_autotune', flagKey: 'hero_image_autotune', ruleId: 'fallthrough', metricKey: 'hero_click', randomizationUnit: 'user' });
@@ -826,7 +826,7 @@ describe('dynamic configs → JSON flags (PLAN §10.1; edge cases 10.1–10.9)',
       ['UK', 1],
       ['Canada', 2],
     ]);
-    expect(r.shell.customProperties['statsig.type']!.value).toEqual(['config']);
+    expect(r.shell.customProperties['migration.type']!.value).toEqual(['config']);
     // Fixed variations, no rollout: nothing to acknowledge (the remaining decisions are the condition ones gates raise too).
     expect(types(r)).not.toContain('partial_rollout_rebucket');
     expect(r.unresolved.every((d) => d.severity === 'choice')).toBe(true);

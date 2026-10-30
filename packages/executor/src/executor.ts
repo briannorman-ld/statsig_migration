@@ -11,9 +11,10 @@
  * scheduled changes carrying the full targeting of that moment; ID lists above 15,000 become big
  * segments filled by a CSV import. The first write a plan refuses updates the capability matrix.
  */
+import { footer as provenanceFooter, parseFooter as parseProvenanceFooter, PROP, readSync, SOURCE_KIND_LABEL, withFooter as withProvenanceFooter, type FooterInput } from '@sslm/canonical';
 import { LdAuthError, LdWriteError, type JsonPatchOp, type LdClient, type LdExperiment, type LdExperimentationSettings, type LdFlag, type LdFlagConfig, type LdMetric, type LdSegment, type SemanticPatch } from '@sslm/ld-client';
 import { flagOwner, ownsSegment, syncPropertyKey, type PlanStep } from '@sslm/planner';
-import type { DesiredBandit, DesiredFlagEnv, DesiredRule, DesiredSegment, VariationOrRollout } from '@sslm/mapper';
+import { SOURCE_KIND, type DesiredBandit, type DesiredFlagEnv, type DesiredRule, type DesiredSegment, type VariationOrRollout } from '@sslm/mapper';
 
 export type LdWriter = Pick<
   LdClient,
@@ -615,7 +616,7 @@ export class Executor {
         // A retried create after an interrupted run: it's ours if it carries our provenance.
         flag = await this.c.getFlag(this.p, s.key, this.signal);
         const owner = flag && flagOwner({ key: flag.key, tags: flag.tags ?? [], customProperties: flag.customProperties ?? {} });
-        if (!flag || owner?.id !== d.customProperties['statsig.id']?.value[0]) throw e;
+        if (!flag || owner?.id !== d.customProperties[PROP.id]?.value[0]) throw e;
       }
       rec.created = true;
       this.flags.set(s.key, flag);
@@ -644,7 +645,7 @@ export class Executor {
     const comment = this.comment(run, s);
     // Scheduled changes an earlier sync created (recorded in the sync provenance) and any this
     // step created before an interrupted attempt: both are replaced below.
-    const previous = unique([...scheduledIdsFrom(flag.customProperties?.[syncPropertyKey(s.ldEnv)]?.value), ...(rec.scheduledChangeIds ?? [])]);
+    const previous = unique([...scheduledIdsFrom(readSync(flag.customProperties ?? {}, s.ldEnv)), ...(rec.scheduledChangeIds ?? [])]);
 
     let approval = false;
     try {
@@ -701,7 +702,7 @@ export class Executor {
   }
 
   /**
-   * Provenance, `statsig.sync.<env>` (PLAN §3.3): `[fingerprint, version, syncedAt, decisionSetHash, sc:<id>…]`.
+   * Provenance, `migration.sync.<env>` (PLAN §3.3): `[fingerprint, version, syncedAt, decisionSetHash, sc:<id>…]`.
    * LD refuses custom-property instructions in a patch with environment instructions, so it's a
    * second write; it runs only after targeting succeeded (or was approved and applied), so LD
    * never claims a sync that didn't happen.
@@ -709,7 +710,7 @@ export class Executor {
   private async writeProvenance(run: RunRecord, s: Extract<PlanStep, { op: 'update_flag_env' }>, scheduledChangeIds: string[]): Promise<void> {
     const prop = syncPropertyKey(s.ldEnv);
     const value = [s.provenance.statsigFingerprint, String(s.provenance.statsigVersion ?? ''), this.now().toISOString(), s.provenance.decisionSetHash, ...scheduledChangeIds.map((id) => `sc:${id}`)];
-    await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: { name: `StatSig sync (${s.ldEnv})`, value } }], { comment: this.comment(run, s), dryRun: run.dryRun, signal: this.signal });
+    await this.c.patchFlagJson(this.p, s.key, [{ op: 'add', path: `/customProperties/${pointer(prop)}`, value: { name: `${SOURCE_KIND_LABEL[SOURCE_KIND]} sync (${s.ldEnv})`, value } }], { comment: this.comment(run, s), dryRun: run.dryRun, signal: this.signal });
   }
 
   /** The semantic-patch instructions that make an environment match `state` (also used for scheduled changes and approvals). */
@@ -945,7 +946,7 @@ function shellPatch(flag: LdFlag, d: Extract<PlanStep, { op: 'upsert_flag_shell'
   return ops;
 }
 
-/** `sc:<id>` entries of a `statsig.sync.<env>` value: the scheduled changes an earlier sync created. */
+/** `sc:<id>` entries of a `migration.sync.<env>` value: the scheduled changes an earlier sync created. */
 export function scheduledIdsFrom(value: (string | null | undefined)[] | null | undefined): string[] {
   return (value ?? []).filter((v): v is string => typeof v === 'string' && v.startsWith('sc:')).map((v) => v.slice(3));
 }
@@ -1002,23 +1003,14 @@ function union(a: string[], b: string[]): string[] {
   return [...new Set([...a, ...b])];
 }
 
-const FOOTER_RE = /\n*\[statsig-migration: [^\]]*\]\s*$/;
-
 /** Segments have no custom properties, so provenance goes in a description footer (PLAN §3.3). */
 export function footer(p: { sourceAlias: string; statsigId: string; statsigFingerprint: string; decisionSetHash: string }, at: Date): string {
-  return `[statsig-migration: src=${p.sourceAlias}; id=${p.statsigId}; fp=${p.statsigFingerprint}; d=${p.decisionSetHash}; at=${at.toISOString()}]`;
+  const input: FooterInput = { kind: SOURCE_KIND, sourceAlias: p.sourceAlias, sourceId: p.statsigId, sourceFingerprint: p.statsigFingerprint, decisionSetHash: p.decisionSetHash };
+  return provenanceFooter(input, at);
 }
 
-export function withFooter(description: string, f: string): string {
-  const base = description.replace(FOOTER_RE, '');
-  return base ? `${base}\n\n${f}` : f;
-}
-
-export function parseFooter(description: string | null | undefined): Record<string, string> | null {
-  const m = /\[statsig-migration: ([^\]]*)\]\s*$/.exec(description ?? '');
-  if (!m) return null;
-  return Object.fromEntries(m[1]!.split(';').map((kv) => kv.trim().split('=') as [string, string]).filter((x) => x.length === 2));
-}
+export const withFooter = withProvenanceFooter;
+export const parseFooter = parseProvenanceFooter;
 
 /** `IterationInput` for a drafted bandit (reference/launchdarkly/openapi.json): treatments by variation ID, the flag's default rule. */
 export function banditIteration(d: DesiredBandit, flag: LdFlag, flagConfigVersion: number): Record<string, unknown> {

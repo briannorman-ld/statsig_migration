@@ -153,6 +153,9 @@ importers:
 
   packages/executor:
     dependencies:
+      '@sslm/canonical':
+        specifier: workspace:*
+        version: link:../canonical
       '@sslm/ld-client':
         specifier: workspace:*
         version: link:../ld-client

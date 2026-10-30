@@ -4,3 +4,4 @@ export * from './environment.ts';
 export * from './targeting.ts';
 export * from './inventory.ts';
 export * from './diff.ts';
+export * from './provenance.ts';

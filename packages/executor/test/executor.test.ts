@@ -117,9 +117,9 @@ const shell = (key: string): PlanStep => ({
     ],
     defaults: { onVariation: 1, offVariation: 1 },
     temporary: true,
-    tags: ['statsig-migrated', 'statsig-src-web'],
+    tags: ['migrated-from-statsig', 'migration-src-web'],
     clientSideAvailability: { usingEnvironmentId: true, usingMobileKey: true },
-    customProperties: { 'statsig.id': { name: 'StatSig ID', value: [key] }, 'statsig.source': { name: 'StatSig source', value: ['web'] } },
+    customProperties: { 'migration.id': { name: 'StatSig ID', value: [key] }, 'migration.source': { name: 'StatSig source', value: ['web'] } },
   },
 });
 const env = (key: string, deps: string[] = [`shell:${key}`]): PlanStep => ({
@@ -148,7 +148,7 @@ describe('Executor', () => {
     const out = await ex.run(run);
     expect(out.status).toBe('done');
     expect(out.steps.map((s) => s.created ?? false)).toEqual([true, false]);
-    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'semantic a test', 'json a /customProperties/statsig.sync.test']);
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'semantic a test', 'json a /customProperties/migration.sync.test']);
   });
 
   it('journals every step before and after it runs', async () => {
@@ -206,7 +206,7 @@ describe('Executor', () => {
     const checked = await ex.checkApprovals(out);
     expect(checked.steps[1]).toMatchObject({ status: 'done', approvals: [{ status: 'applied', reviewStatus: 'approved' }] });
     expect(checked.steps[1]!.message).toMatch(/Approved and applied/);
-    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['json a /customProperties/statsig.sync.test']);
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['json a /customProperties/migration.sync.test']);
   });
 
   it('a declined approval fails the step; a pending one is withdrawn by undo', async () => {
@@ -227,7 +227,7 @@ describe('Executor', () => {
 
   it('a dry run in an approval-required environment reports the request it would file', async () => {
     const ld = fakeLd({ patchFlagSemantic: async () => Promise.reject(new LdWriteError(405, '/flags/p/a', null)) });
-    ld.flags.set('a', ld.flag('a', { tags: ['statsig-migrated'], customProperties: { 'statsig.id': { name: 'StatSig ID', value: ['a'] }, 'statsig.source': { name: 'StatSig source', value: ['web'] } } }));
+    ld.flags.set('a', ld.flag('a', { tags: ['migrated-from-statsig'], customProperties: { 'migration.id': { name: 'StatSig ID', value: ['a'] }, 'migration.source': { name: 'StatSig source', value: ['web'] } } }));
     const { ex } = setup(ld.client, []);
     const out = await ex.run(newRun({ id: 'dry-2', workspaceId: 'w', projectKey: 'p', label: 'dry', dryRun: true, steps: [env('a', [])], now: new Date() }));
     expect(out.steps[0]!.status).toBe('done');
@@ -307,7 +307,7 @@ describe('Executor', () => {
       expect(resumed.status).toBe('done');
       expect(resumed.stopReason).toBeUndefined();
       expect(resumed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done']);
-      expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'semantic a test', 'json a /customProperties/statsig.sync.test', 'create b']);
+      expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'semantic a test', 'json a /customProperties/migration.sync.test', 'create b']);
     });
 
     it('a write aborted in flight puts its step back to pending (not failed) so a resume re-checks it', async () => {
@@ -359,7 +359,7 @@ describe('Executor', () => {
     const { ex } = setup(ld.client, []);
     const dry = newRun({ id: 'dry-1', workspaceId: 'w', projectKey: 'p', label: 'dry', dryRun: true, steps: [shell('a'), env('a')], now: new Date() });
     const out = await ex.run(dry);
-    expect(out.steps.map((s) => s.message)).toEqual(['Would create boolean flag “a” (statsig-migrated, statsig-src-web).', 'Would set targeting in test: on, 0 rules, default true.']);
+    expect(out.steps.map((s) => s.message)).toEqual(['Would create boolean flag “a” (migrated-from-statsig, migration-src-web).', 'Would set targeting in test: on, 0 rules, default true.']);
     expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual([]);
   });
 });
@@ -377,7 +377,7 @@ describe('scheduled changes (PLAN §5.1; time_condition → schedule)', () => {
     const out = await ex.run(run);
     expect(out.status).toBe('done');
     expect(out.steps[1]!.scheduledChangeIds).toEqual(['sc-1']);
-    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'semantic a test', `schedule test/a ${new Date(flip).toISOString()}`, 'json a /customProperties/statsig.sync.test']);
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['create a', 'semantic a test', `schedule test/a ${new Date(flip).toISOString()}`, 'json a /customProperties/migration.sync.test']);
     const sc = ld.scheduled.get('sc-1')!;
     expect(sc.instructions.map((i) => (i as { kind: string }).kind)).toEqual(['turnFlagOn', 'updateOffVariation', 'updateFallthroughVariationOrRollout', 'replaceRules', 'replaceTargets']);
     expect((sc.instructions[2] as { variationId: string }).variationId).toBe('a-t');
@@ -386,14 +386,14 @@ describe('scheduled changes (PLAN §5.1; time_condition → schedule)', () => {
 
   it('a re-sync deletes the scheduled changes the previous sync recorded before creating the new set', async () => {
     const ld = fakeLd();
-    const f = ld.flag('a', { tags: ['statsig-migrated'], customProperties: { 'statsig.id': { name: 'StatSig ID', value: ['a'] }, 'statsig.source': { name: 'StatSig source', value: ['web'] }, 'statsig.sync.test': { name: 'sync', value: ['fp', '1', '2026-01-01T00:00:00Z', 'dh', 'sc:old-1', 'sc:old-2'] } } });
+    const f = ld.flag('a', { tags: ['migrated-from-statsig'], customProperties: { 'migration.id': { name: 'StatSig ID', value: ['a'] }, 'migration.source': { name: 'StatSig source', value: ['web'] }, 'migration.sync.test': { name: 'sync', value: ['fp', '1', '2026-01-01T00:00:00Z', 'dh', 'sc:old-1', 'sc:old-2'] } } });
     ld.flags.set('a', f);
     ld.scheduled.set('old-1', { executionDate: 1, instructions: [] });
     const { ex, run } = setup(ld.client, [scheduledEnv('a')]);
     run.steps[0]!.step.deps = [];
     const out = await ex.run(run);
     expect(out.status).toBe('done');
-    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['semantic a test', 'unschedule old-1', 'unschedule old-2', `schedule test/a ${new Date(flip).toISOString()}`, 'json a /customProperties/statsig.sync.test']);
+    expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['semantic a test', 'unschedule old-1', 'unschedule old-2', `schedule test/a ${new Date(flip).toISOString()}`, 'json a /customProperties/migration.sync.test']);
     expect(scheduledIdsFrom(['fp', '1', 't', 'dh', 'sc:x', 'sc:y'])).toEqual(['x', 'y']);
   });
 
@@ -405,7 +405,7 @@ describe('scheduled changes (PLAN §5.1; time_condition → schedule)', () => {
     const out = await ex.run(run);
     expect(out.steps[1]).toMatchObject({ status: 'failed', scheduledChangeIds: [], capability: { key: 'scheduled_changes', status: 'unavailable' } });
     expect(out.steps[1]!.error).toMatch(/refused the scheduled change/);
-    expect(ld.calls).not.toContainEqual('json a /customProperties/statsig.sync.test');
+    expect(ld.calls).not.toContainEqual('json a /customProperties/migration.sync.test');
     expect(learned).toHaveLength(1);
   });
 
@@ -442,7 +442,7 @@ describe('big segments (PLAN §8.3 big_segment)', () => {
     key: 'fraud_blocklist',
     exists: false,
     adopt: false,
-    desired: { key: 'fraud_blocklist', ldEnv: 'test', statsigEnv: 'staging', name: 'Fraud blocklist', description: '', tags: ['statsig-migrated', 'statsig-src-web'], rules: [], included: [], includedContexts: [], unbounded: { contextKind: 'user', ids } },
+    desired: { key: 'fraud_blocklist', ldEnv: 'test', statsigEnv: 'staging', name: 'Fraud blocklist', description: '', tags: ['migrated-from-statsig', 'migration-src-web'], rules: [], included: [], includedContexts: [], unbounded: { contextKind: 'user', ids } },
     provenance: { sourceAlias: 'web', statsigType: 'segment', statsigId: 'fraud_blocklist', statsigFingerprint: 'fp', decisionSetHash: 'dh' },
   };
   const withSegments = () => {
@@ -473,7 +473,7 @@ describe('big segments (PLAN §8.3 big_segment)', () => {
 
   it('refuses to turn an existing standard segment into a big one in place', async () => {
     const { ld, segments } = withSegments();
-    segments.set('fraud_blocklist', { key: 'fraud_blocklist', name: 'x', tags: ['statsig-migrated', 'statsig-src-web'], unbounded: false });
+    segments.set('fraud_blocklist', { key: 'fraud_blocklist', name: 'x', tags: ['migrated-from-statsig', 'migration-src-web'], unbounded: false });
     const ex = new Executor({ client: ld.client, projectKey: 'p', journal: { save: async () => undefined }, sleep: async () => undefined });
     const out = await ex.run(newRun({ id: 'r', workspaceId: 'w', projectKey: 'p', label: 'big', dryRun: false, steps: [big], now: new Date() }));
     expect(out.steps[0]!.error).toMatch(/as a standard segment/);
@@ -501,14 +501,14 @@ describe('big segments (PLAN §8.3 big_segment)', () => {
 
 describe('segment approval instructions', () => {
   it('diffs rules and targets into semantic-patch instructions, chunking targets at 1,500', () => {
-    const current = { key: 's', name: 's', tags: ['statsig-migrated'], rules: [{ _id: 'r1', clauses: [] }], included: ['u1', 'u2'], includedContexts: [{ contextKind: 'org', values: ['o1'] }] };
-    const desired = { key: 's', ldEnv: 'test', statsigEnv: 'staging', name: 's', description: '', tags: ['statsig-migrated', 'statsig-src-web'], rules: [{ description: 'Beta', clauses: [{ contextKind: 'user', attribute: 'email', op: 'endsWith' as const, values: ['@acme.test'], negate: false }] }], included: ['u2', ...Array.from({ length: 1600 }, (_, i) => `n${i}`)], includedContexts: [{ contextKind: 'org', values: ['o2'] }] };
+    const current = { key: 's', name: 's', tags: ['migrated-from-statsig'], rules: [{ _id: 'r1', clauses: [] }], included: ['u1', 'u2'], includedContexts: [{ contextKind: 'org', values: ['o1'] }] };
+    const desired = { key: 's', ldEnv: 'test', statsigEnv: 'staging', name: 's', description: '', tags: ['migrated-from-statsig', 'migration-src-web'], rules: [{ description: 'Beta', clauses: [{ contextKind: 'user', attribute: 'email', op: 'endsWith' as const, values: ['@acme.test'], negate: false }] }], included: ['u2', ...Array.from({ length: 1600 }, (_, i) => `n${i}`)], includedContexts: [{ contextKind: 'org', values: ['o2'] }] };
     const out = segmentInstructions(current, desired);
     expect(out.map((i) => i.kind)).toEqual(['removeRule', 'addRule', 'removeIncludedUsers', 'addIncludedUsers', 'addIncludedUsers', 'removeIncludedTargets', 'addIncludedTargets', 'addTags']);
     expect(out[2]!.values).toEqual(['u1']);
     expect(out[3]!.values).toHaveLength(1500);
     expect(out[4]!.values).toHaveLength(100);
-    expect(out[7]).toEqual({ kind: 'addTags', values: ['statsig-src-web'] });
+    expect(out[7]).toEqual({ kind: 'addTags', values: ['migration-src-web'] });
   });
 
   it('refuses weighted rules, which approvals cannot express in one step', () => {
@@ -518,7 +518,7 @@ describe('segment approval instructions', () => {
 
   it('a 405 on a segment write files a generic approval request with the segment resource id', async () => {
     const ld = fakeLd({
-      getSegment: async () => ({ key: 'beta', name: 'beta', tags: ['statsig-migrated', 'statsig-src-web'], rules: [], included: [] }),
+      getSegment: async () => ({ key: 'beta', name: 'beta', tags: ['migrated-from-statsig', 'migration-src-web'], rules: [], included: [] }),
       patchSegmentJson: async () => Promise.reject(new LdWriteError(405, '/segments/p/test/beta', null)),
     });
     const step: PlanStep = {
@@ -529,7 +529,7 @@ describe('segment approval instructions', () => {
       key: 'beta',
       exists: true,
       adopt: false,
-      desired: { key: 'beta', ldEnv: 'test', statsigEnv: 'staging', name: 'beta', description: '', tags: ['statsig-migrated', 'statsig-src-web'], rules: [], included: ['u1'], includedContexts: [] },
+      desired: { key: 'beta', ldEnv: 'test', statsigEnv: 'staging', name: 'beta', description: '', tags: ['migrated-from-statsig', 'migration-src-web'], rules: [], included: ['u1'], includedContexts: [] },
       provenance: { sourceAlias: 'web', statsigType: 'segment', statsigId: 'beta', statsigFingerprint: 'fp', decisionSetHash: 'dh' },
     };
     const { ex, run } = setup(ld.client, [step]);
@@ -549,7 +549,7 @@ describe('segment provenance footer', () => {
           { value: { copy: 'A' }, name: 'A' },
           { value: { copy: 'B' }, name: 'B' },
         ],
-        customProperties: { 'statsig.id': { name: 'StatSig ID', value: [key] }, 'statsig.type': { name: 'StatSig type', value: ['autotune'] }, 'statsig.source': { name: 'StatSig source', value: ['web'] } },
+        customProperties: { 'migration.id': { name: 'StatSig ID', value: [key] }, 'migration.type': { name: 'StatSig type', value: ['autotune'] }, 'migration.source': { name: 'StatSig source', value: ['web'] } },
       },
     });
     const metric: PlanStep = {
@@ -559,7 +559,7 @@ describe('segment provenance footer', () => {
       key: 'promo_click',
       exists: false,
       adopt: false,
-      desired: { key: 'promo_click', name: 'promo_click', description: '', kind: 'custom', eventKey: 'promo_click', isNumeric: false, successCriteria: 'HigherThanBaseline', tags: ['statsig-migrated', 'statsig-src-web'], analysisUnits: ['user'] },
+      desired: { key: 'promo_click', name: 'promo_click', description: '', kind: 'custom', eventKey: 'promo_click', isNumeric: false, successCriteria: 'HigherThanBaseline', tags: ['migrated-from-statsig', 'migration-src-web'], analysisUnits: ['user'] },
       provenance: { sourceAlias: 'web', statsigType: 'metric', statsigId: 'promo_click', statsigFingerprint: 'fp', decisionSetHash: 'dh' },
     };
     const unit: PlanStep = { id: 'randomization_unit:company', deps: [], op: 'ensure_randomization_unit', key: 'company' };
@@ -589,12 +589,12 @@ describe('segment provenance footer', () => {
         metricKey: 'promo_click',
         randomizationUnit: 'user',
         reallocationFrequencyMillis: 3_600_000,
-        tags: ['statsig-migrated', 'statsig-src-web'],
+        tags: ['migrated-from-statsig', 'migration-src-web'],
       },
       provenance: { sourceAlias: 'web', statsigType: 'autotune', statsigId: key, statsigVersion: 2, statsigFingerprint: 'fp', decisionSetHash: 'dh' },
     });
     const jsonFlag = (ld: ReturnType<typeof fakeLd>, key: string): LdFlag => ({
-      ...ld.flag(key, { tags: ['statsig-migrated', 'statsig-src-web'], customProperties: { 'statsig.id': { name: 'StatSig ID', value: [key] }, 'statsig.source': { name: 'StatSig source', value: ['web'] } } }),
+      ...ld.flag(key, { tags: ['migrated-from-statsig', 'migration-src-web'], customProperties: { 'migration.id': { name: 'StatSig ID', value: [key] }, 'migration.source': { name: 'StatSig source', value: ['web'] } } }),
       variations: [
         { _id: `${key}-a`, value: { copy: 'A' } },
         { _id: `${key}-b`, value: { copy: 'B' } },
@@ -617,9 +617,9 @@ describe('segment provenance footer', () => {
       expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual([
         'put settings user,company',
         'create metric promo_click',
-        'json promo /clientSideAvailability,/customProperties/statsig.type',
+        'json promo /clientSideAvailability,/customProperties/migration.type',
         'semantic promo test',
-        'json promo /customProperties/statsig.sync.test',
+        'json promo /customProperties/migration.sync.test',
         'create experiment test/promo',
       ]);
       const created = ld.experiments.get('test/promo')!;
@@ -641,12 +641,12 @@ describe('segment provenance footer', () => {
       const ld = fakeLd();
       ld.flags.set('promo', jsonFlag(ld, 'promo'));
       ld.metrics.set('promo_click', { key: 'promo_click', kind: 'custom', eventKey: 'promo_click', tags: ['other'] });
-      ld.experiments.set('test/promo', { key: 'promo', name: 'promo', type: 'mab', tags: ['statsig-migrated', 'statsig-src-web'], draftIteration: { status: 'not_started', hypothesis: '' } });
+      ld.experiments.set('test/promo', { key: 'promo', name: 'promo', type: 'mab', tags: ['migrated-from-statsig', 'migration-src-web'], draftIteration: { status: 'not_started', hypothesis: '' } });
       const { ex, run } = setup(ld.client, [metric, bandit('promo')]);
       const out = await ex.run(run);
       expect(out.status).toBe('done');
       expect(ld.calls.filter((c) => !c.startsWith('get'))).toEqual(['json metric promo_click /tags', 'iteration test/promo']);
-      ld.experiments.set('test/promo', { key: 'promo', name: 'promo', type: 'mab', tags: ['statsig-migrated', 'statsig-src-web'], currentIteration: { status: 'running', hypothesis: '' } });
+      ld.experiments.set('test/promo', { key: 'promo', name: 'promo', type: 'mab', tags: ['migrated-from-statsig', 'migration-src-web'], currentIteration: { status: 'running', hypothesis: '' } });
       const again = await ex.run(newRun({ id: 'run-2', workspaceId: 'w', projectKey: 'p', label: 't', dryRun: false, steps: [bandit('promo')], now: new Date() }));
       expect(again.steps[0]!.message).toMatch(/running iteration; left as is/);
     });
@@ -667,6 +667,6 @@ describe('segment provenance footer', () => {
     const f = footer({ sourceAlias: 'web', statsigId: 'vip', statsigFingerprint: 'abc', decisionSetHash: 'd' }, new Date('2026-10-22T00:00:00Z'));
     const once = withFooter('VIPs', f);
     expect(withFooter(once, f)).toBe(once);
-    expect(parseFooter(once)).toEqual({ src: 'web', id: 'vip', fp: 'abc', d: 'd', at: '2026-10-22T00:00:00.000Z' });
+    expect(parseFooter(once)).toEqual({ from: 'statsig', src: 'web', id: 'vip', fp: 'abc', d: 'd', at: '2026-10-22T00:00:00.000Z' });
   });
 });

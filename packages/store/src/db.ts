@@ -180,6 +180,8 @@ export class MigratorDb extends Dexie {
   monitorState!: EntityTable<MonitorStateRecord, "workspaceId">;
   vaults!: EntityTable<VaultRecord, "workspaceId">;
 
+  // The IndexedDB name predates the app's rename and stays: changing it would orphan every
+  // user's local workspaces.
   constructor(name = "statsig-ld-migrator") {
     super(name);
     this.version(1).stores({

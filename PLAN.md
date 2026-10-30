@@ -1,4 +1,6 @@
-# StatSig → LaunchDarkly Migration Console — Plan (v4)
+# LaunchDarkly Migration Console — Plan (v4)
+
+> The console started as, and for now still is, a StatSig → LaunchDarkly migration: the canonical model and mapper speak StatSig's vocabulary. The name, the repository and the provenance written into LD projects are source-neutral so other sources (FeatureHub, Unleash, Split, another LD project, …) can be added behind a provider-neutral model without renaming anything a customer already has.
 
 A **browser-only** web app (a static site with no backend, no accounts and no server-side storage) that reads one or more StatSig projects and writes to one LaunchDarkly project. Migration is one-way only, StatSig → LD.
 
@@ -106,7 +108,7 @@ User's browser
 - **No Next.js:** with no server there is no need for it. A Vite SPA is simpler and deploys anywhere.
 - **Distribution:**
   - The hosted URL.
-  - A **downloadable build** (zip, or `npx statsig-ld-migrator`, served from localhost) for customers whose security teams want to run it themselves.
+  - A **downloadable build** (zip, or `npx ld-migration-console`, served from localhost) for customers whose security teams want to run it themselves.
 - **Libraries:**
   - Specs: `DecompressionStream` handles gzip; brotli needs a WASM decoder.
   - Hashing: WebCrypto SHA-256, for ID-list reconciliation.
@@ -114,15 +116,17 @@ User's browser
 
 ### 3.3 Where state lives
 Two places, and nowhere else.
-1. **The user's LD project: durable, shared provenance.** Every resource the app writes carries:
+1. **The user's LD project: durable, shared provenance.** The scheme is source-neutral (`packages/canonical/src/provenance.ts`): every key names the *kind* of source, so resources migrated from StatSig and from a later source can share one LD project. Every resource the app writes carries:
    - **Flags:**
-     - Tags `statsig-migrated` and `statsig-src-<alias>`.
-     - `customProperties`:
-       - `statsig.id`, `statsig.type`, `statsig.source`
-       - one property per environment, `statsig.sync.<envKey>`, set to `[<statsigFingerprint>, <statsigVersion>, <syncedAtISO>, <decisionSetHash>]`
+     - Tags `migrated-from-<kind>` (today `migrated-from-statsig`) and `migration-src-<alias>`.
+     - `customProperties` (stable keys; the display names carry the provider, e.g. "StatSig ID"):
+       - `migration.kind`, `migration.id`, `migration.type`, `migration.source`
+       - one property per environment, `migration.sync.<envKey>`, set to `[<sourceFingerprint>, <sourceVersion>, <syncedAtISO>, <decisionSetHash>]`
      - Patch `comment`s, which show in the LD audit log.
-   - **Segments** have no custom properties, so they get tags plus a machine-readable footer in the description (`[statsig-migration: src=…; id=…; fp=…; at=…]`).
+   - **Segments** have no custom properties, so they get tags plus a machine-readable footer in the description (`[ld-migration: from=statsig; src=…; id=…; fp=…; d=…; at=…]`).
    - **Metrics, experiments, layers and holdouts** get tags and a description footer.
+   - **Environments** the console creates get `migrated-from-<kind>`, so a project reset removes only those.
+   - **Legacy:** builds before 2026-10-30 wrote `statsig-migrated` / `statsig-src-<alias>` tags, `statsig.*` properties and `[statsig-migration: …]` footers. The readers accept both schemes; writers emit only the new one, so a re-sync upgrades a resource in place.
 
    So *any* teammate, on any machine, who opens the app with the same tokens sees the true migration status, read from LD itself. The status survives a cleared browser. The LD audit log is the authoritative write history.
 2. **The browser (IndexedDB), per workspace:**
@@ -280,7 +284,7 @@ Both adapters produce the same **canonical model**: `Gate`, `Config`, `Experimen
 - **Base URL and headers:** `/api/v2`. Headers are `Authorization: <token>` and `LD-API-Version: 20240415`, or `beta` for metric groups, release pipelines, flag links, approval settings, evaluation usage and the IP allowlist.
   - Beta routes return **403 without the beta header**, so a 403 doesn't always mean "no permission". Always send the header on beta routes before treating 403 as a permission failure.
 - **Semantic patch everywhere:** `replaceRules`, `replaceTargets`, `replacePrerequisites`, `updateFallthroughVariationOrRollout`, `updateOffVariation`, `turnFlagOn` / `turnFlagOff`. One atomic PATCH per (flag, environment), so a re-sync converges.
-  - *Checked live (M3):* LD rejects custom-property instructions in a patch that has environment instructions (400), so the `statsig.sync.<env>` provenance is a second JSON patch, written only after the targeting patch succeeds.
+  - *Checked live (M3):* LD rejects custom-property instructions in a patch that has environment instructions (400), so the `migration.sync.<env>` provenance is a second JSON patch, written only after the targeting patch succeeds.
   - *Checked live (M3):* writes to one flag in quick succession hit a per-flag rate limit (429). The client backs off up to 8 attempts / 30 s; a run that still fails can be resumed.
 - **Rate limits:** the browser can't read the `X-Ratelimit-*` or `Retry-After` headers (§3.1), so we use **adaptive throttling**:
   - Start at modest concurrency (about 3 in flight). On a 429, halve the rate and back off exponentially with jitter, then slowly ramp back up. This is AIMD-style.
@@ -506,8 +510,8 @@ map(canonicalEntity, mappingProfile, resolutions, ldCapabilities, targetEnv)
   - Collisions across StatSig namespaces (gate, config and experiment can share a name) or across consolidated sources go to `key_collision` / `source_collision`.
   - `name`, `description` and `tags` are copied (enrichment applies for spec sources). `temporary` comes from `type`, and the maintainer from the owner.
 - **Provenance:**
-  - tags `statsig-migrated` and `statsig-src-<alias>`
-  - `customProperties`: `statsig.id`, `statsig.type`, `statsig.source`, `statsig.version`
+  - tags `migrated-from-statsig` and `migration-src-<alias>`
+  - `customProperties`: `migration.kind`, `migration.id`, `migration.type`, `migration.source`, `migration.version` (§3.3)
   - a flag link (beta) to the StatSig `permalink`
   - every PATCH `comment` reads `"Synced from StatSig <type> <id> v<n> (source <alias>) by <user>, run #<id>"`
 - **Gate:** boolean. Off variation and fallthrough are both `false`.
@@ -665,7 +669,7 @@ Policy: **no running experiment is moved mid-flight.** What carries over is the 
 - **StatSig changed:** the StatSig fingerprint differs from the one at sync. Source: Console API refresh or a new spec upload.
 - **LD changed:** the LD `_version` differs and the targeting diff isn't empty.
 - **Conflict:** both changed.
-- Fingerprints at sync time are read from the LD provenance (`statsig.sync.<env>`), so drift detection works on any machine, even without the local workspace.
+- Fingerprints at sync time are read from the LD provenance (`migration.sync.<env>`), so drift detection works on any machine, even without the local workspace.
 - Re-sync is always manual (§7), and shows the diff plus any new or stale decisions.
 
 **Cutover, per (flag, environment)**
@@ -760,7 +764,7 @@ Small ID lists are inline in the spec as plaintext and are fine. The app lists a
 3. In StatSig, what does a dynamic config return when a user **matches a rule but falls outside its pass percentage**: the default value, or does evaluation fall through to the next rule? Test in a sandbox project.
 4. Do **archived entities** appear in the config spec? We believe not.
 5. Does LD `dryRun=true` still return **405** in environments that require approvals?
-6. Do LD **custom-property** limits (count per flag, value length) leave room for one `statsig.sync.<env>` property per environment? The fallback is a single packed property.
+6. Do LD **custom-property** limits (count per flag, value length) leave room for one `migration.sync.<env>` property per environment? The fallback is a single packed property.
 7. Do LD audit-log entries include a full `previousVersion`, so undo works without a local pre-image?
 
 ---
